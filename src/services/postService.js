@@ -1,0 +1,226 @@
+const { PostDAO } = require('../daos/postDAO');
+const { DrawerDAO } = require('../daos/drawerDAO');
+const { generateUUID } = require('../utils/uuid');
+const eventBus = require('../events/eventBus');
+const pool = require('../../config/db');
+const { NotFoundError, ForbiddenError } = require('../core/errors');
+const { TargetType, ActionType } = require('../utils/typeDefinitions');
+
+class PostService {
+  async getPosts(drawerId, query, userId) {
+    const member = await DrawerDAO.getMember(pool, drawerId, userId);
+    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 조회할 수 있습니다');
+    return await PostDAO.findByDrawerId(pool, drawerId, query);
+  }
+
+  async getPost(postId) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+    return post;
+  }
+
+  async create(data, context) {
+    const member = await DrawerDAO.getMember(pool, data.drawer_id, context.sender_id);
+    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 게시물을 작성할 수 있습니다');
+
+    const post = await PostDAO.create(pool, {
+      ...data,
+      id: data.id || generateUUID(),
+      author_id: context.sender_id,
+    });
+
+    eventBus.emit('sync', {
+      drawer_id: data.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.CREATE,
+      target_type: TargetType.POST,
+      target_id: post.id,
+    });
+
+    return post;
+  }
+
+  async update(postId, data, context) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    if (post.author_id !== context.sender_id) {
+      const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+      if (!member || member.deleted_at || member.role > 1)
+        throw new ForbiddenError('권한이 없습니다');
+    }
+
+    const updated = await PostDAO.update(pool, postId, data);
+
+    eventBus.emit('sync', {
+      drawer_id: post.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.UPDATE,
+      target_type: TargetType.POST,
+      target_id: postId,
+    });
+
+    return updated;
+  }
+
+  async delete(postId, context) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    if (post.author_id !== context.sender_id) {
+      const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+      if (!member || member.deleted_at || member.role > 1)
+        throw new ForbiddenError('권한이 없습니다');
+    }
+
+    await PostDAO.softDelete(pool, postId);
+
+    eventBus.emit('sync', {
+      drawer_id: post.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.DELETE,
+      target_type: TargetType.POST,
+      target_id: postId,
+    });
+  }
+
+  // Comments
+
+  async getComments(postId, query) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+    return await PostDAO.findCommentsByPostId(pool, postId, query);
+  }
+
+  async addComment(postId, data, context) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 댓글을 달 수 있습니다');
+
+    const comment = await PostDAO.createComment(pool, {
+      ...data,
+      id: data.id || generateUUID(),
+      post_id: postId,
+      user_id: context.sender_id,
+    });
+
+    eventBus.emit('sync', {
+      drawer_id: post.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.CREATE,
+      target_type: TargetType.POST_COMMENT,
+      target_id: comment.id,
+    });
+
+    return comment;
+  }
+
+  async deleteComment(commentId, context) {
+    const comment = await PostDAO.findCommentById(pool, commentId);
+    if (!comment) throw new NotFoundError('댓글을 찾을 수 없습니다');
+
+    const post = await PostDAO.findById(pool, comment.post_id);
+    if (comment.user_id !== context.sender_id) {
+      const member = post ? await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id) : null;
+      if (!member || member.deleted_at || member.role > 1)
+        throw new ForbiddenError('권한이 없습니다');
+    }
+
+    await PostDAO.softDeleteComment(pool, commentId);
+
+    eventBus.emit('sync', {
+      drawer_id: post?.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.DELETE,
+      target_type: TargetType.POST_COMMENT,
+      target_id: commentId,
+    });
+  }
+
+  // Likes
+
+  async likePost(postId, context) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 좋아요를 누를 수 있습니다');
+
+    const existing = await PostDAO.findLike(pool, postId, context.sender_id);
+    if (existing) return { count: await PostDAO.getLikeCount(pool, postId) };
+
+    await PostDAO.createLike(pool, {
+      id: generateUUID(),
+      post_id: postId,
+      user_id: context.sender_id,
+    });
+
+    eventBus.emit('sync', {
+      drawer_id: post.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.REACT,
+      target_type: TargetType.POST_LIKE,
+      target_id: postId,
+    });
+
+    return { count: await PostDAO.getLikeCount(pool, postId) };
+  }
+
+  async unlikePost(postId, context) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    await PostDAO.softDeleteLike(pool, postId, context.sender_id);
+
+    eventBus.emit('sync', {
+      drawer_id: post.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.UNREACT,
+      target_type: TargetType.POST_LIKE,
+      target_id: postId,
+    });
+
+    return { count: await PostDAO.getLikeCount(pool, postId) };
+  }
+
+  async pinPost(postId, is_pinned, context) {
+    const post = await PostDAO.findById(pool, postId);
+    if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+    if (!member || member.deleted_at || member.role > 1)
+      throw new ForbiddenError('관리자 이상만 게시물을 핀할 수 있습니다');
+
+    const updated = await PostDAO.pinPost(pool, postId, is_pinned);
+
+    eventBus.emit('sync', {
+      drawer_id: post.drawer_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.UPDATE,
+      target_type: TargetType.POST,
+      target_id: postId,
+    });
+
+    return updated;
+  }
+
+  async updateComment(commentId, data, context) {
+    const comment = await PostDAO.findCommentById(pool, commentId);
+    if (!comment) throw new NotFoundError('댓글을 찾을 수 없습니다');
+    if (comment.user_id !== context.sender_id) throw new ForbiddenError('본인의 댓글만 수정할 수 있습니다');
+
+    return await PostDAO.updateComment(pool, commentId, data);
+  }
+}
+
+module.exports = { PostService: new PostService() };

@@ -1,0 +1,419 @@
+class SyncDAO {
+
+  // =========================================================================
+  // 권한 획득 유틸리티
+  // =========================================================================
+  static async getDrawerIdsByUserId(pool, userId) {
+    const { rows } = await pool.query(
+      `SELECT drawer_id FROM drawer_members WHERE user_id = $1 AND deleted_at IS NULL`,
+      [userId]
+    );
+    return rows.map(r => r.drawer_id);
+  }
+
+  static async getSubscribedCalIdsByUserId(pool, userId) {
+    const { rows } = await pool.query(
+      `SELECT cal_id FROM calendar_subscriptions WHERE user_id = $1 AND deleted_at IS NULL`,
+      [userId]
+    );
+    return rows.map(r => r.cal_id);
+  }
+
+  // =========================================================================
+  // Track A: Meta Data 쿼리 (무조건 100% 최신)
+  // =========================================================================
+  static async getDrawersForSync(pool, currDIds, currCIds) {
+    const query = `
+      SELECT d.* FROM drawers d
+      WHERE (
+        d.id = ANY($1::uuid[])
+        OR d.id IN (SELECT host_id FROM calendars WHERE id = ANY($2::uuid[]))
+      )
+      AND d.deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [currDIds, currCIds]);
+    return rows;
+  }
+
+  static async getDrawerMembers(pool, currDIds) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT drawer_id, user_id, role, nickname_in_drawer, joined_at,
+             created_at, updated_at, deleted_at
+      FROM drawer_members
+      WHERE drawer_id = ANY($1::uuid[]) AND deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [currDIds]);
+    return rows;
+  }
+
+  static async getDrawerPreferences(pool, userId, currDIds) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT drawer_id, user_id, role, nickname_in_drawer, notification_level
+      FROM drawer_members
+      WHERE user_id = $1 AND drawer_id = ANY($2::uuid[]) AND deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [userId, currDIds]);
+    return rows;
+  }
+
+  static async getUsersForSync(pool, currDIds, oldTs) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT u.id, ui.user_code, ui.display_name, ui.bio,
+             ui.image_url, ui.thumbnail_url,
+             u.created_at, ui.updated_at, u.deleted_at
+      FROM user_infos ui
+      JOIN users u ON ui.user_id = u.id
+      WHERE ui.user_id IN (
+        SELECT DISTINCT dm.user_id FROM drawer_members dm
+        WHERE dm.drawer_id = ANY($1::uuid[]) AND dm.deleted_at IS NULL
+      )
+      ${oldTs ? 'AND ui.updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [currDIds, oldTs] : [currDIds];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getDrawerSettings(pool, currDIds) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT * FROM drawer_settings WHERE drawer_id = ANY($1::uuid[])
+    `;
+    const { rows } = await pool.query(query, [currDIds]);
+    return rows;
+  }
+
+  static async getSeries(pool, currDIds) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT * FROM series WHERE drawer_id = ANY($1::uuid[]) AND deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [currDIds]);
+    return rows;
+  }
+
+  static async getCalendarsForSync(pool, currDIds, currCIds) {
+    const query = `
+      SELECT * FROM calendars
+      WHERE (host_id = ANY($1::uuid[]) OR id = ANY($2::uuid[]))
+      AND deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [currDIds, currCIds]);
+    return rows;
+  }
+
+  static async getSubscribedCalendarRecords(pool, currCIds) {
+    if (!currCIds.length) return [];
+    const query = `
+      SELECT * FROM calendar_subscriptions WHERE cal_id = ANY($1::uuid[]) AND deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [currCIds]);
+    return rows;
+  }
+
+  // =========================================================================
+  // Track B: Calendar Data 쿼리 (Delta + Full + Tombstone)
+  // =========================================================================
+  static async getEventsDeltaFull(pool, ctx) {
+    const query = `
+      SELECT e.*, es.series_id FROM events e
+      LEFT JOIN event_series es ON es.event_id = e.id
+      JOIN calendars c ON e.cal_id = c.id
+      WHERE (c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[]))
+        AND e.updated_at > $3
+
+      UNION ALL
+
+      SELECT e.*, es.series_id FROM events e
+      LEFT JOIN event_series es ON es.event_id = e.id
+      JOIN calendars c ON e.cal_id = c.id
+      WHERE (c.host_id = ANY($4::uuid[]) OR e.cal_id = ANY($5::uuid[]))
+        AND e.deleted_at IS NULL
+        AND (e.created_at >= $6 OR e.updated_at >= $6)
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds, ctx.calWindowFrom
+    ]);
+    return rows;
+  }
+
+  static async getEventInstancesDeltaFull(pool, ctx) {
+    const query = `
+      SELECT i.* FROM event_instances i
+      JOIN events e ON i.event_id = e.id
+      JOIN calendars c ON e.cal_id = c.id
+      WHERE (
+        ((c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[])) AND i.updated_at > $3)
+        OR
+        ((c.host_id = ANY($4::uuid[]) OR e.cal_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND i.start_date >= $6)
+      )
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds, ctx.calWindowFrom
+    ]);
+    return rows;
+  }
+
+  static async getEventParticipantsDeltaFull(pool, ctx) {
+    const query = `
+      SELECT ep.* FROM event_participants ep
+      JOIN event_instances i ON ep.instance_id = i.id
+      JOIN events e ON i.event_id = e.id
+      JOIN calendars c ON e.cal_id = c.id
+      WHERE (
+        ((c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[])) AND ep.updated_at > $3)
+        OR
+        ((c.host_id = ANY($4::uuid[]) OR e.cal_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL)
+      )
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds
+    ]);
+    return rows;
+  }
+
+  static async getTasksDeltaFull(pool, ctx) {
+    const query = `
+      SELECT t.* FROM tasks t
+      JOIN calendars c ON t.cal_id = c.id
+      WHERE (
+        ((c.host_id = ANY($1::uuid[]) OR t.cal_id = ANY($2::uuid[])) AND t.updated_at > $3)
+        OR
+        ((c.host_id = ANY($4::uuid[]) OR t.cal_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
+      )
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds, ctx.calWindowFrom
+    ]);
+    return rows;
+  }
+
+  static async getTaskInstancesDeltaFull(pool, ctx) {
+    const query = `
+      SELECT ti.* FROM task_instances ti
+      JOIN tasks t ON ti.task_id = t.id
+      JOIN calendars c ON t.cal_id = c.id
+      WHERE (
+        ((c.host_id = ANY($1::uuid[]) OR t.cal_id = ANY($2::uuid[])) AND ti.updated_at > $3)
+        OR
+        ((c.host_id = ANY($4::uuid[]) OR t.cal_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND ti.due_date >= $6)
+      )
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds, ctx.calWindowFrom
+    ]);
+    return rows;
+  }
+
+  static async getTaskParticipantsDeltaFull(pool, ctx) {
+    const query = `
+      SELECT tp.* FROM task_participants tp
+      JOIN task_instances ti ON tp.instance_id = ti.id
+      JOIN tasks t ON ti.task_id = t.id
+      JOIN calendars c ON t.cal_id = c.id
+      WHERE (
+        ((c.host_id = ANY($1::uuid[]) OR t.cal_id = ANY($2::uuid[])) AND tp.updated_at > $3)
+        OR
+        ((c.host_id = ANY($4::uuid[]) OR t.cal_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL)
+      )
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds
+    ]);
+    return rows;
+  }
+
+  static async getSpecialDaysDeltaFull(pool, ctx) {
+    const query = `
+      SELECT sd.* FROM special_days sd
+      JOIN calendars c ON sd.cal_id = c.id
+      WHERE (
+        ((c.host_id = ANY($1::uuid[]) OR sd.cal_id = ANY($2::uuid[])) AND sd.updated_at > $3)
+        OR
+        ((c.host_id = ANY($4::uuid[]) OR sd.cal_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL)
+      )
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldCIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.newCIds
+    ]);
+    return rows;
+  }
+
+  // =========================================================================
+  // Track C: Messaging Data 쿼리
+  // =========================================================================
+  static async getMessagesDeltaFull(pool, ctx) {
+    const query = `
+      SELECT m.* FROM series_messages m
+      JOIN series s ON m.series_id = s.id
+      WHERE (
+        (s.drawer_id = ANY($1::uuid[]) AND m.updated_at > $2)
+        OR
+        (s.drawer_id = ANY($3::uuid[]) AND m.deleted_at IS NULL AND m.created_at >= $4)
+      )
+      ORDER BY m.created_at DESC
+    `;
+    const { rows } = await pool.query(query, [
+      ctx.oldDIds, ctx.oldTs || new Date(0),
+      ctx.newDIds, ctx.msgWindowFrom
+    ]);
+    return rows;
+  }
+
+  static async getMessageAttachments(pool, messageIds, oldTs) {
+    if (!messageIds.length) return [];
+    const query = `
+      SELECT id, context_id AS message_id, filename, file_size, content_type, storage_key, status, updated_at
+      FROM attachments
+      WHERE context_type = 'SERIES_MESSAGE' AND context_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      ${oldTs ? 'AND updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [messageIds, oldTs] : [messageIds];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getMessageEmbeds(pool, messageIds, oldTs) {
+    if (!messageIds.length) return [];
+    const query = `
+      SELECT * FROM message_embeds
+      WHERE message_id = ANY($1::uuid[])
+      ${oldTs ? 'AND updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [messageIds, oldTs] : [messageIds];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getMessageReactions(pool, messageIds, oldTs) {
+    if (!messageIds.length) return [];
+    const query = `
+      SELECT * FROM message_reactions
+      WHERE message_id = ANY($1::uuid[])
+      ${oldTs ? 'AND updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [messageIds, oldTs] : [messageIds];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getMessageMentions(pool, messageIds, oldTs) {
+    if (!messageIds.length) return [];
+    const query = `
+      SELECT * FROM message_mentions
+      WHERE message_id = ANY($1::uuid[])
+      ${oldTs ? 'AND updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [messageIds, oldTs] : [messageIds];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  // =========================================================================
+  // Personal Data 쿼리
+  // =========================================================================
+  static async getNotifications(pool, userId, since) {
+    const query = `
+      SELECT * FROM notifications
+      WHERE recipient_id = $1 AND created_at > $2
+      ORDER BY created_at DESC
+    `;
+    const { rows } = await pool.query(query, [userId, since]);
+    return rows;
+  }
+
+  static async getUserSubscriptions(pool, userId, oldTs) {
+    const query = `
+      SELECT * FROM user_subscriptions
+      WHERE user_id = $1
+      ${oldTs ? 'AND updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [userId, oldTs] : [userId];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getUserAssets(pool, userId, oldTs) {
+    const query = `
+      SELECT * FROM user_assets
+      WHERE user_id = $1
+      ${oldTs ? 'AND purchased_at > $2' : ''}
+    `;
+    const params = oldTs ? [userId, oldTs] : [userId];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getUserHolidayCountries(pool, userId) {
+    const query = `
+      SELECT UNNEST(holidays_countries) AS country_code
+      FROM user_settings
+      WHERE user_id = $1 AND holidays_countries IS NOT NULL AND holidays_countries != '{}'
+    `;
+    const { rows } = await pool.query(query, [userId]);
+    return rows.map(r => r.country_code);
+  }
+
+  static async getActivityFeedsForSync(pool, currDIds, oldTs) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT id, drawer_id, actor_id, action_type, target_type, target_id, metadata, created_at
+      FROM activity_feeds
+      WHERE drawer_id = ANY($1::uuid[])
+      ${oldTs ? 'AND created_at > $2' : ''}
+      ORDER BY created_at DESC
+      LIMIT 500
+    `;
+    const params = oldTs ? [currDIds, oldTs] : [currDIds];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  static async getActivityFeedCursorsForSync(pool, userId, currDIds) {
+    if (!currDIds.length) return [];
+    const query = `
+      SELECT user_id, drawer_id, last_read_feed_id, last_read_feed_at, updated_at
+      FROM activity_feed_cursors
+      WHERE user_id = $1 AND drawer_id = ANY($2::uuid[])
+    `;
+    const { rows } = await pool.query(query, [userId, currDIds]);
+    return rows;
+  }
+
+  static async getHolidays(pool, countryCodes, oldTs) {
+    const query = `
+      SELECT * FROM holidays
+      WHERE country_code = ANY($1::text[])
+      ${oldTs ? 'AND updated_at > $2' : ''}
+    `;
+    const params = oldTs ? [countryCodes, oldTs] : [countryCodes];
+    const { rows } = await pool.query(query, params);
+    return rows;
+  }
+
+  // =========================================================================
+  // Contextual Fetch 전용 쿼리 (위젯 스크롤 시)
+  // =========================================================================
+  static async getCalendarDataOnlyByWindow(pool, ctx) {
+    const query = `
+      SELECT e.* FROM events e
+      JOIN calendars c ON e.cal_id = c.id
+      WHERE (c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[]))
+        AND e.deleted_at IS NULL
+    `;
+    const { rows } = await pool.query(query, [ctx.currDIds, ctx.currCIds]);
+    return { events: rows };
+  }
+}
+
+module.exports = { SyncDAO };

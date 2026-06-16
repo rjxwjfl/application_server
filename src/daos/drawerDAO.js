@@ -35,28 +35,29 @@ class DrawerDAO {
   /**
    * Drawer 생성 (INSERT)
    */
-  async create(conn, drawerId, drawerData) {
-    const { name, description, imageUrl, thumbnailUrl } = drawerData;
+  async create(conn, drawerData) {
+    const { id, name, description, image_url, thumbnail_url } = drawerData;
     const query = `
-      INSERT INTO drawers (id, name, description, image_url, thumbnail_url, member_count, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, 1, now(), now())
-      RETURNING id, name, description, image_url, thumbnail_url, member_count, created_at
+      INSERT INTO drawers (id, name, description, image_url, thumbnail_url, member_count, created_at, updated_at, last_activity_at)
+      VALUES ($1, $2, $3, $4, $5, 1, now(), now(), now())
+      RETURNING id, name, description, image_url, thumbnail_url, member_count,
+                last_activity_at, created_at, updated_at, deleted_at
     `;
     const result = await conn.query(query, [
-      drawerId,
+      id,
       name,
       description || null,
-      imageUrl || null,
-      thumbnailUrl || null,
+      image_url || null,
+      thumbnail_url || null,
     ]);
     return result.rows[0];
   }
 
   /**
-   * Drawer 정보 수정
+   * Drawer 정보 + 설정 통합 수정
    */
-  async updateInfo(conn, drawerId, updateData) {
-    const { name, description, imageUrl, thumbnailUrl } = updateData;
+  async update(conn, drawerId, updateData) {
+    const { name, description, image_url, thumbnail_url } = updateData;
     const query = `
       UPDATE drawers
       SET name = COALESCE($1, name),
@@ -70,8 +71,8 @@ class DrawerDAO {
     const result = await conn.query(query, [
       name,
       description,
-      imageUrl,
-      thumbnailUrl,
+      image_url,
+      thumbnail_url,
       drawerId,
     ]);
     return result.rows[0];
@@ -97,8 +98,10 @@ class DrawerDAO {
     const query = `
       INSERT INTO drawer_settings (drawer_id, is_public, is_searchable, require_approval, updated_at)
       VALUES ($1, false, false, false, now())
+      RETURNING drawer_id, is_public, is_searchable, require_approval, updated_at
     `;
-    await conn.query(query, [drawerId]);
+    const result = await conn.query(query, [drawerId]);
+    return result.rows[0];
   }
 
   async getSettings(conn, drawerId) {
@@ -112,7 +115,7 @@ class DrawerDAO {
   }
 
   async updateSettings(conn, drawerId, settingsData) {
-    const { isPublic, isSearchable, requireApproval } = settingsData;
+    const { is_public, is_searchable, require_approval } = settingsData;
     const query = `
       UPDATE drawer_settings
       SET is_public = COALESCE($1, is_public),
@@ -123,22 +126,22 @@ class DrawerDAO {
       RETURNING drawer_id, is_public, is_searchable, require_approval
     `;
     const result = await conn.query(query, [
-      isPublic,
-      isSearchable,
-      requireApproval,
+      is_public,
+      is_searchable,
+      require_approval,
       drawerId,
     ]);
     return result.rows[0];
   }
 
   // ============================================
-  // DrawerUsers 테이블
+  // DrawerMembers 테이블
   // ============================================
 
   async getMember(conn, drawerId, userId) {
     const query = `
       SELECT drawer_id, user_id, role, notification_level, nickname_in_drawer, joined_at, deleted_at
-      FROM drawer_users
+      FROM drawer_members
       WHERE drawer_id = $1 AND user_id = $2
     `;
     const result = await conn.query(query, [drawerId, userId]);
@@ -147,13 +150,14 @@ class DrawerDAO {
 
   async getMembers(conn, drawerId) {
     const query = `
-      SELECT du.drawer_id, du.user_id, du.role, du.notification_level,
-             du.nickname_in_drawer, du.joined_at,
-             u.display_name, u.user_code, u.image_url, u.email
-      FROM drawer_users du
-      JOIN users u ON du.user_id = u.id
-      WHERE du.drawer_id = $1 AND du.deleted_at IS NULL
-      ORDER BY du.joined_at ASC
+      SELECT dm.drawer_id, dm.user_id, dm.role, dm.notification_level,
+             dm.nickname_in_drawer, dm.joined_at,
+             ui.display_name, ui.user_code, ui.image_url, u.email
+      FROM drawer_members dm
+      JOIN users u ON dm.user_id = u.id
+      LEFT JOIN user_infos ui ON dm.user_id = ui.user_id
+      WHERE dm.drawer_id = $1 AND dm.deleted_at IS NULL
+      ORDER BY dm.joined_at ASC
     `;
     const result = await conn.query(query, [drawerId]);
     return result.rows;
@@ -163,10 +167,10 @@ class DrawerDAO {
     const query = `
       SELECT d.id, d.name, d.description, d.image_url, d.thumbnail_url,
              d.member_count, d.last_activity_at, d.created_at,
-             du.role, du.notification_level, du.joined_at
-      FROM drawer_users du
-      JOIN drawers d ON du.drawer_id = d.id
-      WHERE du.user_id = $1 AND du.deleted_at IS NULL AND d.deleted_at IS NULL
+             dm.role, dm.notification_level, dm.joined_at
+      FROM drawer_members dm
+      JOIN drawers d ON dm.drawer_id = d.id
+      WHERE dm.user_id = $1 AND dm.deleted_at IS NULL AND d.deleted_at IS NULL
       ORDER BY d.last_activity_at DESC
     `;
     const result = await conn.query(query, [userId]);
@@ -175,11 +179,12 @@ class DrawerDAO {
 
   async addMember(conn, drawerId, userId, role = 3) {
     const query = `
-      INSERT INTO drawer_users (drawer_id, user_id, role, joined_at, created_at, updated_at)
+      INSERT INTO drawer_members (drawer_id, user_id, role, joined_at, created_at, updated_at)
       VALUES ($1, $2, $3, now(), now(), now())
       ON CONFLICT (drawer_id, user_id) DO UPDATE
-      SET deleted_at = NULL, updated_at = now(), role = COALESCE(EXCLUDED.role, drawer_users.role)
-      RETURNING drawer_id, user_id, role
+      SET deleted_at = NULL, updated_at = now(), role = COALESCE(EXCLUDED.role, drawer_members.role)
+      RETURNING drawer_id, user_id, role, nickname_in_drawer, notification_level,
+                joined_at, created_at, updated_at, deleted_at
     `;
     const result = await conn.query(query, [drawerId, userId, role]);
     return result.rows[0];
@@ -187,7 +192,7 @@ class DrawerDAO {
 
   async updateMemberRole(conn, drawerId, userId, role) {
     const query = `
-      UPDATE drawer_users
+      UPDATE drawer_members
       SET role = $1, updated_at = now()
       WHERE drawer_id = $2 AND user_id = $3 AND deleted_at IS NULL
       RETURNING drawer_id, user_id, role
@@ -198,7 +203,7 @@ class DrawerDAO {
 
   async removeMember(conn, drawerId, userId) {
     const query = `
-      UPDATE drawer_users
+      UPDATE drawer_members
       SET deleted_at = now(), updated_at = now()
       WHERE drawer_id = $1 AND user_id = $2 AND deleted_at IS NULL
     `;
@@ -209,89 +214,48 @@ class DrawerDAO {
   // DrawerInvitations 테이블
   // ============================================
 
-  async createInvitation(conn, id, drawerId, inviterId, token, expiresAt, maxUses = 1) {
+  async createInvitation(conn, id, drawerId, inviterId, inviteCode, expiresAt, maxUses = 1) {
     const query = `
-      INSERT INTO drawer_invitations (id, drawer_id, inviter_id, token, max_uses, expires_at, created_at)
+      INSERT INTO drawer_invitations (id, drawer_id, inviter_id, invite_code, max_uses, expires_at, created_at)
       VALUES ($1, $2, $3, $4, $5, $6, now())
-      RETURNING id, drawer_id, token, max_uses, expires_at
+      RETURNING id, drawer_id, invite_code AS invitation_code, max_uses, expires_at
     `;
     const result = await conn.query(query, [
       id,
       drawerId,
       inviterId,
-      token,
+      inviteCode,
       maxUses,
       expiresAt,
     ]);
     return result.rows[0];
   }
 
-  async findInvitationByToken(conn, token) {
+  async findInvitationByCode(conn, inviteCode) {
     const query = `
-      SELECT di.id, di.drawer_id, di.inviter_id, di.token, di.max_uses,
+      SELECT di.id, di.drawer_id, di.inviter_id, di.invite_code, di.max_uses,
              di.uses_count, di.expires_at, di.created_at,
              d.name as drawer_name, d.description, d.image_url, d.thumbnail_url,
-             u.display_name as inviter_name
+             ui.display_name as inviter_name
       FROM drawer_invitations di
       JOIN drawers d ON di.drawer_id = d.id
       JOIN users u ON di.inviter_id = u.id
-      WHERE di.token = $1
+      LEFT JOIN user_infos ui ON di.inviter_id = ui.user_id
+      WHERE di.invite_code = $1
         AND (di.max_uses IS NULL OR di.uses_count < di.max_uses)
         AND di.expires_at > now()
     `;
-    const result = await conn.query(query, [token]);
+    const result = await conn.query(query, [inviteCode]);
     return result.rows[0] || null;
   }
 
-  async incrementInvitationUsage(conn, token) {
+  async incrementInvitationUsage(conn, inviteCode) {
     const query = `
       UPDATE drawer_invitations
       SET uses_count = uses_count + 1
-      WHERE token = $1
+      WHERE invite_code = $1
     `;
-    await conn.query(query, [token]);
-  }
-
-  // ============================================
-  // DrawerJoinRequests 테이블
-  // ============================================
-
-  async createJoinRequest(conn, id, drawerId, userId) {
-    const query = `
-      INSERT INTO drawer_join_requests (id, drawer_id, user_id, status, created_at, updated_at)
-      VALUES ($1, $2, $3, 0, now(), now())
-      RETURNING id, drawer_id, user_id, status
-    `;
-    const result = await conn.query(query, [id, drawerId, userId]);
-    return result.rows[0];
-  }
-
-  async getJoinRequests(conn, drawerId, status = 0) {
-    const query = `
-      SELECT djr.id, djr.drawer_id, djr.user_id, djr.status, djr.created_at,
-             u.display_name, u.user_code, u.image_url, u.email
-      FROM drawer_join_requests djr
-      JOIN users u ON djr.user_id = u.id
-      WHERE djr.drawer_id = $1 AND djr.status = $2
-      ORDER BY djr.created_at ASC
-    `;
-    const result = await conn.query(query, [drawerId, status]);
-    return result.rows;
-  }
-
-  async getJoinRequestById(conn, requestId) {
-      const query = `SELECT id, drawer_id, user_id, status FROM drawer_join_requests WHERE id = $1`;
-      const result = await conn.query(query, [requestId]);
-      return result.rows[0] || null;
-  }
-
-  async updateJoinRequestStatus(conn, requestId, status) {
-    const query = `
-      UPDATE drawer_join_requests
-      SET status = $1, updated_at = now()
-      WHERE id = $2
-    `;
-    await conn.query(query, [status, requestId]);
+    await conn.query(query, [inviteCode]);
   }
 
   // ============================================
@@ -323,6 +287,46 @@ class DrawerDAO {
       WHERE id = $1
     `;
     await conn.query(query, [drawerId]);
+  }
+
+  async getPendingMembers(conn, drawerId) {
+    const { rows } = await conn.query(
+      `SELECT dm.user_id, dm.created_at,
+              ui.display_name, ui.user_code, ui.image_url
+       FROM drawer_members dm
+       LEFT JOIN user_infos ui ON dm.user_id = ui.user_id
+       WHERE dm.drawer_id = $1 AND dm.role = -1 AND dm.deleted_at IS NULL`,
+      [drawerId]
+    );
+    return rows;
+  }
+
+  async removePendingRequest(conn, drawerId, userId) {
+    await conn.query(
+      `UPDATE drawer_members
+       SET deleted_at = now(), updated_at = now()
+       WHERE drawer_id = $1 AND user_id = $2 AND role = -1`,
+      [drawerId, userId]
+    );
+  }
+
+  async updateNickname(conn, drawerId, userId, nickname) {
+    await conn.query(
+      `UPDATE drawer_members
+       SET nickname_in_drawer = $1, updated_at = now()
+       WHERE drawer_id = $2 AND user_id = $3 AND deleted_at IS NULL`,
+      [nickname, drawerId, userId]
+    );
+  }
+
+  async updateMemberPreferences(conn, drawerId, userId, data) {
+    const { notification_level } = data;
+    await conn.query(
+      `UPDATE drawer_members
+       SET notification_level = COALESCE($1, notification_level), updated_at = now()
+       WHERE drawer_id = $2 AND user_id = $3 AND deleted_at IS NULL`,
+      [notification_level, drawerId, userId]
+    );
   }
 }
 

@@ -9,20 +9,14 @@
  * =========================================
  */
 
-const { v4: uuidv4 } = require('uuid');
-// UUID v7은 node-uuid 또는 uuid@8.2.0 이상에서 지원
-// 현재는 v4를 사용하고, 나중에 v7로 업그레이드 가능
+const { v7: uuidv7 } = require('uuid');
 
 /**
- * UUID v7 생성 (또는 v4 as fallback)
+ * UUID v7 생성
  * @returns {string} UUID 문자열
  */
 function generateUUID() {
-  // TODO: uuid v7 설치 후 아래로 변경
-  // return uuidv7();
-  
-  // 임시: uuid v4 사용
-  return uuidv4();
+  return uuidv7();
 }
 
 /**

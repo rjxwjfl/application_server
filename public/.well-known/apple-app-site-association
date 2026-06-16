@@ -1,0 +1,19 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "TEAM_ID.io.rallyapp",
+        "paths": [
+          "/drawer/*",
+          "/event/*",
+          "/task/*",
+          "/cast/*",
+          "/feed/*",
+          "/series/*",
+          "/invite/*"
+        ]
+      }
+    ]
+  }
+}

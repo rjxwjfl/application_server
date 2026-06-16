@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep \"require.*authMiddleware\" /c/develop/application_server/src/routes/*.js)",
+      "Bash(node -e \":*)",
+      "Bash(echo $?)",
+      "Bash(npm install:*)",
+      "Bash(xargs grep:*)",
+      "Bash(ls -la /c/develop/application_server/*.md)",
+      "Bash(grep -r \"user_subscriptions\\\\|CREATE TABLE\" /c/develop/application_server --include=*.md --include=*.txt --include=*.sql)",
+      "Bash(grep -r \"special_day\\\\|special_days\" c:/develop/application_server --include=*.md -i)",
+      "Bash(node -c src/utils/syncToken.js)",
+      "Bash(node -c src/daos/syncDAO.js)",
+      "Bash(node -c src/services/syncService.js)",
+      "Bash(node -c src/api/sync/syncController.js)",
+      "Bash(node -c src/routes/syncRoutes.js)",
+      "Bash(node -c src/api/series/seriesController.js)",
+      "Bash(node -e ':*)",
+      "Bash(dart run *)",
+      "Bash(flutter gen-l10n *)",
+      "Bash(flutter analyze *)",
+      "Bash(dart analyze *)",
+      "Bash(xargs wc -l)",
+      "Bash(flutter pub *)",
+      "Bash(find /c/Users -path \"*/share_plus-10*/share_plus.dart\" 2>/dev/null | head -3; find /c/dev -path \"*/share_plus-10*/share_plus.dart\" 2>/dev/null | head -3)",
+      "Read(//c/Users/**)",
+      "Read(//c/dev/**)",
+      "Bash(grep -v \"^$\")",
+      "Bash(cat)",
+      "Read(//tmp/**)"
+    ]
+  }
+}
