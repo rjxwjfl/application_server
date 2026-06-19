@@ -20,8 +20,10 @@ function errorHandler(err, req, res, _next) {
 
   res.status(statusCode).json({
     success: false,
+    data: null,
     statusCode,
     message,
+    ...(err.errorCode && { errorCode: err.errorCode }),
     ...(process.env.NODE_ENV !== 'production' && !isOperational && { stack: err.stack }),
   });
 }

@@ -89,7 +89,8 @@ async function expressLoader({ app, config }) {
         minimum_version: process.env.APP_MINIMUM_VERSION || '1.0.0',
         latest_version: process.env.APP_LATEST_VERSION || '1.0.0',
         force_update: process.env.APP_FORCE_UPDATE === 'true',
-        update_url: process.env.APP_UPDATE_URL || null,
+        update_url_ios: process.env.APP_UPDATE_URL_IOS || null,
+        update_url_android: process.env.APP_UPDATE_URL_ANDROID || null,
       },
     });
   });

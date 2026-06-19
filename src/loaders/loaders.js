@@ -7,7 +7,6 @@ require('../events/billingHandler');
 const { startSubscriptionJobs } = require('../jobs/subscriptionJobs');
 const { startMediaLifecycleJobs } = require('../jobs/mediaLifecycleJobs');
 const { startHolidayJobs } = require('../jobs/holidayJobs');
-const { startReminderJobs } = require('../jobs/reminderJobs');
 const { startCleanupJobs } = require('../jobs/cleanupJobs');
 
 async function loaders({ expressApp, config }) {
@@ -21,7 +20,6 @@ async function loaders({ expressApp, config }) {
   startSubscriptionJobs();
   startMediaLifecycleJobs();
   startHolidayJobs();
-  startReminderJobs();
   startCleanupJobs();
 
   return { pool };
