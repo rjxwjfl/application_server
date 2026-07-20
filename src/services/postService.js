@@ -10,7 +10,8 @@ const { TargetType, ActionType } = require('../utils/typeDefinitions');
 class PostService {
   async withAttachments(post) {
     if (!post) return post;
-    const attachments = await AttachmentDAO.findByContext(pool, 'POST', post.id);
+    const attachments = (await AttachmentDAO.findByContext(pool, 'POST', post.id))
+      .filter((attachment) => attachment.status === 'ready');
     return { ...post, attachments };
   }
 
