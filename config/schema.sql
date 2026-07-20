@@ -307,7 +307,6 @@ CREATE INDEX idx_event_inst_sync ON event_instances (event_id, updated_at);
 CREATE TABLE event_participants (
   instance_id UUID        NOT NULL,
   user_id     UUID        NOT NULL,
-  inviter_id  UUID,
   -- 0=confirm 1=invite 2=apply 3=accept 4=tentative 5=decline 6=rejected(host)
   state       SMALLINT    NOT NULL DEFAULT 0 CHECK (state BETWEEN 0 AND 6),
   memo        JSONB,
@@ -316,8 +315,7 @@ CREATE TABLE event_participants (
   deleted_at  TIMESTAMPTZ,
   PRIMARY KEY (instance_id, user_id),
   CONSTRAINT fk_ep_instance FOREIGN KEY (instance_id) REFERENCES event_instances(id),
-  CONSTRAINT fk_ep_user     FOREIGN KEY (user_id)     REFERENCES users(id),
-  CONSTRAINT fk_ep_inviter  FOREIGN KEY (inviter_id)  REFERENCES users(id) ON DELETE SET NULL
+  CONSTRAINT fk_ep_user     FOREIGN KEY (user_id)     REFERENCES users(id)
 );
 CREATE INDEX idx_event_part_sync ON event_participants (instance_id, updated_at);
 
@@ -383,7 +381,6 @@ CREATE INDEX idx_task_inst_task_id ON task_instances (task_id, updated_at);
 CREATE TABLE task_participants (
   instance_id  UUID        NOT NULL,
   user_id      UUID        NOT NULL,
-  inviter_id   UUID,
   -- 0=await 1=pending 2=done 3=expired(UI derived) 4=delayed 5=blocked
   state        SMALLINT    NOT NULL DEFAULT 0,
   memo         JSONB,
@@ -393,8 +390,7 @@ CREATE TABLE task_participants (
   deleted_at   TIMESTAMPTZ,
   PRIMARY KEY (instance_id, user_id),
   CONSTRAINT fk_tp_instance FOREIGN KEY (instance_id) REFERENCES task_instances(id),
-  CONSTRAINT fk_tp_user     FOREIGN KEY (user_id)     REFERENCES users(id),
-  CONSTRAINT fk_tp_inviter  FOREIGN KEY (inviter_id)  REFERENCES users(id) ON DELETE SET NULL
+  CONSTRAINT fk_tp_user     FOREIGN KEY (user_id)     REFERENCES users(id)
 );
 CREATE INDEX idx_task_part_sync ON task_participants (instance_id, updated_at);
 
