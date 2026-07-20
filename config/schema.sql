@@ -536,7 +536,7 @@ CREATE TABLE attachments (
   thumbnail_url TEXT,
   duration_secs DOUBLE PRECISION,
   display_order INTEGER      NOT NULL DEFAULT 0,
-  -- pending|processing|ready|hidden|deleted|rejected
+  -- pending|processing|ready|hidden|deleted|rejected|error
   status        VARCHAR(20)  NOT NULL DEFAULT 'pending',
   -- standard|nearline|coldline|archive
   storage_class VARCHAR(20)  NOT NULL DEFAULT 'standard',
@@ -547,7 +547,8 @@ CREATE TABLE attachments (
   PRIMARY KEY (id),
   CONSTRAINT fk_att_drawer   FOREIGN KEY (drawer_id)   REFERENCES drawers(id),
   CONSTRAINT fk_att_uploader FOREIGN KEY (uploader_id) REFERENCES users(id),
-  CONSTRAINT chk_att_context CHECK (context_type IN ('SERIES_MESSAGE','EVENT','TASK','POST','CAST','SPECIAL_DAY'))
+  CONSTRAINT chk_att_context CHECK (context_type IN ('SERIES_MESSAGE','EVENT','TASK','POST','CAST','SPECIAL_DAY')),
+  CONSTRAINT chk_att_status CHECK (status IN ('pending','processing','ready','hidden','deleted','rejected','error'))
 );
 CREATE INDEX idx_att_context   ON attachments (context_type, context_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_drawer    ON attachments (drawer_id, created_at DESC) WHERE deleted_at IS NULL;
@@ -736,14 +737,15 @@ CREATE TABLE posts (
   body_markdown   TEXT         NOT NULL,
   thumbnail_url   TEXT,
   cover_image_url TEXT,
-  media_urls      JSONB,
   is_pinned       BOOLEAN               DEFAULT FALSE,
+  special_day_id  UUID,
   created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
   deleted_at      TIMESTAMPTZ,
   PRIMARY KEY (id),
   CONSTRAINT fk_p_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id),
-  CONSTRAINT fk_p_author FOREIGN KEY (author_id) REFERENCES users(id)
+  CONSTRAINT fk_p_author FOREIGN KEY (author_id) REFERENCES users(id),
+  CONSTRAINT fk_p_special_day FOREIGN KEY (special_day_id) REFERENCES special_days(id) ON DELETE SET NULL
 );
 CREATE INDEX idx_p_drawer_recent ON posts (drawer_id, created_at DESC)
   WHERE deleted_at IS NULL;

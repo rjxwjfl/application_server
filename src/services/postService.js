@@ -1,4 +1,5 @@
 const { PostDAO } = require('../daos/postDAO');
+const { AttachmentDAO } = require('../daos/attachmentDAO');
 const { DrawerDAO } = require('../daos/drawerDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
@@ -7,16 +8,23 @@ const { NotFoundError, ForbiddenError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class PostService {
+  async withAttachments(post) {
+    if (!post) return post;
+    const attachments = await AttachmentDAO.findByContext(pool, 'POST', post.id);
+    return { ...post, attachments };
+  }
+
   async getPosts(drawerId, query, userId) {
     const member = await DrawerDAO.getMember(pool, drawerId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 조회할 수 있습니다');
-    return await PostDAO.findByDrawerId(pool, drawerId, query);
+    const posts = await PostDAO.findByDrawerId(pool, drawerId, query);
+    return await Promise.all(posts.map((post) => this.withAttachments(post)));
   }
 
   async getPost(postId) {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
-    return post;
+    return await this.withAttachments(post);
   }
 
   async create(data, context) {
@@ -38,7 +46,7 @@ class PostService {
       target_id: post.id,
     });
 
-    return post;
+    return await this.withAttachments(post);
   }
 
   async update(postId, data, context) {
@@ -62,7 +70,7 @@ class PostService {
       target_id: postId,
     });
 
-    return updated;
+    return await this.withAttachments(updated);
   }
 
   async delete(postId, context) {

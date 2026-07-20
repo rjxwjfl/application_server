@@ -30,8 +30,8 @@ class AttachmentDAO {
     const result = await conn.query(
       `SELECT * FROM attachments
        WHERE context_type = $1 AND context_id = $2
-         AND deleted_at IS NULL AND status = 'ready'
-       ORDER BY created_at ASC`,
+         AND deleted_at IS NULL
+       ORDER BY display_order ASC, created_at ASC`,
       [contextType, contextId]
     );
     return result.rows;
