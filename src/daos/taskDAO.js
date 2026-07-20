@@ -49,7 +49,7 @@ class TaskDAO {
 
         if (instance.participants && instance.participants.length > 0) {
           for (const participant of instance.participants) {
-            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.invited_by, participant.state);
+            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.state);
           }
         }
       }
@@ -223,20 +223,20 @@ class TaskDAO {
   // Task Instance Participants 테이블
   // ============================================
 
-  async addParticipantRaw(conn, instanceId, userId, invitedBy, state) {
+  async addParticipantRaw(conn, instanceId, userId, state) {
     const query = `
-      INSERT INTO task_participants (instance_id, user_id, invited_by, state, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, now(), now())
+      INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
+      VALUES ($1, $2, $3, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET state = $4, invited_by = COALESCE($3, task_participants.invited_by), updated_at = now(), deleted_at = NULL
+      SET state = $3, updated_at = now(), deleted_at = NULL
     `;
-    await conn.query(query, [instanceId, userId, invitedBy || null, state || 0]);
+    await conn.query(query, [instanceId, userId, state || 0]);
   }
 
-  async addParticipant(conn, instanceId, userId, invitedBy) {
+  async addParticipant(conn, instanceId, userId) {
     const query = `
-    INSERT INTO task_participants (instance_id, user_id, invited_by, state, created_at, updated_at)
-    VALUES ($1, $2, $3, 0, now(), now())
+    INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
+    VALUES ($1, $2, 0, now(), now())
     ON CONFLICT (instance_id, user_id) DO UPDATE
     SET
       deleted_at = NULL,
@@ -244,17 +244,17 @@ class TaskDAO {
       memo = NULL,
       completed_at = NULL,
       updated_at = now()
-    RETURNING instance_id, user_id, invited_by, state
+    RETURNING instance_id, user_id, state
   `;
-    const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
+    const result = await conn.query(query, [instanceId, userId]);
     return result.rows[0];
   }
 
-  async addParticipantsBatch(conn, instanceId, userIds, invitedBy) {
+  async addParticipantsBatch(conn, instanceId, userIds) {
     if (!userIds.length) return [];
-    const values = userIds.map((_, i) => `($1, $${i + 2}, $${userIds.length + 2}, 0, now(), now())`).join(', ');
+    const values = userIds.map((_, i) => `($1, $${i + 2}, 0, now(), now())`).join(', ');
     const query = `
-      INSERT INTO task_participants (instance_id, user_id, invited_by, state, created_at, updated_at)
+      INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
       VALUES ${values}
       ON CONFLICT (instance_id, user_id) DO UPDATE
       SET
@@ -263,9 +263,9 @@ class TaskDAO {
         memo = NULL,
         completed_at = NULL,
         updated_at = now()
-      RETURNING instance_id, user_id, invited_by, state
+      RETURNING instance_id, user_id, state
     `;
-    const result = await conn.query(query, [instanceId, ...userIds, invitedBy || null]);
+    const result = await conn.query(query, [instanceId, ...userIds]);
     return result.rows;
   }
 

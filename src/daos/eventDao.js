@@ -52,7 +52,7 @@ class EventDAO {
 
         if (instance.participants && instance.participants.length > 0) {
           for (const participant of instance.participants) {
-            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.invited_by, participant.state, participant.memo);
+            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.state, participant.memo);
           }
         }
       }
@@ -190,25 +190,25 @@ class EventDAO {
   // Event Participant 테이블
   // ============================================
 
-  async addParticipantRaw(conn, instanceId, userId, invitedBy, state, memo) {
+  async addParticipantRaw(conn, instanceId, userId, state, memo) {
     const query = `
-      INSERT INTO event_participants (instance_id, user_id, invited_by, state, memo, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, now(), now())
+      INSERT INTO event_participants (instance_id, user_id, state, memo, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET state = $4, memo = $5, invited_by = COALESCE($3, event_participants.invited_by), updated_at = now(), deleted_at = NULL
+      SET state = $3, memo = $4, updated_at = now(), deleted_at = NULL
     `;
-    await conn.query(query, [instanceId, userId, invitedBy || null, state, memo ? JSON.stringify(memo) : null]);
+    await conn.query(query, [instanceId, userId, state, memo ? JSON.stringify(memo) : null]);
   }
 
-  async addParticipant(conn, instanceId, userId, invitedBy) {
+  async addParticipant(conn, instanceId, userId) {
     const query = `
-      INSERT INTO event_participants (instance_id, user_id, invited_by, state, created_at, updated_at)
-      VALUES ($1, $2, $3, 0, now(), now())
+      INSERT INTO event_participants (instance_id, user_id, state, created_at, updated_at)
+      VALUES ($1, $2, 0, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
       SET deleted_at = NULL, state = 0, updated_at = now()
-      RETURNING instance_id, user_id, invited_by, state
+      RETURNING instance_id, user_id, state
     `;
-    const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
+    const result = await conn.query(query, [instanceId, userId]);
     return result.rows[0];
   }
 
