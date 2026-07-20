@@ -13,7 +13,7 @@ class CastDAO {
 
   async findByCalId(conn, calId, { cursor_at, limit = 20 } = {}) {
     const params = [calId, limit];
-    let where = 'cal_id = $1 AND deleted_at IS NULL';
+    let where = 'calendar_id = $1 AND deleted_at IS NULL';
     if (cursor_at) {
       where += ' AND created_at < $3';
       params.push(cursor_at);
@@ -28,12 +28,12 @@ class CastDAO {
   async create(conn, data) {
     const result = await conn.query(
       `INSERT INTO casts
-         (id, cal_id, author_id, title, summary, body_markdown, thumbnail_url,
+         (id, calendar_id, author_id, title, summary, body_markdown, thumbnail_url,
           cover_image_url, start_time, end_time, locations, forked_from, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,now()),COALESCE($14,now()))
        RETURNING *`,
       [
-        data.id, data.cal_id, data.author_id, data.title,
+        data.id, data.calendar_id, data.author_id, data.title,
         data.summary || null, data.body_markdown || null,
         data.thumbnail_url || null, data.cover_image_url || null,
         data.start_time || null, data.end_time || null,

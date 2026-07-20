@@ -5,7 +5,7 @@ class TaskDAO {
 
   async findById(conn, taskId) {
     const query = `
-      SELECT id, cal_id, author_id, task_type,
+      SELECT id, calendar_id, author_id, task_type,
              summary, description, priority, locations,
              r_rule, forked_from,
              created_at, updated_at, deleted_at
@@ -19,7 +19,7 @@ class TaskDAO {
   async createTask(conn, data) {
     const taskQuery = `
       INSERT INTO tasks (
-        id, cal_id, author_id, task_type,
+        id, calendar_id, author_id, task_type,
         summary, description, priority, locations,
         r_rule, forked_from, created_at, updated_at
       ) VALUES (
@@ -29,7 +29,7 @@ class TaskDAO {
     `;
     const taskResult = await conn.query(taskQuery, [
       data.id,
-      data.cal_id,
+      data.calendar_id,
       data.author_id,
       data.task_type || 0,
       data.summary,
@@ -49,7 +49,7 @@ class TaskDAO {
 
         if (instance.participants && instance.participants.length > 0) {
           for (const participant of instance.participants) {
-            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.state);
+            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.inviter_id, participant.state);
           }
         }
       }
@@ -105,11 +105,11 @@ class TaskDAO {
 
     const newTaskQuery = `
       INSERT INTO tasks (
-        id, cal_id, author_id, task_type,
+        id, calendar_id, author_id, task_type,
         summary, description, priority, locations,
         r_rule, forked_from, created_at, updated_at
       )
-      SELECT $1, cal_id, author_id, task_type,
+      SELECT $1, calendar_id, author_id, task_type,
              summary, description, priority, locations,
              r_rule, id, now(), now()
       FROM tasks WHERE id = $2
@@ -140,7 +140,7 @@ class TaskDAO {
       SELECT id, task_id, instance_type, parent_id,
              summary, description, priority, locations,
              is_all_day, completion_rule, original_date,
-             available_from, due_date, completed_at,
+             start_date, due_date, completed_at,
              created_at, updated_at, deleted_at
       FROM task_instances
       WHERE id = $1 AND deleted_at IS NULL
@@ -155,7 +155,7 @@ class TaskDAO {
         id, task_id, instance_type, parent_id,
         summary, description, priority, locations,
         is_all_day, completion_rule, original_date,
-        available_from, due_date,
+        start_date, due_date,
         created_at, updated_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now()
@@ -174,14 +174,14 @@ class TaskDAO {
       data.is_all_day || false,
       data.completion_rule || 0,
       data.original_date,
-      data.available_from || null,
+      data.start_date || null,
       data.due_date
     ]);
     return result.rows[0];
   }
 
   async updateTaskInstance(conn, instanceId, updateData) {
-    const { summary, description, priority, locations, is_all_day, completion_rule, available_from, due_date } = updateData;
+    const { summary, description, priority, locations, is_all_day, completion_rule, start_date, due_date } = updateData;
     const query = `
       UPDATE task_instances
       SET summary = COALESCE($1, summary),
@@ -190,7 +190,7 @@ class TaskDAO {
           locations = COALESCE($4, locations),
           is_all_day = COALESCE($5, is_all_day),
           completion_rule = COALESCE($6, completion_rule),
-          available_from = COALESCE($7, available_from),
+          start_date = COALESCE($7, start_date),
           due_date = COALESCE($8, due_date),
           updated_at = now()
       WHERE id = $9 AND deleted_at IS NULL
@@ -203,7 +203,7 @@ class TaskDAO {
       locations ? JSON.stringify(locations) : undefined,
       is_all_day,
       completion_rule,
-      available_from,
+      start_date,
       due_date,
       instanceId
     ]);
@@ -223,20 +223,41 @@ class TaskDAO {
   // Task Instance Participants 테이블
   // ============================================
 
-  async addParticipantRaw(conn, instanceId, userId, state) {
-    const query = `
-      INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
-      VALUES ($1, $2, $3, now(), now())
-      ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET state = $3, updated_at = now(), deleted_at = NULL
-    `;
-    await conn.query(query, [instanceId, userId, state || 0]);
+  async findInstanceContext(conn, taskId, instanceId) {
+    const result = await conn.query(`
+      SELECT ti.id, ti.completion_rule, ti.deleted_at, c.drawer_id
+      FROM task_instances ti
+      JOIN tasks t ON t.id = ti.task_id
+      JOIN calendars c ON c.id = t.calendar_id
+      WHERE ti.id = $1 AND ti.task_id = $2 AND ti.deleted_at IS NULL
+        AND t.deleted_at IS NULL AND c.deleted_at IS NULL
+    `, [instanceId, taskId]);
+    return result.rows[0] || null;
   }
 
-  async addParticipant(conn, instanceId, userId) {
+  async findParticipant(conn, instanceId, userId) {
+    const result = await conn.query(`
+      SELECT instance_id, user_id, state, memo, completed_at, deleted_at
+      FROM task_participants
+      WHERE instance_id = $1 AND user_id = $2
+    `, [instanceId, userId]);
+    return result.rows[0] || null;
+  }
+
+  async addParticipantRaw(conn, instanceId, userId, invitedBy, state) {
     const query = `
-    INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
-    VALUES ($1, $2, 0, now(), now())
+      INSERT INTO task_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, now(), now())
+      ON CONFLICT (instance_id, user_id) DO UPDATE
+      SET state = $4, inviter_id = COALESCE($3, task_participants.inviter_id), updated_at = now(), deleted_at = NULL
+    `;
+    await conn.query(query, [instanceId, userId, invitedBy || null, state || 0]);
+  }
+
+  async addParticipant(conn, instanceId, userId, invitedBy) {
+    const query = `
+    INSERT INTO task_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
+    VALUES ($1, $2, $3, 0, now(), now())
     ON CONFLICT (instance_id, user_id) DO UPDATE
     SET
       deleted_at = NULL,
@@ -244,29 +265,10 @@ class TaskDAO {
       memo = NULL,
       completed_at = NULL,
       updated_at = now()
-    RETURNING instance_id, user_id, state
+    RETURNING instance_id, user_id, inviter_id, state, memo, completed_at, deleted_at
   `;
-    const result = await conn.query(query, [instanceId, userId]);
+    const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
     return result.rows[0];
-  }
-
-  async addParticipantsBatch(conn, instanceId, userIds) {
-    if (!userIds.length) return [];
-    const values = userIds.map((_, i) => `($1, $${i + 2}, 0, now(), now())`).join(', ');
-    const query = `
-      INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
-      VALUES ${values}
-      ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET
-        deleted_at = NULL,
-        state = 0,
-        memo = NULL,
-        completed_at = NULL,
-        updated_at = now()
-      RETURNING instance_id, user_id, state
-    `;
-    const result = await conn.query(query, [instanceId, ...userIds]);
-    return result.rows;
   }
 
   async removeParticipant(conn, instanceId, userId) {
@@ -276,59 +278,49 @@ class TaskDAO {
           updated_at = now()
       WHERE instance_id = $1
         AND user_id = $2
+        AND deleted_at IS NULL
+      RETURNING instance_id, user_id, state, memo, completed_at, deleted_at
     `;
-    await conn.query(query, [instanceId, userId]);
+    const result = await conn.query(query, [instanceId, userId]);
+    return result.rows[0] || null;
   }
 
-  async removeParticipantsBatch(conn, instanceId, userIds) {
-    if (!userIds.length) return;
-    const placeholders = userIds.map((_, i) => `$${i + 2}`).join(', ');
-    const query = `
+  async updateParticipantState(conn, instanceId, userId, state, memo) {
+    const result = await conn.query(`
       UPDATE task_participants
-      SET deleted_at = now(),
+      SET state = $3::smallint,
+          memo = $4,
+          completed_at = CASE WHEN $3::smallint = 3 THEN now() ELSE NULL END,
           updated_at = now()
-      WHERE instance_id = $1
-        AND user_id IN (${placeholders})
-    `;
-    await conn.query(query, [instanceId, ...userIds]);
+      WHERE instance_id = $1 AND user_id = $2 AND deleted_at IS NULL
+      RETURNING instance_id, user_id, state, memo, completed_at, deleted_at
+    `, [instanceId, userId, state, memo === null ? null : JSON.stringify(memo)]);
+    return result.rows[0] || null;
   }
 
-  async updateParticipantState(conn, instanceId, userId, updates) {
-    const fields = [];
-    const values = [];
-    let argIndex = 1;
-
-    const mapping = {
-      state: "state",
-      memo: "memo",
-      completed_at: "completed_at"
-    };
-
-    for (const [key, columnName] of Object.entries(mapping)) {
-      if (updates[key] !== undefined) {
-        fields.push(`${columnName} = $${argIndex++}`);
-
-        if (key === "memo" && updates[key] !== null) {
-          values.push(JSON.stringify(updates[key]));
-        } else {
-          values.push(updates[key]);
-        }
-      }
-    }
-
-    if (fields.length === 0) return;
-
-    fields.push(`updated_at = now()`);
-    values.push(instanceId, userId);
-
-    const query = `
-    UPDATE task_participants
-    SET ${fields.join(", ")}
-    WHERE instance_id = $${argIndex++}
-      AND user_id = $${argIndex++}
-  `;
-
-    await conn.query(query, values);
+  async reevaluateInstanceCompletion(conn, instanceId) {
+    const result = await conn.query(`
+      WITH counts AS (
+        SELECT COUNT(*)::int AS active_count,
+               COUNT(*) FILTER (WHERE state = 3)::int AS done_count
+        FROM task_participants
+        WHERE instance_id = $1 AND deleted_at IS NULL
+      )
+      UPDATE task_instances ti
+      SET completed_at = CASE
+            WHEN ti.completion_rule = 0 OR counts.active_count = 0 THEN NULL
+            WHEN ti.completion_rule = 1 AND counts.done_count >= 1
+              THEN COALESCE(ti.completed_at, now())
+            WHEN ti.completion_rule = 2 AND counts.done_count = counts.active_count
+              THEN COALESCE(ti.completed_at, now())
+            ELSE NULL
+          END,
+          updated_at = now()
+      FROM counts
+      WHERE ti.id = $1
+      RETURNING ti.completed_at
+    `, [instanceId]);
+    return result.rows[0] || null;
   }
 
   // ============================================

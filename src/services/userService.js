@@ -4,7 +4,7 @@ const { UserSettingsDAO } = require('../daos/userSettingsDAO');
 const { generateUUID, generateUserCode } = require('../utils/uuid');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { NotFoundError, ConflictError } = require('../core/errors');
+const { BadRequestError, NotFoundError, ConflictError } = require('../core/errors');
 
 class UserService {
   async createUser(userData, client) {
@@ -93,14 +93,25 @@ class UserService {
   }
 
   async registerDevice(userId, deviceData, conn = pool) {
-    const { device_uuid, device_token, platform, device_name, app_version, os_version } = deviceData;
+    const {
+      device_uuid,
+      device_type,
+      fcm_token,
+      device_name,
+      app_version,
+      os_version,
+    } = deviceData;
+
+    if (!device_type) {
+      throw new BadRequestError('device_type이 필요합니다');
+    }
 
     const device = await UserDAO.createDevice(conn, {
       id: generateUUID(),
       user_id: userId,
       device_uuid,
-      device_token,
-      platform,
+      device_token: fcm_token,
+      platform: device_type,
       device_name,
       app_version,
       os_version,

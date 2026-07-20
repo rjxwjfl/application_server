@@ -51,9 +51,9 @@ const eventController = {
     res.status(201).json({ success: true, data: participant, message: '참가자가 추가되었습니다' });
   }),
 
-  updateMyParticipation: asyncHandler(async (req, res) => {
-    const { instanceId } = req.params;
-    await EventService.updateMyParticipation(instanceId, req.user_id, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+  updateParticipantState: asyncHandler(async (req, res) => {
+    const { instanceId, userId } = req.params;
+    await EventService.updateParticipantState(instanceId, userId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, message: '참가 상태가 변경되었습니다' });
   }),
 

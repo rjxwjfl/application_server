@@ -9,7 +9,7 @@ class SpecialDayDAO {
 
   async findByCalId(conn, calId) {
     const result = await conn.query(
-      `SELECT * FROM special_days WHERE cal_id = $1 AND deleted_at IS NULL ORDER BY base_date ASC`,
+      `SELECT * FROM special_days WHERE calendar_id = $1 AND deleted_at IS NULL ORDER BY base_date ASC`,
       [calId]
     );
     return result.rows;
@@ -18,12 +18,12 @@ class SpecialDayDAO {
   async create(conn, data) {
     const result = await conn.query(
       `INSERT INTO special_days
-         (id, cal_id, name, base_date, is_yearly, is_lunar, show_dday,
+         (id, calendar_id, name, base_date, is_yearly, is_lunar, show_dday,
           count_from_one, show_every_day, sticker, color, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,COALESCE($12,now()),COALESCE($13,now()))
        RETURNING *`,
       [
-        data.id, data.cal_id, data.name, data.base_date,
+        data.id, data.calendar_id, data.name, data.base_date,
         data.is_yearly ?? true, data.is_lunar ?? false,
         data.show_dday ?? true, data.count_from_one ?? true,
         data.show_every_day ?? false, data.sticker || null,

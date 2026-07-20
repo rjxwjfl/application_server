@@ -26,5 +26,6 @@ module.exports = isProd
       ssl: { rejectUnauthorized: false },
       max: 10,                   // Neon pooler 연결 한도 고려
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000, // Neon cold start 허용
+      connectionTimeoutMillis: 15000, // Neon cold start/TLS 연결 지연 허용
+      keepAlive: true,
     };

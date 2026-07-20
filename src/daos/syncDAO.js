@@ -13,10 +13,10 @@ class SyncDAO {
 
   static async getSubscribedCalIdsByUserId(pool, userId) {
     const { rows } = await pool.query(
-      `SELECT cal_id FROM calendar_subscriptions WHERE user_id = $1 AND deleted_at IS NULL`,
+      `SELECT calendar_id FROM calendar_subscriptions WHERE user_id = $1 AND deleted_at IS NULL`,
       [userId]
     );
-    return rows.map(r => r.cal_id);
+    return rows.map(r => r.calendar_id);
   }
 
   // =========================================================================
@@ -27,7 +27,7 @@ class SyncDAO {
       SELECT d.* FROM drawers d
       WHERE (
         d.id = ANY($1::uuid[])
-        OR d.id IN (SELECT host_id FROM calendars WHERE id = ANY($2::uuid[]))
+        OR d.id IN (SELECT drawer_id FROM calendars WHERE id = ANY($2::uuid[]))
       )
       AND d.deleted_at IS NULL
     `;
@@ -98,7 +98,7 @@ class SyncDAO {
   static async getCalendarsForSync(pool, currDIds, currCIds) {
     const query = `
       SELECT * FROM calendars
-      WHERE (host_id = ANY($1::uuid[]) OR id = ANY($2::uuid[]))
+      WHERE (drawer_id = ANY($1::uuid[]) OR id = ANY($2::uuid[]))
       AND deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [currDIds, currCIds]);
@@ -108,7 +108,7 @@ class SyncDAO {
   static async getSubscribedCalendarRecords(pool, currCIds) {
     if (!currCIds.length) return [];
     const query = `
-      SELECT * FROM calendar_subscriptions WHERE cal_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      SELECT * FROM calendar_subscriptions WHERE calendar_id = ANY($1::uuid[]) AND deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [currCIds]);
     return rows;
@@ -121,16 +121,16 @@ class SyncDAO {
     const query = `
       SELECT e.*, es.series_id FROM events e
       LEFT JOIN event_series es ON es.event_id = e.id
-      JOIN calendars c ON e.cal_id = c.id
-      WHERE (c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[]))
+      JOIN calendars c ON e.calendar_id = c.id
+      WHERE (c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.updated_at > $3
 
       UNION ALL
 
       SELECT e.*, es.series_id FROM events e
       LEFT JOIN event_series es ON es.event_id = e.id
-      JOIN calendars c ON e.cal_id = c.id
-      WHERE (c.host_id = ANY($4::uuid[]) OR e.cal_id = ANY($5::uuid[]))
+      JOIN calendars c ON e.calendar_id = c.id
+      WHERE (c.drawer_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[]))
         AND e.deleted_at IS NULL
         AND (e.created_at >= $6 OR e.updated_at >= $6)
     `;
@@ -145,11 +145,11 @@ class SyncDAO {
     const query = `
       SELECT i.* FROM event_instances i
       JOIN events e ON i.event_id = e.id
-      JOIN calendars c ON e.cal_id = c.id
+      JOIN calendars c ON e.calendar_id = c.id
       WHERE (
-        ((c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[])) AND i.updated_at > $3)
+        ((c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND i.updated_at > $3)
         OR
-        ((c.host_id = ANY($4::uuid[]) OR e.cal_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND i.start_date >= $6)
+        ((c.drawer_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND i.start_date >= $6)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -164,11 +164,11 @@ class SyncDAO {
       SELECT ep.* FROM event_participants ep
       JOIN event_instances i ON ep.instance_id = i.id
       JOIN events e ON i.event_id = e.id
-      JOIN calendars c ON e.cal_id = c.id
+      JOIN calendars c ON e.calendar_id = c.id
       WHERE (
-        ((c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[])) AND ep.updated_at > $3)
+        ((c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND ep.updated_at > $3)
         OR
-        ((c.host_id = ANY($4::uuid[]) OR e.cal_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL)
+        ((c.drawer_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -181,11 +181,11 @@ class SyncDAO {
   static async getTasksDeltaFull(pool, ctx) {
     const query = `
       SELECT t.* FROM tasks t
-      JOIN calendars c ON t.cal_id = c.id
+      JOIN calendars c ON t.calendar_id = c.id
       WHERE (
-        ((c.host_id = ANY($1::uuid[]) OR t.cal_id = ANY($2::uuid[])) AND t.updated_at > $3)
+        ((c.drawer_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND t.updated_at > $3)
         OR
-        ((c.host_id = ANY($4::uuid[]) OR t.cal_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
+        ((c.drawer_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
       )
     `;
     const { rows } = await pool.query(query, [
@@ -199,11 +199,11 @@ class SyncDAO {
     const query = `
       SELECT ti.* FROM task_instances ti
       JOIN tasks t ON ti.task_id = t.id
-      JOIN calendars c ON t.cal_id = c.id
+      JOIN calendars c ON t.calendar_id = c.id
       WHERE (
-        ((c.host_id = ANY($1::uuid[]) OR t.cal_id = ANY($2::uuid[])) AND ti.updated_at > $3)
+        ((c.drawer_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND ti.updated_at > $3)
         OR
-        ((c.host_id = ANY($4::uuid[]) OR t.cal_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND ti.due_date >= $6)
+        ((c.drawer_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND ti.due_date >= $6)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -218,11 +218,11 @@ class SyncDAO {
       SELECT tp.* FROM task_participants tp
       JOIN task_instances ti ON tp.instance_id = ti.id
       JOIN tasks t ON ti.task_id = t.id
-      JOIN calendars c ON t.cal_id = c.id
+      JOIN calendars c ON t.calendar_id = c.id
       WHERE (
-        ((c.host_id = ANY($1::uuid[]) OR t.cal_id = ANY($2::uuid[])) AND tp.updated_at > $3)
+        ((c.drawer_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND tp.updated_at > $3)
         OR
-        ((c.host_id = ANY($4::uuid[]) OR t.cal_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL)
+        ((c.drawer_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -235,11 +235,11 @@ class SyncDAO {
   static async getSpecialDaysDeltaFull(pool, ctx) {
     const query = `
       SELECT sd.* FROM special_days sd
-      JOIN calendars c ON sd.cal_id = c.id
+      JOIN calendars c ON sd.calendar_id = c.id
       WHERE (
-        ((c.host_id = ANY($1::uuid[]) OR sd.cal_id = ANY($2::uuid[])) AND sd.updated_at > $3)
+        ((c.drawer_id = ANY($1::uuid[]) OR sd.calendar_id = ANY($2::uuid[])) AND sd.updated_at > $3)
         OR
-        ((c.host_id = ANY($4::uuid[]) OR sd.cal_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL)
+        ((c.drawer_id = ANY($4::uuid[]) OR sd.calendar_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -407,8 +407,8 @@ class SyncDAO {
   static async getCalendarDataOnlyByWindow(pool, ctx) {
     const query = `
       SELECT e.* FROM events e
-      JOIN calendars c ON e.cal_id = c.id
-      WHERE (c.host_id = ANY($1::uuid[]) OR e.cal_id = ANY($2::uuid[]))
+      JOIN calendars c ON e.calendar_id = c.id
+      WHERE (c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [ctx.currDIds, ctx.currCIds]);

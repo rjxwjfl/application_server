@@ -29,7 +29,7 @@ class DrawerService {
 
       const calendar = await CalendarDAO.create(client, {
         id: generateUUID(),
-        host_id: drawer.id,
+        drawer_id: drawer.id,
         title: '기본 달력',
         color: Math.floor(Math.random() * 15),
       });

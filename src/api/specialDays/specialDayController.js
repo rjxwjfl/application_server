@@ -14,7 +14,7 @@ const specialDayController = {
   }),
 
   create: asyncHandler(async (req, res) => {
-    if (!req.body.cal_id) throw new BadRequestError('cal_id가 필요합니다');
+    if (!req.body.calendar_id) throw new BadRequestError('calendar_id가 필요합니다');
     if (!req.body.name)   throw new BadRequestError('name이 필요합니다');
     if (!req.body.base_date) throw new BadRequestError('base_date가 필요합니다');
 

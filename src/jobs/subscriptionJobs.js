@@ -15,6 +15,54 @@ const eventBus = require('../events/eventBus');
 const pool = require('../../config/db');
 const logger = require('../utils/logger');
 
+const CANDIDATE_QUERY_MAX_ATTEMPTS = 2;
+const CANDIDATE_QUERY_RETRY_DELAY_MS = 250;
+
+function isConnectionEstablishmentTimeout(error) {
+  return error?.message === 'Connection terminated due to connection timeout'
+    || error?.message === 'timeout exceeded when trying to connect';
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function queryCandidatesWithRetry(jobName, queryCandidates) {
+  for (let attempt = 1; attempt <= CANDIDATE_QUERY_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await queryCandidates();
+    } catch (error) {
+      logger.error('Subscription candidate query failed', {
+        jobName,
+        attempt,
+        errorName: error?.name,
+        errorCode: error?.code,
+        errorMessage: error?.message,
+      });
+
+      if (!isConnectionEstablishmentTimeout(error)
+          || attempt === CANDIDATE_QUERY_MAX_ATTEMPTS) {
+        throw error;
+      }
+
+      await delay(CANDIDATE_QUERY_RETRY_DELAY_MS);
+    }
+  }
+}
+
+async function rollbackSafely(client, jobName) {
+  try {
+    await client.query('ROLLBACK');
+  } catch (rollbackError) {
+    logger.error('Subscription transaction rollback failed', {
+      jobName,
+      errorName: rollbackError?.name,
+      errorCode: rollbackError?.code,
+      errorMessage: rollbackError?.message,
+    });
+  }
+}
+
 /**
  * 유예기간 만료 체크
  * PAST_DUE && grace_period_end < now → EXPIRED
@@ -22,7 +70,10 @@ const logger = require('../utils/logger');
 async function expireGracePeriodSubscriptions() {
   try {
     const now = new Date();
-    const expired = await BillingDAO.findExpiredGracePeriods(pool, now);
+    const expired = await queryCandidatesWithRetry(
+      'expireGracePeriodSubscriptions',
+      () => BillingDAO.findExpiredGracePeriods(pool, now),
+    );
 
     if (expired.length === 0) return;
 
@@ -51,14 +102,19 @@ async function expireGracePeriodSubscriptions() {
 
         logger.info('Grace period subscription expired', { subscriptionId: sub.id, userId: sub.user_id });
       } catch (error) {
-        await client.query('ROLLBACK');
+        await rollbackSafely(client, 'expireGracePeriodSubscriptions');
         logger.error('Failed to expire grace period subscription', { subscriptionId: sub.id, error: error.message });
       } finally {
         client.release();
       }
     }
   } catch (error) {
-    logger.error('Grace period expiration batch failed', { error: error.message });
+    logger.error('Grace period expiration batch failed', {
+      jobName: 'expireGracePeriodSubscriptions',
+      errorName: error?.name,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+    });
   }
 }
 
@@ -69,7 +125,10 @@ async function expireGracePeriodSubscriptions() {
 async function expireCanceledSubscriptions() {
   try {
     const now = new Date();
-    const expired = await BillingDAO.findExpiredCanceledSubscriptions(pool, now);
+    const expired = await queryCandidatesWithRetry(
+      'expireCanceledSubscriptions',
+      () => BillingDAO.findExpiredCanceledSubscriptions(pool, now),
+    );
 
     if (expired.length === 0) return;
 
@@ -98,14 +157,19 @@ async function expireCanceledSubscriptions() {
 
         logger.info('Canceled subscription expired', { subscriptionId: sub.id, userId: sub.user_id });
       } catch (error) {
-        await client.query('ROLLBACK');
+        await rollbackSafely(client, 'expireCanceledSubscriptions');
         logger.error('Failed to expire canceled subscription', { subscriptionId: sub.id, error: error.message });
       } finally {
         client.release();
       }
     }
   } catch (error) {
-    logger.error('Canceled subscription expiration batch failed', { error: error.message });
+    logger.error('Canceled subscription expiration batch failed', {
+      jobName: 'expireCanceledSubscriptions',
+      errorName: error?.name,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+    });
   }
 }
 
@@ -136,4 +200,5 @@ module.exports = {
   expireGracePeriodSubscriptions,
   expireCanceledSubscriptions,
   startSubscriptionJobs,
+  queryCandidatesWithRetry,
 };

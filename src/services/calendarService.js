@@ -11,7 +11,7 @@ class CalendarService {
   async getDrawerCalendars(drawerId, userId) {
     const member = await DrawerDAO.getMember(pool, drawerId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 조회할 수 있습니다');
-    return await CalendarDAO.findByHostId(pool, drawerId);
+    return await CalendarDAO.findByDrawerId(pool, drawerId);
   }
 
   async create(data, context) {
@@ -23,7 +23,7 @@ class CalendarService {
     const calendar = await withTransaction(async (client) => {
       return await CalendarDAO.create(client, {
         id: data.id || generateUUID(),
-        host_id: drawer_id,
+        drawer_id,
         title: data.title,
         description: data.description,
         color: data.color,
@@ -49,14 +49,14 @@ class CalendarService {
     const cal = await CalendarDAO.findById(pool, calId);
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, cal.host_id, context.sender_id);
+    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
     if (!member || member.deleted_at || member.role > 1)
       throw new ForbiddenError('관리자 이상만 캘린더를 수정할 수 있습니다');
 
     const updated = await CalendarDAO.update(pool, calId, data);
 
     eventBus.emit('sync', {
-      drawer_id: cal.host_id,
+      drawer_id: cal.drawer_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,
@@ -72,14 +72,14 @@ class CalendarService {
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
     if (cal.is_default) throw new BadRequestError('기본 캘린더는 삭제할 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, cal.host_id, context.sender_id);
+    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
     if (!member || member.deleted_at || member.role !== 0)
       throw new ForbiddenError('마스터만 캘린더를 삭제할 수 있습니다');
 
     await CalendarDAO.softDelete(pool, calId);
 
     eventBus.emit('sync', {
-      drawer_id: cal.host_id,
+      drawer_id: cal.drawer_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,
@@ -96,7 +96,7 @@ class CalendarService {
     const sub = await CalendarDAO.subscribe(pool, context.sender_id, calId);
 
     eventBus.emit('sync', {
-      drawer_id: cal.host_id,
+      drawer_id: cal.drawer_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.SUBSCRIBE,
@@ -114,7 +114,7 @@ class CalendarService {
     await CalendarDAO.unsubscribe(pool, context.sender_id, calId);
 
     eventBus.emit('sync', {
-      drawer_id: cal.host_id,
+      drawer_id: cal.drawer_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UNSUBSCRIBE,

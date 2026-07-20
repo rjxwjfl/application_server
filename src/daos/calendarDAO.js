@@ -5,7 +5,7 @@ class CalendarDAO {
 
   async findById(conn, calendarId) {
     const query = `
-      SELECT id, host_id, title, description, color, is_public,
+      SELECT id, drawer_id, title, description, color, is_public,
              created_at, updated_at, deleted_at
       FROM calendars
       WHERE id = $1 AND deleted_at IS NULL
@@ -14,27 +14,27 @@ class CalendarDAO {
     return result.rows[0] || null;
   }
 
-  async findByHostId(conn, hostId) {
+  async findByDrawerId(conn, drawerId) {
     const query = `
-      SELECT id, host_id, title, description, color, is_public,
+      SELECT id, drawer_id, title, description, color, is_public,
              created_at, updated_at, deleted_at
       FROM calendars
-      WHERE host_id = $1 AND deleted_at IS NULL
+      WHERE drawer_id = $1 AND deleted_at IS NULL
       ORDER BY created_at ASC
     `;
-    const result = await conn.query(query, [hostId]);
+    const result = await conn.query(query, [drawerId]);
     return result.rows;
   }
 
   async create(conn, data) {
     const query = `
-      INSERT INTO calendars (id, host_id, title, description, color, is_public, created_at, updated_at)
+      INSERT INTO calendars (id, drawer_id, title, description, color, is_public, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), COALESCE($8, now()))
       RETURNING *
     `;
     const result = await conn.query(query, [
       data.id,
-      data.host_id,
+      data.drawer_id,
       data.title,
       data.description || null,
       data.color || 0,
@@ -76,11 +76,11 @@ class CalendarDAO {
 
   async subscribe(conn, userId, calId) {
     const query = `
-      INSERT INTO calendar_subscriptions (user_id, cal_id, created_at, updated_at)
+      INSERT INTO calendar_subscriptions (user_id, calendar_id, created_at, updated_at)
       VALUES ($1, $2, now(), now())
-      ON CONFLICT (user_id, cal_id) DO UPDATE
+      ON CONFLICT (user_id, calendar_id) DO UPDATE
       SET deleted_at = NULL, updated_at = now()
-      RETURNING user_id, cal_id, created_at, updated_at
+      RETURNING user_id, calendar_id, created_at, updated_at
     `;
     const result = await conn.query(query, [userId, calId]);
     return result.rows[0];
@@ -90,18 +90,18 @@ class CalendarDAO {
     const query = `
       UPDATE calendar_subscriptions
       SET deleted_at = now(), updated_at = now()
-      WHERE user_id = $1 AND cal_id = $2 AND deleted_at IS NULL
+      WHERE user_id = $1 AND calendar_id = $2 AND deleted_at IS NULL
     `;
     await conn.query(query, [userId, calId]);
   }
 
   async getSubscriptionsByUserId(conn, userId) {
     const query = `
-      SELECT c.id, c.host_id, c.title, c.description, c.color, c.is_public,
+      SELECT c.id, c.drawer_id, c.title, c.description, c.color, c.is_public,
              c.created_at, c.updated_at,
              cs.created_at AS subscribed_at
       FROM calendar_subscriptions cs
-      JOIN calendars c ON cs.cal_id = c.id
+      JOIN calendars c ON cs.calendar_id = c.id
       WHERE cs.user_id = $1 AND cs.deleted_at IS NULL AND c.deleted_at IS NULL
       ORDER BY cs.created_at ASC
     `;
@@ -116,7 +116,7 @@ class CalendarDAO {
       FROM calendar_subscriptions cs
       JOIN users u ON cs.user_id = u.id
       LEFT JOIN user_infos ui ON cs.user_id = ui.user_id
-      WHERE cs.cal_id = $1 AND cs.deleted_at IS NULL AND u.deleted_at IS NULL
+      WHERE cs.calendar_id = $1 AND cs.deleted_at IS NULL AND u.deleted_at IS NULL
       ORDER BY cs.created_at ASC
     `;
     const result = await conn.query(query, [calId]);

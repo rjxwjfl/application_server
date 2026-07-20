@@ -366,7 +366,7 @@ CREATE TABLE task_instances (
   -- 0=individual 1=anyOne 2=allRequired
   completion_rule INT         NOT NULL DEFAULT 0,
   original_date   TIMESTAMPTZ NOT NULL,
-  available_from  TIMESTAMPTZ,
+  start_date      TIMESTAMPTZ,
   due_date        TIMESTAMPTZ NOT NULL,
   completed_at    TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

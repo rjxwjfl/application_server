@@ -1,8 +1,9 @@
 const { TaskDAO } = require('../daos/taskDAO');
+const { DrawerDAO } = require('../daos/drawerDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
-const { BadRequestError, NotFoundError } = require('../core/errors');
+const { BadRequestError, NotFoundError, ForbiddenError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 const pool = require('../../config/db');
 
@@ -124,68 +125,79 @@ class TaskService {
     });
   }
 
-  async adjustParticipants(instanceId, data, context) {
-    const { add = [], remove = [] } = data;
-
-    const { addResults } = await withTransaction(async (client) => {
-      const addResults = await TaskDAO.addParticipantsBatch(client, instanceId, add);
-      await TaskDAO.removeParticipantsBatch(client, instanceId, remove);
-      return { addResults };
+  async addParticipant(taskId, instanceId, data, context) {
+    if (!data.user_id) throw new BadRequestError('user_id가 필요합니다');
+    const result = await withTransaction(async (client) => {
+      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
+      if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
+      const actor = await DrawerDAO.getMember(client, instance.drawer_id, context.sender_id);
+      if (!actor || actor.deleted_at) throw new ForbiddenError('서랍 멤버만 참여할 수 있습니다');
+      if (data.user_id !== context.sender_id && actor.role > 2)
+        throw new ForbiddenError('편집자 이상만 타인을 추가할 수 있습니다');
+      const target = await DrawerDAO.getMember(client, instance.drawer_id, data.user_id);
+      if (!target || target.deleted_at) throw new BadRequestError('서랍 멤버만 추가할 수 있습니다');
+      const participant = await TaskDAO.addParticipant(client, instanceId, data.user_id, context.sender_id);
+      await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
+      return { participant, drawer_id: instance.drawer_id };
     });
-
-    if (data.drawer_id) {
-      eventBus.emit('sync', {
-        drawer_id: data.drawer_id,
-        sender_id: context.sender_id,
-        device_uuid: context.device_uuid,
-        action: ActionType.UPDATE, target_type: TargetType.TASK_PARTICIPANT, target_id: instanceId,
-      });
-
-      if (add.length > 0) {
-        eventBus.emit('alert', {
-          drawer_id: data.drawer_id,
-          sender_id: context.sender_id,
-          type: 'assignment',
-          title: data.drawer_name || '',
-          body: data.alert_body || '할 일에 담당자로 배정되었습니다.',
-          target_user_ids: add,
-          requiredLevel: 1,
-          routeData: { route_type: TargetType.TASK_INSTANCE, route_id: instanceId },
-          device_uuid: context.device_uuid,
-        });
-      }
-    }
-
-    return { added: addResults, removed: remove };
+    this.emitParticipantSync(result.drawer_id, instanceId, context, ActionType.CREATE);
+    return result.participant;
   }
 
-  async updateMyParticipation(instanceId, updateData, context) {
-    const { state } = updateData;
-    if (state === undefined) throw new BadRequestError('state가 필요합니다');
+  async updateParticipantState(taskId, instanceId, userId, data, context) {
+    if (!Number.isInteger(data.state) || data.state < 0 || data.state > 3)
+      throw new BadRequestError('state는 0부터 3 사이의 정수여야 합니다');
+    if (data.state === 2 && (typeof data.memo !== 'string' || !data.memo.trim()))
+      throw new BadRequestError('onHold 상태에는 memo가 필요합니다');
 
-    await withTransaction(async (client) => {
-      await TaskDAO.updateParticipantState(client, instanceId, context.sender_id, state);
+    const transitions = { 0: [1, 2], 1: [2, 3], 2: [1], 3: [1] };
+    const result = await withTransaction(async (client) => {
+      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
+      if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
+      if (userId !== context.sender_id)
+        throw new ForbiddenError('타인 상태 변경 역할 기준이 확정되지 않았습니다');
+      const participant = await TaskDAO.findParticipant(client, instanceId, userId);
+      if (!participant || participant.deleted_at)
+        throw new NotFoundError('활성 참여자를 찾을 수 없습니다', 'TASK_PARTICIPANT_NOT_FOUND');
+      if (!transitions[participant.state]?.includes(data.state))
+        throw new BadRequestError('허용되지 않은 상태 전이입니다');
+      const updated = await TaskDAO.updateParticipantState(
+        client, instanceId, userId, data.state, data.state === 2 ? data.memo.trim() : null
+      );
+      await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
+      return { participant: updated, drawer_id: instance.drawer_id };
     });
-
-    if (updateData.drawer_id) {
-      eventBus.emit('sync', {
-        drawer_id: updateData.drawer_id,
-        sender_id: context.sender_id,
-        device_uuid: context.device_uuid,
-        action: ActionType.UPDATE, target_type: TargetType.TASK_PARTICIPANT, target_id: instanceId,
-      });
-    }
+    this.emitParticipantSync(result.drawer_id, instanceId, context, ActionType.UPDATE);
+    return result.participant;
   }
 
-  async removeParticipant(instanceId, targetUserId, context) {
-    await withTransaction(async (client) => {
-      await TaskDAO.removeParticipant(client, instanceId, targetUserId);
+  async removeParticipant(taskId, instanceId, targetUserId, context) {
+    const result = await withTransaction(async (client) => {
+      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
+      if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
+      const actor = await DrawerDAO.getMember(client, instance.drawer_id, context.sender_id);
+      if (!actor || actor.deleted_at) throw new ForbiddenError('서랍 멤버만 제거할 수 있습니다');
+      if (targetUserId !== context.sender_id && actor.role > 2)
+        throw new ForbiddenError('편집자 이상만 타인을 제거할 수 있습니다');
+      const participant = await TaskDAO.findParticipant(client, instanceId, targetUserId);
+      if (!participant || participant.deleted_at)
+        throw new NotFoundError('활성 참여자를 찾을 수 없습니다', 'TASK_PARTICIPANT_NOT_FOUND');
+      const removed = await TaskDAO.removeParticipant(client, instanceId, targetUserId);
+      await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
+      return { participant: removed, drawer_id: instance.drawer_id };
     });
+    this.emitParticipantSync(result.drawer_id, instanceId, context, ActionType.DELETE);
+    return result.participant;
+  }
 
+  emitParticipantSync(drawerId, instanceId, context, action) {
     eventBus.emit('sync', {
+      drawer_id: drawerId,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
-      action: ActionType.DELETE, target_type: TargetType.TASK_PARTICIPANT, target_id: instanceId,
+      action,
+      target_type: TargetType.TASK_PARTICIPANT,
+      target_id: instanceId,
     });
   }
 }

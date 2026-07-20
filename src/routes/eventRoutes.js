@@ -13,7 +13,7 @@ router.delete("/:eventId/instances/:instanceId", eventController.deleteEventInst
 router.post("/:eventId/instances/:instanceId/split", eventController.splitEvent);
 
 router.post("/:eventId/instances/:instanceId/participants", eventController.addParticipant);
-router.patch("/:eventId/instances/:instanceId/participants/me", eventController.updateMyParticipation);
+router.patch("/:eventId/instances/:instanceId/participants/:userId", eventController.updateParticipantState);
 router.delete("/:eventId/instances/:instanceId/participants/:userId", eventController.removeParticipant);
 
 module.exports = router;

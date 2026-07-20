@@ -224,7 +224,8 @@ class EventService {
     return result;
   }
 
-  async updateMyParticipation(instance_id, user_id, updateData, context) {
+  async updateParticipantState(instance_id, user_id, updateData, context) {
+    if (user_id !== context.sender_id) throw new ForbiddenError('본인 상태만 변경할 수 있습니다');
     const { state } = updateData;
     if (state === undefined) throw new BadRequestError('state가 필요합니다');
     // confirm(0) is immutable host state; rejected(6) is host-only

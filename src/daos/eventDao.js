@@ -5,7 +5,7 @@ class EventDAO {
 
   async findById(conn, eventId) {
     const query = `
-      SELECT id, cal_id, author_id, event_type, summary,
+      SELECT id, calendar_id, author_id, event_type, summary,
              description, color, r_rule, locations, forked_from,
              created_at, updated_at, deleted_at
       FROM events
@@ -18,7 +18,7 @@ class EventDAO {
   async createEvent(conn, data) {
     const eventQuery = `
       INSERT INTO events (
-        id, cal_id, author_id, event_type, summary,
+        id, calendar_id, author_id, event_type, summary,
         description, color, r_rule, locations, forked_from,
         created_at, updated_at
       ) VALUES (
@@ -30,7 +30,7 @@ class EventDAO {
 
     const eventResult = await conn.query(eventQuery, [
       data.id,
-      data.cal_id,
+      data.calendar_id,
       data.author_id,
       data.event_type || 0,
       data.summary,
@@ -52,7 +52,7 @@ class EventDAO {
 
         if (instance.participants && instance.participants.length > 0) {
           for (const participant of instance.participants) {
-            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.state, participant.memo);
+            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.inviter_id, participant.state, participant.memo);
           }
         }
       }
@@ -93,10 +93,10 @@ class EventDAO {
 
     const newEventQuery = `
       INSERT INTO events (
-        id, cal_id, author_id, event_type, summary,
+        id, calendar_id, author_id, event_type, summary,
         description, color, r_rule, locations, forked_from, created_at, updated_at
       )
-      SELECT $1, cal_id, author_id, event_type, summary,
+      SELECT $1, calendar_id, author_id, event_type, summary,
              description, color, r_rule, locations, id, now(), now()
       FROM events WHERE id = $2
       RETURNING *
@@ -190,25 +190,25 @@ class EventDAO {
   // Event Participant 테이블
   // ============================================
 
-  async addParticipantRaw(conn, instanceId, userId, state, memo) {
+  async addParticipantRaw(conn, instanceId, userId, invitedBy, state, memo) {
     const query = `
-      INSERT INTO event_participants (instance_id, user_id, state, memo, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, now(), now())
+      INSERT INTO event_participants (instance_id, user_id, inviter_id, state, memo, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET state = $3, memo = $4, updated_at = now(), deleted_at = NULL
+      SET state = $4, memo = $5, inviter_id = COALESCE($3, event_participants.inviter_id), updated_at = now(), deleted_at = NULL
     `;
-    await conn.query(query, [instanceId, userId, state, memo ? JSON.stringify(memo) : null]);
+    await conn.query(query, [instanceId, userId, invitedBy || null, state, memo ? JSON.stringify(memo) : null]);
   }
 
-  async addParticipant(conn, instanceId, userId) {
+  async addParticipant(conn, instanceId, userId, invitedBy) {
     const query = `
-      INSERT INTO event_participants (instance_id, user_id, state, created_at, updated_at)
-      VALUES ($1, $2, 0, now(), now())
+      INSERT INTO event_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
+      VALUES ($1, $2, $3, 0, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
       SET deleted_at = NULL, state = 0, updated_at = now()
-      RETURNING instance_id, user_id, state
+      RETURNING instance_id, user_id, inviter_id, state
     `;
-    const result = await conn.query(query, [instanceId, userId]);
+    const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
     return result.rows[0];
   }
 
