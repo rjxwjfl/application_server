@@ -3,7 +3,7 @@
 > **상태: 확정 실행 스펙(authoritative design_source).** Writer 는 즉흥 치환 없이 **본 문서만** 따른다.
 > **범위**: 클라이언트 저장소(본 repo) + 문서. 서버 코드는 별도 저장소(§7-C) — wire 계약 lockstep.
 > **정책 근거**: 출시 전 clean-install(schemaVersion=1·데이터 이관 없음) → 물리 리네임 안전. 정수 enum 값 고정.
-> **User 확정(Gate)**: D-R1=A(물리 전면)·D-R2 정수유지·문자열 리네임·D-R3 관계테이블 물리·D-R4 2-pass(Binder→Section)·D-R5 lockstep·D-R6 AST 강제.
+> **User 확정(Gate)**: D-R1=A(물리 전면)·D-R2 정수유지·문자열 리네임·D-R3 관계테이블 물리·**D-R4 단일 전면 pass(Drawer+Section 동시, 2026-07-21 재확정 — 구 2-pass 폐기)**·D-R5 lockstep·D-R6 AST 강제.
 > **base commit**: 클라이언트 현행 HEAD (Custodian 이 worktree 시 정확 hash 고정).
 > **분리 유지**: content_links(참조 계약)·연락처/주소록 트랙과 절대 혼합 금지. 본 스펙은 **순수 리네임**(행위 변화 0).
 
@@ -173,9 +173,11 @@
 
 ---
 
-## 7. 작업 분해 — 2-pass (Pass A: Binder → Pass B: Section)
+## 7. 작업 분해 — 단일 전면 pass (Drawer+Section 동시)
 
-각 Pass 는 **리네임 전용 커밋·로직 무변경**. Pass A 완료·compile+test green 후 Pass B 착수.
+**단일 리네임 전용 커밋**으로 `Drawer→Binder`·`Series→Section` 을 **동시** 적용한다(로직 무변경). 절차: 소스 symbol-rename → generated 재생성 → `dart analyze`/test green → 커밋.
+
+> **2-pass 폐기 사유(2026-07-21 재확정)**: (1) 도메인 `Drawer`(`DrawerModel`·`drawer_id`·`/drawers`)와 Flutter `Drawer` 위젯(`Scaffold(drawer:)`·`AppDrawer`)은 **완전 별개 식별자 공간**이라 symbol-rename 충돌 없음 → 2-pass 의 핵심 근거(Flutter 충돌 집중) 무효. (2) `binder_id`·`section_id` 가 전 파일에 공존해 두 도메인 pass 의 대상 파일이 거의 완전 중첩 → **분리 격리 이득 0**, cycle·generated 재생성만 2배. (3) 위험분산은 custodian `dart analyze`/test + reviewer 잔여-0·diff-rename-only 교차검증으로 대체. (4) 서버 단일 컷오버와 **wire lockstep** — 분할 시 중간 구간 `section_id`/`/sections`/`SECTION_MESSAGE` 필드 불일치. ⇒ 클라·서버 모두 단일 전면 pass.
 
 ### 7-A. client-domain 범위 (writer: client-domain)
 `lib/domain/model/**`·`domain/repository/**`·`domain/sync/**`·`data/dto/**`·`data/mappers/**`·`data/sources/local/{tables,daos}/**`·`data/sources/remote/apis/**`·`core/constants/enums/{drawer,series}_enums.dart`·`core/constants/api_constants.dart`·`core/di/**`. (Drift 테이블 클래스·DAO·DTO snake 필드·enum·API 상수·repository·sync handler.)
@@ -184,27 +186,27 @@
 `lib/presentation/**`(screens·widgets·controller)·`core/configs/routes/routes.dart`·route path·`lib/l10n/app_{ko,en,ja}.arb`. §6 Flutter 예외 준수.
 
 ### 7-C. backend 범위 (서버 저장소 — 별도)
-서버 코드는 **본 repo 부재**. 서버 저장소에서 endpoint 경로·모델·DDL·enum·wire 필드를 본 §1~3 매핑으로 동일 적용. **client §3(wire) 과 lockstep 배포** — snake 필드·경로·enum 문자열은 양측 동시. 조율 창구 = Orchestrator.
+서버 코드는 **본 repo 부재**. 서버 저장소에서 endpoint 경로·모델·DDL·enum·wire 필드를 본 §1~3 매핑으로 동일 적용. 서버도 **단일 전면 pass**로 진행. **client §3(wire) 과 원자적 동시 컷오버** — snake 필드·경로·enum 문자열을 양측 단일 pass 로 동시 전환. 조율 창구 = Orchestrator.
 
 ### 7-D. 문서 범위 (Architect)
 `docs/**` 56파일. 우선순위: `schema.md`·`design_intent.md`·`TypeDefinitions.md`·`api.md`·`transport.md`·`architecture.md`(계약) → `_common.md`(계층도·**§3-3 "SeriesMessage 네이밍 통일"→"SectionMessage"** 규칙 개정, 구 `Comment→SeriesMessage` 이력 보존) → `domain.md`·SC 파일(`SC-series-manage`·`SC-member-manage`·`SC-messaging` 등)·`specs_index`·`user_workflows`. CHANGELOG 이력행 구 명칭 보존.
 
 ### 7-E. 공유 파일·순서·경합 회피
-1. **순서(각 Pass 내)**: enum 파일 + `api_constants.dart` + `core/di` **먼저**(foundation) → domain(7-A) → ui(7-B). 공유 foundation 을 먼저 확정해 하위 conflict 최소화.
+1. **순서(단일 pass 내)**: enum 파일 + `api_constants.dart` + `core/di` **먼저**(foundation) → domain(7-A) → ui(7-B). 공유 foundation 을 먼저 확정해 하위 conflict 최소화.
 2. **generated(`*.g.dart`·`app_localizations*.dart`)**: 소스 리네임 완료 **후 일괄 재생성**(`dart run build_runner build --delete-conflicting-outputs` + `flutter gen-l10n`). 수기편집·중간 재생성 금지.
-3. **lease 경합**: client-domain·client-ui 는 파일 경계로 분리(위 7-A/7-B) → 동시 작업 가능. 단 `api_constants.dart`·enum 은 domain lease 선점(ui 는 이후). 한 Pass 는 한 도메인만(Binder 또는 Section) 잡아 교차 conflict 차단.
-4. **compile gate**: 각 Pass = 소스 rename → 재생성 → `dart analyze` green → 테스트 → 커밋.
+3. **lease 경합**: 단일 pass 이므로 **도메인 분리 불요**(Drawer·Section 동시). client-domain·client-ui 는 파일 경계로 분리(위 7-A/7-B) → 동시 작업 가능. 단 `api_constants.dart`·enum 은 domain lease 선점(ui 는 이후).
+4. **compile gate**: 단일 pass = 소스 rename(Drawer+Section) → 재생성 → `dart analyze` green → 테스트 → 커밋.
 
 ---
 
 ## 8. 되돌림 안전성
-- 순수 리네임·격리 커밋·행위 변화 0 → `git revert` 로 기계적 복원.
-- 리스크: §6 Flutter 충돌 수기편집·generated 재생성. 안전조건: (1) rename 전용 커밋 분리 (2) Pass 별 full compile+test (3) diff 에서 프레임워크 `Drawer` 미변경 확인.
-- Pass A/B 독립 커밋 → Binder 만 revert 등 부분 롤백 가능.
+- 순수 리네임·rename 전용 단일 커밋·행위 변화 0 → `git revert` 로 전체 기계적 복원.
+- 리스크: §6 Flutter 충돌 수기편집·generated 재생성. 안전조건: (1) rename 전용 커밋 분리 (2) 단일 pass full compile+test (3) diff 에서 프레임워크 `Drawer` 미변경 확인.
+- 로직 무변경 단일 커밋이므로 부분 롤백 불요 — 필요 시 전체 revert 로 복원.
 
 ---
 
-## 9. 완료 판정 체크리스트 (Pass 공통)
+## 9. 완료 판정 체크리스트 (단일 pass)
 - [ ] 대상 심볼 잔존 0 (`Drawer`(Rally)·`Series` grep, Flutter 예외 제외).
 - [ ] `dart analyze` 무오류 · 테스트 green.
 - [ ] generated 재생성 완료 · 수기편집 흔적 없음.
