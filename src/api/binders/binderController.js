@@ -12,7 +12,7 @@ const binderController = {
 
   createBinder: asyncHandler(async (req, res) => {
     const binder = await BinderService.createBinder(req.body, req.device_uuid);
-    res.status(201).json({ success: true, data: binder, message: '서랍이 생성되었습니다' });
+    res.status(201).json({ success: true, data: binder, message: '바인더가 생성되었습니다' });
   }),
 
   getBinder: asyncHandler(async (req, res) => {
@@ -22,12 +22,12 @@ const binderController = {
 
   updateBinder: asyncHandler(async (req, res) => {
     const result = await BinderService.updateBinder(req.params.binderId, req.body, req.user_id);
-    res.json({ success: true, data: result, message: '서랍이 수정되었습니다' });
+    res.json({ success: true, data: result, message: '바인더가 수정되었습니다' });
   }),
 
   deleteBinder: asyncHandler(async (req, res) => {
     await BinderService.deleteBinder(req.params.binderId, req.user_id);
-    res.json({ success: true, message: '서랍이 삭제되었습니다' });
+    res.json({ success: true, message: '바인더가 삭제되었습니다' });
   }),
 
   issueBinderInvitation: asyncHandler(async (req, res) => {
@@ -77,7 +77,7 @@ const binderController = {
     const { invitation_code } = req.body;
     if (!invitation_code) throw new BadRequestError('초대 코드가 필요합니다');
     await BinderService.joinBinderByInvitation(invitation_code, req.user_id, req.device_uuid);
-    res.json({ success: true, message: '서랍에 가입되었습니다' });
+    res.json({ success: true, message: '바인더에 가입되었습니다' });
   }),
 
   updateBinderMemberRole: asyncHandler(async (req, res) => {
@@ -96,7 +96,7 @@ const binderController = {
 
   leaveBinder: asyncHandler(async (req, res) => {
     await BinderService.leaveBinder(req.params.binderId, req.user_id, req.device_uuid);
-    res.json({ success: true, message: '서랍에서 탈퇴되었습니다' });
+    res.json({ success: true, message: '바인더에서 탈퇴되었습니다' });
   }),
 
   updateNickname: asyncHandler(async (req, res) => {
@@ -115,7 +115,7 @@ const binderController = {
 
   updateBinderSettings: asyncHandler(async (req, res) => {
     const result = await BinderService.updateBinder(req.params.binderId, req.body, req.user_id);
-    res.json({ success: true, data: result, message: '서랍 설정이 수정되었습니다' });
+    res.json({ success: true, data: result, message: '바인더 설정이 수정되었습니다' });
   }),
 
   updatePreferences: asyncHandler(async (req, res) => {

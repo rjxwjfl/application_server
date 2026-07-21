@@ -34,7 +34,7 @@ async function hideExpiredAttachments() {
     const count = await AttachmentDAO.markHidden(pool, ids);
     logger.info('Lifecycle: attachments hidden', { count });
 
-    // 드로어별 집계 후 WebSocket 알림 (binder_files_hidden)
+    // 바인더별 집계 후 WebSocket 알림 (binder_files_hidden)
     const byBinder = rows.reduce((acc, r) => {
       acc[r.binder_id] = (acc[r.binder_id] || 0) + 1;
       return acc;

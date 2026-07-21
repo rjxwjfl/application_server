@@ -17,19 +17,19 @@ const sectionController = {
 
   createSection: asyncHandler(async (req, res) => {
     const section = await SectionService.createSection(req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
-    res.status(201).json({ success: true, data: section, message: '시리즈가 생성되었습니다' });
+    res.status(201).json({ success: true, data: section, message: '섹션이 생성되었습니다' });
   }),
 
   updateSection: asyncHandler(async (req, res) => {
     const { sectionId } = req.params;
     const section = await SectionService.updateSection(sectionId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
-    res.json({ success: true, data: section, message: '시리즈가 수정되었습니다' });
+    res.json({ success: true, data: section, message: '섹션이 수정되었습니다' });
   }),
 
   deleteSection: asyncHandler(async (req, res) => {
     const { sectionId } = req.params;
     await SectionService.deleteSection(sectionId, { sender_id: req.user_id, device_uuid: req.device_uuid });
-    res.json({ success: true, message: '시리즈가 삭제되었습니다' });
+    res.json({ success: true, message: '섹션이 삭제되었습니다' });
   }),
 
   // ============================================

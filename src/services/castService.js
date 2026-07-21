@@ -116,7 +116,7 @@ class CastService {
 
     const cal = await CalendarDAO.findById(pool, cast.calendar_id);
     const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
-    if (!member || member.deleted_at) throw new ForbiddenError('드로어 멤버만 댓글을 달 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 댓글을 달 수 있습니다');
 
     const comment = await CastDAO.createComment(pool, {
       ...data,

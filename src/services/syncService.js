@@ -44,9 +44,9 @@ class SyncService {
     const ctx = {
       userId,
       oldTs: oldTsDate,
-      oldDIds: prevToken.d_ids.filter(id => currDIds.includes(id)), // 유지된 기존 서랍
+      oldDIds: prevToken.d_ids.filter(id => currDIds.includes(id)), // 유지된 기존 바인더
       oldCIds: prevToken.c_ids.filter(id => currCIds.includes(id)), // 유지된 기존 캘린더
-      newDIds: diff(currDIds, prevToken.d_ids), // 새로 가입한 서랍
+      newDIds: diff(currDIds, prevToken.d_ids), // 새로 가입한 바인더
       newCIds: diff(currCIds, prevToken.c_ids), // 새로 구독한 캘린더
       calWindowFrom,
       calWindowTo,

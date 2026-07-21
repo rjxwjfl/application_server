@@ -5,7 +5,7 @@
  * Payload: { ts: number, d_ids: string[], c_ids: string[] }
  *
  *   ts    — 마지막 동기화 완료 시각 (Unix timestamp, seconds)
- *   d_ids — 마지막 동기화 시점에 유저가 속한 서랍 ID 목록
+ *   d_ids — 마지막 동기화 시점에 유저가 속한 바인더 ID 목록
  *   c_ids — 마지막 동기화 시점에 유저가 구독한 캘린더 ID 목록
  *
  * 서버는 현재 d_ids/c_ids 와 토큰의 값을 비교하여

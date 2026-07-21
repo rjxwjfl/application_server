@@ -17,7 +17,7 @@ class PostService {
 
   async getPosts(binderId, query, userId) {
     const member = await BinderDAO.getMember(pool, binderId, userId);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 조회할 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 조회할 수 있습니다');
     const posts = await PostDAO.findByBinderId(pool, binderId, query);
     return await Promise.all(posts.map((post) => this.withAttachments(post)));
   }
@@ -30,7 +30,7 @@ class PostService {
 
   async create(data, context) {
     const member = await BinderDAO.getMember(pool, data.binder_id, context.sender_id);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 게시물을 작성할 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 게시물을 작성할 수 있습니다');
 
     const post = await PostDAO.create(pool, {
       ...data,
@@ -109,7 +109,7 @@ class PostService {
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
     const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 댓글을 달 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 댓글을 달 수 있습니다');
 
     const comment = await PostDAO.createComment(pool, {
       ...data,
@@ -160,7 +160,7 @@ class PostService {
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
     const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 좋아요를 누를 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 좋아요를 누를 수 있습니다');
 
     const existing = await PostDAO.findLike(pool, postId, context.sender_id);
     if (existing) return { count: await PostDAO.getLikeCount(pool, postId) };

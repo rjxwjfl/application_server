@@ -20,7 +20,7 @@ router.get("/:binderId", binderController.getBinder);
 router.patch("/:binderId", binderController.updateBinder);
 router.delete("/:binderId", binderController.deleteBinder);
 
-// 서랍 설정 수정 (master 전용)
+// 바인더 설정 수정 (master 전용)
 router.patch("/:binderId/settings", binderController.updateBinderSettings);
 
 // 초대 토큰 발급

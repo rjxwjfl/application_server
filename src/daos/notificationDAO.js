@@ -27,7 +27,7 @@ class NotificationDAO {
   }
 
   /**
-   * 유저가 속한 서랍 ID 목록 조회
+   * 유저가 속한 바인더 ID 목록 조회
    */
   async getBinderIdsByUserId(conn, userId) {
     const query = `
@@ -53,7 +53,7 @@ class NotificationDAO {
   }
 
   /**
-   * notification_level 기준으로 서랍 멤버 필터링
+   * notification_level 기준으로 바인더 멤버 필터링
    * notification_level: 0=모두, 1=관련만, 2=멘션만, 3=수신거부
    */
   async getMembersForAlert(conn, binderId, maxLevel) {
