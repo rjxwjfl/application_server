@@ -15,7 +15,7 @@ const TargetType = Object.freeze({
   USER_DEVICE: 'USER_DEVICE',
   USER_SETTING: 'USER_SETTING',
 
-  // 서랍 (20~23)
+  // 바인더 (20~23)
   BINDER: 'BINDER',
   BINDER_MEMBER: 'BINDER_MEMBER',
   BINDER_SETTING: 'BINDER_SETTING',
@@ -31,7 +31,7 @@ const TargetType = Object.freeze({
   CALENDAR: 'CALENDAR',
   CALENDAR_SUBSCRIPTION: 'CALENDAR_SUBSCRIPTION',
 
-  // 시리즈·메시지 (40~48)
+  // 섹션·메시지 (40~48)
   SECTION: 'SECTION',
   SECTION_MESSAGE: 'SECTION_MESSAGE',
   ATTACHMENT: 'ATTACHMENT',

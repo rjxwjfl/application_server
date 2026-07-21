@@ -10,7 +10,7 @@ const { TargetType, ActionType } = require('../utils/typeDefinitions');
 class CalendarService {
   async getBinderCalendars(binderId, userId) {
     const member = await BinderDAO.getMember(pool, binderId, userId);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 조회할 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 조회할 수 있습니다');
     return await CalendarDAO.findByBinderId(pool, binderId);
   }
 

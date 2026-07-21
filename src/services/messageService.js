@@ -42,7 +42,7 @@ class MessageService {
 
   async createMessage(sectionId, data, context) {
     const section = await SectionDAO.findById(pool, sectionId);
-    if (!section) throw new NotFoundError('시리즈를 찾을 수 없습니다');
+    if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
 
     const messageId = data.id || generateUUID();
 

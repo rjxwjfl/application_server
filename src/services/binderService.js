@@ -97,7 +97,7 @@ class BinderService {
 
       const existingMember = await BinderDAO.getMember(client, invitation.binder_id, userId);
       if (existingMember && !existingMember.deleted_at) {
-        throw new ConflictError('이미 이 서랍의 멤버입니다');
+        throw new ConflictError('이미 이 바인더의 멤버입니다');
       }
 
       await BinderDAO.addMember(client, invitation.binder_id, userId, 3);
@@ -113,12 +113,12 @@ class BinderService {
   async requestBinderJoin(binderId, userId, device_uuid) {
     await withTransaction(async (client) => {
       const settings = await BinderDAO.getSettings(client, binderId);
-      if (!settings) throw new NotFoundError('서랍을 찾을 수 없습니다');
-      if (!settings.is_public && !settings.require_approval) throw new ForbiddenError('비공개 서랍입니다');
+      if (!settings) throw new NotFoundError('바인더를 찾을 수 없습니다');
+      if (!settings.is_public && !settings.require_approval) throw new ForbiddenError('비공개 바인더입니다');
 
       const existingMember = await BinderDAO.getMember(client, binderId, userId);
       if (existingMember && !existingMember.deleted_at) {
-        throw new ConflictError('이미 이 서랍의 멤버입니다');
+        throw new ConflictError('이미 이 바인더의 멤버입니다');
       }
 
       await BinderDAO.addMember(client, binderId, userId, 3);
@@ -166,7 +166,7 @@ class BinderService {
     await withTransaction(async (client) => {
       const member = await BinderDAO.getMember(client, binderId, userId);
       if (!member || member.deleted_at) throw new NotFoundError('멤버가 아닙니다');
-      if (member.role === 0) throw new ForbiddenError('서랍의 마스터는 탈퇴할 수 없습니다. 먼저 마스터 권한을 이전해주세요');
+      if (member.role === 0) throw new ForbiddenError('바인더의 마스터는 탈퇴할 수 없습니다. 먼저 마스터 권한을 이전해주세요');
 
       await BinderDAO.removeMember(client, binderId, userId);
       await BinderDAO.decrementMemberCount(client, binderId);
@@ -234,7 +234,7 @@ class BinderService {
 
   async search(binderId, { q, type, limit = 20 }, userId) {
     const member = await BinderDAO.getMember(pool, binderId, userId);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 검색할 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 검색할 수 있습니다');
     if (!q || q.length < 2) throw new BadRequestError('2자 이상 입력해주세요');
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
@@ -283,7 +283,7 @@ class BinderService {
 
   async getBinder(binderId) {
     const binder = await BinderDAO.findById(pool, binderId);
-    if (!binder) throw new NotFoundError('서랍을 찾을 수 없습니다');
+    if (!binder) throw new NotFoundError('바인더를 찾을 수 없습니다');
     return binder;
   }
 
@@ -315,7 +315,7 @@ class BinderService {
 
   async updatePreferences(binderId, userId, data) {
     const member = await BinderDAO.getMember(pool, binderId, userId);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버가 아닙니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버가 아닙니다');
     await BinderDAO.updateMemberPreferences(pool, binderId, userId, data);
   }
 
@@ -357,14 +357,14 @@ class BinderService {
   async listAttachments(binderId, query, userId) {
     const { AttachmentDAO } = require('../daos/attachmentDAO');
     const member = await BinderDAO.getMember(pool, binderId, userId);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 파일을 조회할 수 있습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 파일을 조회할 수 있습니다');
     return await AttachmentDAO.findByBinder(pool, binderId, query);
   }
 
   async deleteAttachment(binderId, attachmentId, userId) {
     const { AttachmentDAO } = require('../daos/attachmentDAO');
     const member = await BinderDAO.getMember(pool, binderId, userId);
-    if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버가 아닙니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버가 아닙니다');
     await AttachmentDAO.softDelete(pool, attachmentId, userId);
   }
 

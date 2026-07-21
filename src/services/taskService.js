@@ -131,11 +131,11 @@ class TaskService {
       const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
       const actor = await BinderDAO.getMember(client, instance.binder_id, context.sender_id);
-      if (!actor || actor.deleted_at) throw new ForbiddenError('서랍 멤버만 참여할 수 있습니다');
+      if (!actor || actor.deleted_at) throw new ForbiddenError('바인더 멤버만 참여할 수 있습니다');
       if (data.user_id !== context.sender_id && actor.role > 2)
         throw new ForbiddenError('편집자 이상만 타인을 추가할 수 있습니다');
       const target = await BinderDAO.getMember(client, instance.binder_id, data.user_id);
-      if (!target || target.deleted_at) throw new BadRequestError('서랍 멤버만 추가할 수 있습니다');
+      if (!target || target.deleted_at) throw new BadRequestError('바인더 멤버만 추가할 수 있습니다');
       const participant = await TaskDAO.addParticipant(client, instanceId, data.user_id, context.sender_id);
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
       return { participant, binder_id: instance.binder_id };
@@ -176,7 +176,7 @@ class TaskService {
       const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
       const actor = await BinderDAO.getMember(client, instance.binder_id, context.sender_id);
-      if (!actor || actor.deleted_at) throw new ForbiddenError('서랍 멤버만 제거할 수 있습니다');
+      if (!actor || actor.deleted_at) throw new ForbiddenError('바인더 멤버만 제거할 수 있습니다');
       if (targetUserId !== context.sender_id && actor.role > 2)
         throw new ForbiddenError('편집자 이상만 타인을 제거할 수 있습니다');
       const participant = await TaskDAO.findParticipant(client, instanceId, targetUserId);
