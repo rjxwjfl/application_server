@@ -1,68 +1,68 @@
 class MessageDAO {
   // ============================================
-  // Series Messages 테이블
+  // Section Messages 테이블
   // ============================================
 
   async findById(conn, messageId) {
     const query = `
-      SELECT id, series_id, user_id, parent_id, content,
+      SELECT id, section_id, user_id, parent_id, content,
              mention_everyone, is_pinned, created_at, updated_at, deleted_at
-      FROM series_messages
+      FROM section_messages
       WHERE id = $1 AND deleted_at IS NULL
     `;
     const result = await conn.query(query, [messageId]);
     return result.rows[0] || null;
   }
 
-  async getBySeriesId(conn, seriesId, { cursor_at, cursor_id, limit = 50 } = {}) {
+  async getBySectionId(conn, sectionId, { cursor_at, cursor_id, limit = 50 } = {}) {
     let query;
     let params;
 
     if (cursor_at && cursor_id) {
       query = `
-        SELECT id, series_id, user_id, parent_id, content,
+        SELECT id, section_id, user_id, parent_id, content,
                mention_everyone, is_pinned, created_at, updated_at
-        FROM series_messages
-        WHERE series_id = $1 AND deleted_at IS NULL
+        FROM section_messages
+        WHERE section_id = $1 AND deleted_at IS NULL
           AND (created_at, id) < ($2, $3)
         ORDER BY created_at DESC, id DESC
         LIMIT $4
       `;
-      params = [seriesId, cursor_at, cursor_id, limit];
+      params = [sectionId, cursor_at, cursor_id, limit];
     } else {
       query = `
-        SELECT id, series_id, user_id, parent_id, content,
+        SELECT id, section_id, user_id, parent_id, content,
                mention_everyone, is_pinned, created_at, updated_at
-        FROM series_messages
-        WHERE series_id = $1 AND deleted_at IS NULL
+        FROM section_messages
+        WHERE section_id = $1 AND deleted_at IS NULL
         ORDER BY created_at DESC, id DESC
         LIMIT $2
       `;
-      params = [seriesId, limit];
+      params = [sectionId, limit];
     }
 
     const result = await conn.query(query, params);
     return result.rows;
   }
 
-  async create(conn, { id, series_id, user_id, parent_id, content, mention_everyone }) {
+  async create(conn, { id, section_id, user_id, parent_id, content, mention_everyone }) {
     const query = `
-      INSERT INTO series_messages (id, series_id, user_id, parent_id, content, mention_everyone, created_at, updated_at)
+      INSERT INTO section_messages (id, section_id, user_id, parent_id, content, mention_everyone, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, now(), now())
-      RETURNING id, series_id, user_id, parent_id, content, mention_everyone, is_pinned, created_at, updated_at
+      RETURNING id, section_id, user_id, parent_id, content, mention_everyone, is_pinned, created_at, updated_at
     `;
     const result = await conn.query(query, [
-      id, series_id, user_id, parent_id || null, content, mention_everyone || false,
+      id, section_id, user_id, parent_id || null, content, mention_everyone || false,
     ]);
     return result.rows[0];
   }
 
   async update(conn, messageId, { content }) {
     const query = `
-      UPDATE series_messages
+      UPDATE section_messages
       SET content = COALESCE($1, content), updated_at = now()
       WHERE id = $2 AND deleted_at IS NULL
-      RETURNING id, series_id, user_id, parent_id, content, mention_everyone, is_pinned, created_at, updated_at
+      RETURNING id, section_id, user_id, parent_id, content, mention_everyone, is_pinned, created_at, updated_at
     `;
     const result = await conn.query(query, [content, messageId]);
     return result.rows[0];
@@ -70,7 +70,7 @@ class MessageDAO {
 
   async softDelete(conn, messageId) {
     const query = `
-      UPDATE series_messages
+      UPDATE section_messages
       SET deleted_at = now(), updated_at = now()
       WHERE id = $1 AND deleted_at IS NULL
     `;
@@ -79,7 +79,7 @@ class MessageDAO {
 
   async togglePin(conn, messageId) {
     const query = `
-      UPDATE series_messages
+      UPDATE section_messages
       SET is_pinned = NOT is_pinned, updated_at = now()
       WHERE id = $1 AND deleted_at IS NULL
       RETURNING id, is_pinned
@@ -89,10 +89,10 @@ class MessageDAO {
   }
 
   // ============================================
-  // Attachments (attachments 테이블 — context_type='SERIES_MESSAGE')
+  // Attachments (attachments 테이블 — context_type='SECTION_MESSAGE')
   // ============================================
 
-  async insertAttachments(conn, messageId, drawerId, uploaderId, attachments) {
+  async insertAttachments(conn, messageId, binderId, uploaderId, attachments) {
     if (!attachments || attachments.length === 0) return [];
 
     const values = [];
@@ -102,7 +102,7 @@ class MessageDAO {
     for (const a of attachments) {
       values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
       params.push(
-        a.id, drawerId, 'SERIES_MESSAGE', messageId,
+        a.id, binderId, 'SECTION_MESSAGE', messageId,
         a.storage_key, a.filename || null, a.file_size || null, a.content_type || null,
         uploaderId, 'standard',
       );
@@ -110,7 +110,7 @@ class MessageDAO {
 
     const query = `
       INSERT INTO attachments
-        (id, drawer_id, context_type, context_id, storage_key, filename, file_size, content_type, uploader_id, storage_class, status)
+        (id, binder_id, context_type, context_id, storage_key, filename, file_size, content_type, uploader_id, storage_class, status)
       VALUES ${values.join(', ')}
       RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status
     `;
@@ -122,7 +122,7 @@ class MessageDAO {
     const query = `
       SELECT id, context_id AS message_id, filename, file_size, content_type, storage_key, status
       FROM attachments
-      WHERE context_type = 'SERIES_MESSAGE' AND context_id = $1 AND deleted_at IS NULL
+      WHERE context_type = 'SECTION_MESSAGE' AND context_id = $1 AND deleted_at IS NULL
       ORDER BY created_at ASC
     `;
     const result = await conn.query(query, [messageId]);
@@ -134,7 +134,7 @@ class MessageDAO {
     const query = `
       SELECT id, context_id AS message_id, filename, file_size, content_type, storage_key, status
       FROM attachments
-      WHERE context_type = 'SERIES_MESSAGE' AND context_id = ANY($1) AND deleted_at IS NULL
+      WHERE context_type = 'SECTION_MESSAGE' AND context_id = ANY($1) AND deleted_at IS NULL
       ORDER BY created_at ASC
     `;
     const result = await conn.query(query, [messageIds]);
@@ -257,32 +257,32 @@ class MessageDAO {
   // 핀 메시지 조회
   // ============================================
 
-  async findPinned(conn, seriesId) {
+  async findPinned(conn, sectionId) {
     const query = `
-      SELECT id, series_id, user_id, parent_id, content,
+      SELECT id, section_id, user_id, parent_id, content,
              mention_everyone, is_pinned, created_at, updated_at
-      FROM series_messages
-      WHERE series_id = $1 AND is_pinned = TRUE AND deleted_at IS NULL
+      FROM section_messages
+      WHERE section_id = $1 AND is_pinned = TRUE AND deleted_at IS NULL
       ORDER BY updated_at DESC
     `;
-    const result = await conn.query(query, [seriesId]);
+    const result = await conn.query(query, [sectionId]);
     return result.rows;
   }
 
   // ============================================
-  // Series Message Cursors 테이블 (읽음 위치)
+  // Section Message Cursors 테이블 (읽음 위치)
   // ============================================
 
-  async upsertCursor(conn, seriesId, userId, { last_read_message_id, last_read_message_at }) {
+  async upsertCursor(conn, sectionId, userId, { last_read_message_id, last_read_message_at }) {
     const query = `
-      INSERT INTO series_message_cursors (series_id, user_id, last_read_message_id, last_read_message_at, updated_at)
+      INSERT INTO section_message_cursors (section_id, user_id, last_read_message_id, last_read_message_at, updated_at)
       VALUES ($1, $2, $3, $4, now())
-      ON CONFLICT (series_id, user_id) DO UPDATE
+      ON CONFLICT (section_id, user_id) DO UPDATE
       SET last_read_message_id = $3,
           last_read_message_at = $4,
           updated_at = now()
     `;
-    await conn.query(query, [seriesId, userId, last_read_message_id, last_read_message_at]);
+    await conn.query(query, [sectionId, userId, last_read_message_id, last_read_message_at]);
   }
 }
 

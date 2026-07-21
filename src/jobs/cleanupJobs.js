@@ -7,16 +7,16 @@
  *
  * 삭제 순서: FK 의존성 역순 (child → parent)
  *   1. message_reactions, message_mentions, message_embeds
- *   2. series_messages (polls/options/votes 는 ON DELETE CASCADE)
+ *   2. section_messages (polls/options/votes 는 ON DELETE CASCADE)
  *   3. cast_comments, post_comments (독립 soft delete 건)
  *   4. event_participants, task_participants
- *   5. event_series, task_series
+ *   5. event_sections, task_sections
  *   6. event_instances, task_instances
- *   7. attachments (drawer 삭제 전에 처리)
+ *   7. attachments (binder 삭제 전에 처리)
  *   8. events, tasks, casts, posts
- *   9. series, calendar_subscriptions, drawer_members
+ *   9. sections, calendar_subscriptions, binder_members
  *  10. calendars
- *  11. drawers
+ *  11. binders
  * =========================================
  */
 
@@ -29,35 +29,35 @@ const STEPS = [
   { table: 'message_reactions', column: 'deleted_at' },
   { table: 'message_mentions',  column: 'deleted_at' },
   { table: 'message_embeds',    column: 'deleted_at' },
-  // 2. 시리즈 메시지 (polls/options/votes cascade)
-  { table: 'series_messages',   column: 'deleted_at' },
+  // 2. 섹션 메시지 (polls/options/votes cascade)
+  { table: 'section_messages',   column: 'deleted_at' },
   // 3. 댓글 독립 soft delete 건
   { table: 'cast_comments',     column: 'deleted_at' },
   { table: 'post_comments',     column: 'deleted_at' },
   // 4. 참여자
   { table: 'event_participants', column: 'deleted_at' },
   { table: 'task_participants',  column: 'deleted_at' },
-  // 5. series 연결
-  { table: 'event_series', column: 'deleted_at' },
-  { table: 'task_series',  column: 'deleted_at' },
+  // 5. section 연결
+  { table: 'event_sections', column: 'deleted_at' },
+  { table: 'task_sections',  column: 'deleted_at' },
   // 6. 인스턴스 (sub-instance cascade from parent)
   { table: 'event_instances', column: 'deleted_at' },
   { table: 'task_instances',  column: 'deleted_at' },
-  // 7. 첨부 파일 (drawer FK, drawer 삭제 전)
+  // 7. 첨부 파일 (binder FK, binder 삭제 전)
   { table: 'attachments', column: 'deleted_at' },
   // 8. 이벤트·태스크·캐스트·포스트 (cast_comments·post_comments·post_likes cascade)
   { table: 'events', column: 'deleted_at' },
   { table: 'tasks',  column: 'deleted_at' },
   { table: 'casts',  column: 'deleted_at' },
   { table: 'posts',  column: 'deleted_at' },
-  // 9. 시리즈·구독·멤버 (drawer FK)
-  { table: 'series',                column: 'deleted_at' },
+  // 9. 섹션·구독·멤버 (binder FK)
+  { table: 'sections',               column: 'deleted_at' },
   { table: 'calendar_subscriptions', column: 'deleted_at' },
-  { table: 'drawer_members',         column: 'deleted_at' },
+  { table: 'binder_members',         column: 'deleted_at' },
   // 10. 캘린더
   { table: 'calendars', column: 'deleted_at' },
-  // 11. 드로어 (최후)
-  { table: 'drawers', column: 'deleted_at' },
+  // 11. 바인더 (최후)
+  { table: 'binders', column: 'deleted_at' },
 ];
 
 async function runCleanup() {

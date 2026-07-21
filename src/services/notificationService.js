@@ -20,18 +20,18 @@ const ALERT_TYPE_MAP = {
 };
 
 class NotificationService {
-  async sendSync({ drawer_id, sender_id, device_uuid }) {
+  async sendSync({ binder_id, sender_id, device_uuid }) {
     try {
-      const debounced = await this._debounceSync(drawer_id);
+      const debounced = await this._debounceSync(binder_id);
       if (debounced) {
-        logger.debug('SYNC debounced, skipping', { drawer_id });
+        logger.debug('SYNC debounced, skipping', { binder_id });
         return;
       }
 
-      const topic = `drawer_${drawer_id}`;
+      const topic = `binder_${binder_id}`;
       const data = {
         type: 'SYNC',
-        drawer_id: String(drawer_id || ''),
+        binder_id: String(binder_id || ''),
         sender_id: String(sender_id || ''),
         device_uuid: String(device_uuid || ''),
         timestamp: Date.now().toString(),
@@ -39,14 +39,14 @@ class NotificationService {
 
       await fcm.sendToTopic(topic, data);
     } catch (error) {
-      logger.error('SYNC push failed', { drawer_id, error: error.message });
+      logger.error('SYNC push failed', { binder_id, error: error.message });
     }
   }
 
   /**
    * ALERT 푸시: notification+data, Multicast
    *
-   * @param {string} params.drawer_id
+   * @param {string} params.binder_id
    * @param {string} params.sender_id
    * @param {string} params.type - 알림 유형 (assignment, mention, invitation, approval, reminder, message 등)
    * @param {string} params.title
@@ -57,7 +57,7 @@ class NotificationService {
    * @param {string} [params.device_uuid]
    */
   async sendAlert({
-    drawer_id,
+    binder_id,
     sender_id,
     type,
     title,
@@ -70,7 +70,7 @@ class NotificationService {
     try {
       let userIds = target_user_ids;
       if (!userIds || userIds.length === 0) {
-        const members = await NotificationDAO.getMembersForAlert(pool, drawer_id, requiredLevel);
+        const members = await NotificationDAO.getMembersForAlert(pool, binder_id, requiredLevel);
         userIds = members.map((m) => m.user_id).filter((id) => id !== sender_id);
       } else {
         userIds = userIds.filter((id) => id !== sender_id);
@@ -85,7 +85,7 @@ class NotificationService {
 
       const data = {
         type: 'ALERT',
-        drawer_id: String(drawer_id || ''),
+        binder_id: String(binder_id || ''),
         sender_id: String(sender_id || ''),
         device_uuid: String(device_uuid || ''),
         route_type: String(routeData.route_type || ''),
@@ -106,61 +106,61 @@ class NotificationService {
         recipient_id: userId,
         sender_id,
         notification_type,
-        route_type: routeData.route_type || TargetType.SERIES_MESSAGE,
+        route_type: routeData.route_type || TargetType.SECTION_MESSAGE,
         route_id: routeData.route_id || null,
-        drawer_id,
+        binder_id,
         title,
         body,
         payload: { ...routeData, device_uuid },
       }));
       await NotificationDAO.insertNotificationsBulk(pool, notifications);
     } catch (error) {
-      logger.error('ALERT push failed', { drawer_id, type, error: error.message });
+      logger.error('ALERT push failed', { binder_id, type, error: error.message });
     }
   }
 
-  async subscribeUserToAllDrawers(userId) {
+  async subscribeUserToAllBinders(userId) {
     try {
       const devices = await NotificationDAO.getActiveTokensByUserId(pool, userId);
       const tokens = devices.map((d) => d.device_token);
       if (tokens.length === 0) return;
 
-      const drawerIds = await NotificationDAO.getDrawerIdsByUserId(pool, userId);
-      for (const drawerId of drawerIds) {
-        await fcm.subscribeToTopic(tokens, `drawer_${drawerId}`);
+      const binderIds = await NotificationDAO.getBinderIdsByUserId(pool, userId);
+      for (const binderId of binderIds) {
+        await fcm.subscribeToTopic(tokens, `binder_${binderId}`);
       }
-      logger.info('Subscribed user to all drawer topics', { userId, drawerCount: drawerIds.length });
+      logger.info('Subscribed user to all binder topics', { userId, binderCount: binderIds.length });
     } catch (error) {
-      logger.error('subscribeUserToAllDrawers failed', { userId, error: error.message });
+      logger.error('subscribeUserToAllBinders failed', { userId, error: error.message });
     }
   }
 
-  async subscribeUserToDrawer(userId, drawerId) {
+  async subscribeUserToBinder(userId, binderId) {
     try {
       const devices = await NotificationDAO.getActiveTokensByUserId(pool, userId);
       const tokens = devices.map((d) => d.device_token);
       if (tokens.length === 0) return;
-      await fcm.subscribeToTopic(tokens, `drawer_${drawerId}`);
+      await fcm.subscribeToTopic(tokens, `binder_${binderId}`);
     } catch (error) {
-      logger.error('subscribeUserToDrawer failed', { userId, drawerId, error: error.message });
+      logger.error('subscribeUserToBinder failed', { userId, binderId, error: error.message });
     }
   }
 
-  async unsubscribeUserFromDrawer(userId, drawerId) {
+  async unsubscribeUserFromBinder(userId, binderId) {
     try {
       const devices = await NotificationDAO.getActiveTokensByUserId(pool, userId);
       const tokens = devices.map((d) => d.device_token);
       if (tokens.length === 0) return;
-      await fcm.unsubscribeFromTopic(tokens, `drawer_${drawerId}`);
+      await fcm.unsubscribeFromTopic(tokens, `binder_${binderId}`);
     } catch (error) {
-      logger.error('unsubscribeUserFromDrawer failed', { userId, drawerId, error: error.message });
+      logger.error('unsubscribeUserFromBinder failed', { userId, binderId, error: error.message });
     }
   }
 
-  async _debounceSync(drawerId) {
+  async _debounceSync(binderId) {
     const redis = getRedis();
     if (!redis) return false;
-    const key = `sync_debounce:${drawerId}`;
+    const key = `sync_debounce:${binderId}`;
     const result = await redis.set(key, '1', 'EX', 2, 'NX');
     return result === null;
   }

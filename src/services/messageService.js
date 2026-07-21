@@ -1,5 +1,5 @@
 const { MessageDAO } = require('../daos/messageDAO');
-const { SeriesDAO } = require('../daos/seriesDAO');
+const { SectionDAO } = require('../daos/sectionDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const pool = require('../../config/db');
@@ -8,8 +8,8 @@ const { NotFoundError, ForbiddenError, BadRequestError, ConflictError } = requir
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class MessageService {
-  async getMessages(seriesId, query) {
-    const messages = await MessageDAO.getBySeriesId(pool, seriesId, query);
+  async getMessages(sectionId, query) {
+    const messages = await MessageDAO.getBySectionId(pool, sectionId, query);
     if (messages.length === 0) return [];
 
     const messageIds = messages.map((m) => m.id);
@@ -40,16 +40,16 @@ class MessageService {
     }));
   }
 
-  async createMessage(seriesId, data, context) {
-    const series = await SeriesDAO.findById(pool, seriesId);
-    if (!series) throw new NotFoundError('시리즈를 찾을 수 없습니다');
+  async createMessage(sectionId, data, context) {
+    const section = await SectionDAO.findById(pool, sectionId);
+    if (!section) throw new NotFoundError('시리즈를 찾을 수 없습니다');
 
     const messageId = data.id || generateUUID();
 
     const result = await withTransaction(async (client) => {
       const message = await MessageDAO.create(client, {
         id: messageId,
-        series_id: seriesId,
+        section_id: sectionId,
         user_id: context.sender_id,
         parent_id: data.parent_id,
         content: data.content,
@@ -61,7 +61,7 @@ class MessageService {
       let mentions = [];
 
       if (data.attachments && data.attachments.length > 0) {
-        attachments = await MessageDAO.insertAttachments(client, messageId, series.drawer_id, context.sender_id, data.attachments);
+        attachments = await MessageDAO.insertAttachments(client, messageId, section.binder_id, context.sender_id, data.attachments);
       }
       if (data.embeds && data.embeds.length > 0) {
         embeds = await MessageDAO.insertEmbeds(client, messageId, data.embeds);
@@ -78,22 +78,22 @@ class MessageService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: series.drawer_id,
+      binder_id: section.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
-      action: ActionType.CREATE, target_type: TargetType.SERIES_MESSAGE, target_id: messageId,
+      action: ActionType.CREATE, target_type: TargetType.SECTION_MESSAGE, target_id: messageId,
     });
 
     if (data.mention_user_ids && data.mention_user_ids.length > 0) {
       eventBus.emit('alert', {
-        drawer_id: series.drawer_id,
+        binder_id: section.binder_id,
         sender_id: context.sender_id,
         type: 'mention',
-        title: series.title || '',
+        title: section.title || '',
         body: data.content ? data.content.substring(0, 100) : '메시지에서 멘션되었습니다.',
         target_user_ids: data.mention_user_ids,
         requiredLevel: 2,
-        routeData: { route_type: TargetType.SERIES_MESSAGE, route_id: messageId },
+        routeData: { route_type: TargetType.SECTION_MESSAGE, route_id: messageId },
         device_uuid: context.device_uuid,
       });
     }
@@ -111,46 +111,46 @@ class MessageService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: data.drawer_id || message.drawer_id,
+      binder_id: data.binder_id || message.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
-      action: ActionType.UPDATE, target_type: TargetType.SERIES_MESSAGE, target_id: messageId,
+      action: ActionType.UPDATE, target_type: TargetType.SECTION_MESSAGE, target_id: messageId,
     });
 
     return result;
   }
 
   async deleteMessage(messageId, context) {
-    const { drawer_id } = await withTransaction(async (client) => {
+    const { binder_id } = await withTransaction(async (client) => {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
       await MessageDAO.softDelete(client, messageId);
-      const series = await SeriesDAO.findById(client, message.series_id);
-      return { drawer_id: series ? series.drawer_id : null };
+      const section = await SectionDAO.findById(client, message.section_id);
+      return { binder_id: section ? section.binder_id : null };
     });
 
     eventBus.emit('sync', {
-      drawer_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
-      action: ActionType.DELETE, target_type: TargetType.SERIES_MESSAGE, target_id: messageId,
+      action: ActionType.DELETE, target_type: TargetType.SECTION_MESSAGE, target_id: messageId,
     });
   }
 
   async togglePin(messageId, context) {
-    const { result, drawer_id } = await withTransaction(async (client) => {
+    const { result, binder_id } = await withTransaction(async (client) => {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
       const result = await MessageDAO.togglePin(client, messageId);
-      const series = await SeriesDAO.findById(client, message.series_id);
-      return { result, drawer_id: series ? series.drawer_id : null };
+      const section = await SectionDAO.findById(client, message.section_id);
+      return { result, binder_id: section ? section.binder_id : null };
     });
 
     eventBus.emit('sync', {
-      drawer_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
-      action: result.is_pinned ? ActionType.PIN : ActionType.UNPIN, target_type: TargetType.SERIES_MESSAGE, target_id: messageId,
+      action: result.is_pinned ? ActionType.PIN : ActionType.UNPIN, target_type: TargetType.SECTION_MESSAGE, target_id: messageId,
     });
 
     return result;
@@ -173,12 +173,12 @@ class MessageService {
     });
   }
 
-  async getPinnedMessages(seriesId) {
-    return await MessageDAO.findPinned(pool, seriesId);
+  async getPinnedMessages(sectionId) {
+    return await MessageDAO.findPinned(pool, sectionId);
   }
 
-  async updateCursor(seriesId, userId, data) {
-    await MessageDAO.upsertCursor(pool, seriesId, userId, data);
+  async updateCursor(sectionId, userId, data) {
+    await MessageDAO.upsertCursor(pool, sectionId, userId, data);
   }
 
   async getPoll(messageId, pollId, userId) {

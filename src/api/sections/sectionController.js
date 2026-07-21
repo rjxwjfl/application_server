@@ -1,34 +1,34 @@
-const { SeriesService } = require('../../services/seriesService');
+const { SectionService } = require('../../services/sectionService');
 const { MessageService } = require('../../services/messageService');
 const { MessageDAO } = require('../../daos/messageDAO');
 const pool = require('../../../config/db');
 const asyncHandler = require('../../core/asyncHandler');
 
-const seriesController = {
+const sectionController = {
   // ============================================
-  // Series CRUD
+  // Section CRUD
   // ============================================
 
-  getSeries: asyncHandler(async (req, res) => {
-    const { drawerId } = req.params;
-    const series = await SeriesService.getSeriesByDrawerId(drawerId);
-    res.json({ success: true, data: series });
+  getSection: asyncHandler(async (req, res) => {
+    const { binderId } = req.params;
+    const section = await SectionService.getSectionByBinderId(binderId);
+    res.json({ success: true, data: section });
   }),
 
-  createSeries: asyncHandler(async (req, res) => {
-    const series = await SeriesService.createSeries(req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
-    res.status(201).json({ success: true, data: series, message: '시리즈가 생성되었습니다' });
+  createSection: asyncHandler(async (req, res) => {
+    const section = await SectionService.createSection(req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    res.status(201).json({ success: true, data: section, message: '시리즈가 생성되었습니다' });
   }),
 
-  updateSeries: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
-    const series = await SeriesService.updateSeries(seriesId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
-    res.json({ success: true, data: series, message: '시리즈가 수정되었습니다' });
+  updateSection: asyncHandler(async (req, res) => {
+    const { sectionId } = req.params;
+    const section = await SectionService.updateSection(sectionId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    res.json({ success: true, data: section, message: '시리즈가 수정되었습니다' });
   }),
 
-  deleteSeries: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
-    await SeriesService.deleteSeries(seriesId, { sender_id: req.user_id, device_uuid: req.device_uuid });
+  deleteSection: asyncHandler(async (req, res) => {
+    const { sectionId } = req.params;
+    await SectionService.deleteSection(sectionId, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, message: '시리즈가 삭제되었습니다' });
   }),
 
@@ -37,7 +37,7 @@ const seriesController = {
   // ============================================
 
   getMessages: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
+    const { sectionId } = req.params;
     const { cursor_at, cursor_id, before_cursor, limit } = req.query;
     const parsedLimit = limit ? parseInt(limit, 10) : undefined;
 
@@ -52,15 +52,15 @@ const seriesController = {
       }
     }
 
-    const messages = await MessageService.getMessages(seriesId, {
+    const messages = await MessageService.getMessages(sectionId, {
       cursor_at: cursorAt, cursor_id: cursorId, limit: parsedLimit,
     });
     res.json({ success: true, data: messages });
   }),
 
   createMessage: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
-    const message = await MessageService.createMessage(seriesId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    const { sectionId } = req.params;
+    const message = await MessageService.createMessage(sectionId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.status(201).json({ success: true, data: message, message: '메시지가 생성되었습니다' });
   }),
 
@@ -87,8 +87,8 @@ const seriesController = {
   // ============================================
 
   listFiles: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
-    const files = await SeriesService.listFiles(seriesId, req.query, req.user_id);
+    const { sectionId } = req.params;
+    const files = await SectionService.listFiles(sectionId, req.query, req.user_id);
     res.json({ success: true, data: files });
   }),
 
@@ -114,8 +114,8 @@ const seriesController = {
   // ============================================
 
   updateCursor: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
-    await MessageService.updateCursor(seriesId, req.user_id, req.body);
+    const { sectionId } = req.params;
+    await MessageService.updateCursor(sectionId, req.user_id, req.body);
     res.json({ success: true });
   }),
 
@@ -124,8 +124,8 @@ const seriesController = {
   // ============================================
 
   getPinnedMessages: asyncHandler(async (req, res) => {
-    const { seriesId } = req.params;
-    const messages = await MessageService.getPinnedMessages(seriesId);
+    const { sectionId } = req.params;
+    const messages = await MessageService.getPinnedMessages(sectionId);
     res.json({ success: true, data: messages });
   }),
 
@@ -152,4 +152,4 @@ const seriesController = {
   }),
 };
 
-module.exports = seriesController;
+module.exports = sectionController;

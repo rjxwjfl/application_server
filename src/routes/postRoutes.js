@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const postController = require('../api/posts/postController');
 
-// 게시물 단건 조회 / 수정 / 삭제 (생성은 /drawers/:drawerId/posts)
+// 게시물 단건 조회 / 수정 / 삭제 (생성은 /binders/:binderId/posts)
 router.get('/:postId', postController.getPost);
 router.patch('/:postId', postController.update);
 router.delete('/:postId', postController.delete);

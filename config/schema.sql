@@ -109,17 +109,17 @@ CREATE INDEX idx_consent_user ON user_terms_consents (user_id, consented_at DESC
 
 
 -- ============================================================
--- SECTION 2: DRAWERS
+-- SECTION 2: BINDERS
 -- ============================================================
 
-DROP TABLE IF EXISTS drawer_storage_usage  CASCADE;
-DROP TABLE IF EXISTS drawer_boosts         CASCADE;
-DROP TABLE IF EXISTS drawer_invitations    CASCADE;
-DROP TABLE IF EXISTS drawer_members        CASCADE;
-DROP TABLE IF EXISTS drawer_settings       CASCADE;
-DROP TABLE IF EXISTS drawers               CASCADE;
+DROP TABLE IF EXISTS binder_storage_usage  CASCADE;
+DROP TABLE IF EXISTS binder_boosts         CASCADE;
+DROP TABLE IF EXISTS binder_invitations    CASCADE;
+DROP TABLE IF EXISTS binder_members        CASCADE;
+DROP TABLE IF EXISTS binder_settings       CASCADE;
+DROP TABLE IF EXISTS binders               CASCADE;
 
-CREATE TABLE drawers (
+CREATE TABLE binders (
   id               UUID        NOT NULL,
   name             TEXT        NOT NULL,
   description      TEXT,
@@ -132,41 +132,41 @@ CREATE TABLE drawers (
   deleted_at       TIMESTAMPTZ,
   PRIMARY KEY (id)
 );
-CREATE INDEX idx_drawers_sync ON drawers (updated_at);
+CREATE INDEX idx_binders_sync ON binders (updated_at);
 
-CREATE TABLE drawer_settings (
-  drawer_id        UUID        NOT NULL,
+CREATE TABLE binder_settings (
+  binder_id        UUID        NOT NULL,
   is_public        BOOLEAN     NOT NULL DEFAULT FALSE,
   is_searchable    BOOLEAN     NOT NULL DEFAULT FALSE,
   require_approval BOOLEAN     NOT NULL DEFAULT FALSE,
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (drawer_id),
-  CONSTRAINT fk_ds_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id)
+  PRIMARY KEY (binder_id),
+  CONSTRAINT fk_bs_binder FOREIGN KEY (binder_id) REFERENCES binders(id)
 );
-CREATE INDEX idx_drawer_settings_sync ON drawer_settings (drawer_id, updated_at);
+CREATE INDEX idx_binder_settings_sync ON binder_settings (binder_id, updated_at);
 
-CREATE TABLE drawer_members (
-  drawer_id           UUID        NOT NULL,
+CREATE TABLE binder_members (
+  binder_id           UUID        NOT NULL,
   user_id             UUID        NOT NULL,
   -- 0=master 1=manager 2=editor 3=member
   role                SMALLINT    NOT NULL,
   -- 0=allActivity 1=relatedOnly 2=mentionOnly 3=none
   notification_level  SMALLINT    NOT NULL DEFAULT 0,
-  nickname_in_drawer  TEXT,
+  nickname_in_binder  TEXT,
   joined_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at          TIMESTAMPTZ,
-  PRIMARY KEY (drawer_id, user_id),
-  CONSTRAINT fk_dm_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id),
-  CONSTRAINT fk_dm_user   FOREIGN KEY (user_id)   REFERENCES users(id)
+  PRIMARY KEY (binder_id, user_id),
+  CONSTRAINT fk_bm_binder FOREIGN KEY (binder_id) REFERENCES binders(id),
+  CONSTRAINT fk_bm_user   FOREIGN KEY (user_id)   REFERENCES users(id)
 );
-CREATE INDEX idx_drawer_members_sync ON drawer_members (drawer_id, updated_at);
-CREATE INDEX idx_drawer_members_user ON drawer_members (user_id, updated_at);
+CREATE INDEX idx_binder_members_sync ON binder_members (binder_id, updated_at);
+CREATE INDEX idx_binder_members_user ON binder_members (user_id, updated_at);
 
-CREATE TABLE drawer_invitations (
+CREATE TABLE binder_invitations (
   id          UUID        NOT NULL,
-  drawer_id   UUID        NOT NULL,
+  binder_id   UUID        NOT NULL,
   inviter_id  UUID        NOT NULL,
   invite_code TEXT        NOT NULL,
   max_uses    INT                  DEFAULT 1,
@@ -175,13 +175,13 @@ CREATE TABLE drawer_invitations (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (id),
   UNIQUE (invite_code),
-  CONSTRAINT fk_di_drawer  FOREIGN KEY (drawer_id)  REFERENCES drawers(id),
-  CONSTRAINT fk_di_inviter FOREIGN KEY (inviter_id) REFERENCES users(id) ON DELETE CASCADE
+  CONSTRAINT fk_bi_binder  FOREIGN KEY (binder_id)  REFERENCES binders(id),
+  CONSTRAINT fk_bi_inviter FOREIGN KEY (inviter_id) REFERENCES users(id) ON DELETE CASCADE
 );
-CREATE INDEX idx_inv_drawer ON drawer_invitations (drawer_id);
+CREATE INDEX idx_inv_binder ON binder_invitations (binder_id);
 
-CREATE TABLE drawer_boosts (
-  drawer_id                UUID        NOT NULL,
+CREATE TABLE binder_boosts (
+  binder_id                UUID        NOT NULL,
   -- 0=free 1=lite 2=plus
   tier                     SMALLINT    NOT NULL DEFAULT 0,
   -- ACTIVE|PAST_DUE|CANCELED|EXPIRED
@@ -196,20 +196,20 @@ CREATE TABLE drawer_boosts (
   cancel_at_period_end     BOOLEAN              DEFAULT FALSE,
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (drawer_id),
-  CONSTRAINT fk_db_payer FOREIGN KEY (paid_by_user_id) REFERENCES users(id)
+  PRIMARY KEY (binder_id),
+  CONSTRAINT fk_bb_payer FOREIGN KEY (paid_by_user_id) REFERENCES users(id)
 );
-CREATE INDEX idx_boost_payer  ON drawer_boosts (paid_by_user_id, status);
-CREATE INDEX idx_boost_expiry ON drawer_boosts (current_period_end)
+CREATE INDEX idx_boost_payer  ON binder_boosts (paid_by_user_id, status);
+CREATE INDEX idx_boost_expiry ON binder_boosts (current_period_end)
   WHERE status IN ('active', 'pastDue');
-CREATE UNIQUE INDEX uk_boost_active_orig ON drawer_boosts (original_transaction_id)
+CREATE UNIQUE INDEX uk_boost_active_orig ON binder_boosts (original_transaction_id)
   WHERE original_transaction_id IS NOT NULL AND status != 'expired';
 
-CREATE TABLE drawer_storage_usage (
-  drawer_id  UUID        NOT NULL,
+CREATE TABLE binder_storage_usage (
+  binder_id  UUID        NOT NULL,
   bytes_used BIGINT      NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (drawer_id)
+  PRIMARY KEY (binder_id)
 );
 
 
@@ -222,7 +222,7 @@ DROP TABLE IF EXISTS calendars               CASCADE;
 
 CREATE TABLE calendars (
   id          UUID        NOT NULL,
-  drawer_id   UUID        NOT NULL,
+  binder_id   UUID        NOT NULL,
   title       TEXT        NOT NULL,
   description TEXT,
   color       SMALLINT    NOT NULL DEFAULT 0,
@@ -233,9 +233,9 @@ CREATE TABLE calendars (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at  TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_cal_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id)
+  CONSTRAINT fk_cal_binder FOREIGN KEY (binder_id) REFERENCES binders(id)
 );
-CREATE INDEX idx_calendars_sync ON calendars (drawer_id, updated_at);
+CREATE INDEX idx_calendars_sync ON calendars (binder_id, updated_at);
 
 CREATE TABLE calendar_subscriptions (
   user_id     UUID        NOT NULL,
@@ -254,7 +254,7 @@ CREATE INDEX idx_cal_subs_sync ON calendar_subscriptions (user_id, updated_at);
 -- SECTION 4: EVENTS
 -- ============================================================
 
-DROP TABLE IF EXISTS event_series        CASCADE;
+DROP TABLE IF EXISTS event_sections        CASCADE;
 DROP TABLE IF EXISTS event_participants  CASCADE;
 DROP TABLE IF EXISTS event_instances     CASCADE;
 DROP TABLE IF EXISTS events              CASCADE;
@@ -324,7 +324,7 @@ CREATE INDEX idx_event_part_sync ON event_participants (instance_id, updated_at)
 -- SECTION 5: TASKS
 -- ============================================================
 
-DROP TABLE IF EXISTS task_series        CASCADE;
+DROP TABLE IF EXISTS task_sections        CASCADE;
 DROP TABLE IF EXISTS task_participants  CASCADE;
 DROP TABLE IF EXISTS task_instances     CASCADE;
 DROP TABLE IF EXISTS tasks              CASCADE;
@@ -396,10 +396,10 @@ CREATE INDEX idx_task_part_sync ON task_participants (instance_id, updated_at);
 
 
 -- ============================================================
--- SECTION 5.5: SERIES (before event_series / task_series)
+-- SECTION 5.5: SECTIONS (before event_sections / task_sections)
 -- ============================================================
 
-DROP TABLE IF EXISTS series_message_cursors CASCADE;
+DROP TABLE IF EXISTS section_message_cursors CASCADE;
 DROP TABLE IF EXISTS message_poll_votes      CASCADE;
 DROP TABLE IF EXISTS message_poll_options    CASCADE;
 DROP TABLE IF EXISTS message_polls           CASCADE;
@@ -407,12 +407,12 @@ DROP TABLE IF EXISTS message_mentions        CASCADE;
 DROP TABLE IF EXISTS message_reactions       CASCADE;
 DROP TABLE IF EXISTS message_embeds          CASCADE;
 DROP TABLE IF EXISTS attachments              CASCADE;
-DROP TABLE IF EXISTS series_messages         CASCADE;
-DROP TABLE IF EXISTS series                  CASCADE;
+DROP TABLE IF EXISTS section_messages         CASCADE;
+DROP TABLE IF EXISTS sections                CASCADE;
 
-CREATE TABLE series (
+CREATE TABLE sections (
   id             UUID        NOT NULL,
-  drawer_id      UUID        NOT NULL,
+  binder_id      UUID        NOT NULL,
   title          TEXT        NOT NULL,
   -- 0=public 1=gradeLimit 2=whiteList(미구현)
   access_scope   SMALLINT    NOT NULL DEFAULT 0,
@@ -423,32 +423,32 @@ CREATE TABLE series (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at     TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_sr_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id)
+  CONSTRAINT fk_sec_binder FOREIGN KEY (binder_id) REFERENCES binders(id)
 );
-CREATE INDEX idx_series_sync ON series (drawer_id, updated_at);
+CREATE INDEX idx_sections_sync ON sections (binder_id, updated_at);
 
--- event_series (events → series M:N)
-CREATE TABLE event_series (
+-- event_sections (events → sections M:N)
+CREATE TABLE event_sections (
   event_id   UUID        NOT NULL,
-  series_id  UUID        NOT NULL,
+  section_id  UUID        NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ,
-  PRIMARY KEY (event_id, series_id),
-  CONSTRAINT fk_es_event  FOREIGN KEY (event_id)  REFERENCES events(id),
-  CONSTRAINT fk_es_series FOREIGN KEY (series_id) REFERENCES series(id)
+  PRIMARY KEY (event_id, section_id),
+  CONSTRAINT fk_esec_event   FOREIGN KEY (event_id)   REFERENCES events(id),
+  CONSTRAINT fk_esec_section FOREIGN KEY (section_id) REFERENCES sections(id)
 );
 
--- task_series (tasks → series M:N)
-CREATE TABLE task_series (
+-- task_sections (tasks → sections M:N)
+CREATE TABLE task_sections (
   task_id    UUID        NOT NULL,
-  series_id  UUID        NOT NULL,
+  section_id  UUID        NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ,
-  PRIMARY KEY (task_id, series_id),
-  CONSTRAINT fk_tsr_task   FOREIGN KEY (task_id)   REFERENCES tasks(id),
-  CONSTRAINT fk_tsr_series FOREIGN KEY (series_id) REFERENCES series(id)
+  PRIMARY KEY (task_id, section_id),
+  CONSTRAINT fk_tsec_task    FOREIGN KEY (task_id)    REFERENCES tasks(id),
+  CONSTRAINT fk_tsec_section FOREIGN KEY (section_id) REFERENCES sections(id)
 );
 
 
@@ -494,12 +494,12 @@ CREATE INDEX idx_holidays_sync ON holidays (country_code, updated_at);
 
 
 -- ============================================================
--- SECTION 7: SERIES MESSAGES & F7 EXTENSIONS
+-- SECTION 7: SECTION MESSAGES & F7 EXTENSIONS
 -- ============================================================
 
-CREATE TABLE series_messages (
+CREATE TABLE section_messages (
   id                UUID        NOT NULL,
-  series_id         UUID        NOT NULL,
+  section_id         UUID        NOT NULL,
   user_id           UUID        NOT NULL,
   parent_id         UUID,
   content           TEXT,
@@ -511,21 +511,21 @@ CREATE TABLE series_messages (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at        TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_sm_series   FOREIGN KEY (series_id)         REFERENCES series(id),
-  CONSTRAINT fk_sm_user     FOREIGN KEY (user_id)           REFERENCES users(id),
-  CONSTRAINT fk_sm_parent   FOREIGN KEY (parent_id)         REFERENCES series_messages(id) ON DELETE SET NULL,
-  CONSTRAINT fk_sm_pin_user FOREIGN KEY (pinned_by_user_id) REFERENCES users(id)
+  CONSTRAINT fk_scm_section  FOREIGN KEY (section_id)         REFERENCES sections(id),
+  CONSTRAINT fk_scm_user     FOREIGN KEY (user_id)           REFERENCES users(id),
+  CONSTRAINT fk_scm_parent   FOREIGN KEY (parent_id)         REFERENCES section_messages(id) ON DELETE SET NULL,
+  CONSTRAINT fk_scm_pin_user FOREIGN KEY (pinned_by_user_id) REFERENCES users(id)
 );
-CREATE INDEX idx_sm_sync ON series_messages (series_id, updated_at);
+CREATE INDEX idx_scm_sync ON section_messages (section_id, updated_at);
 
 CREATE TABLE attachments (
   id            UUID         NOT NULL,
-  -- 다형 context: SERIES_MESSAGE · EVENT · TASK · POST · CAST · SPECIAL_DAY
+  -- 다형 context: SECTION_MESSAGE · EVENT · TASK · POST · CAST · SPECIAL_DAY
   context_type  VARCHAR(30)  NOT NULL,
   -- 컨텍스트 PK (FK 없음 — 무결성은 서비스 레이어). pre-upload 시 null 허용
   context_id    UUID,
-  -- denormalized: drawer 스토리지 사용량 집계 + GCS 키 네이밍
-  drawer_id     UUID         NOT NULL,
+  -- denormalized: binder 스토리지 사용량 집계 + GCS 키 네이밍
+  binder_id     UUID         NOT NULL,
   uploader_id   UUID         NOT NULL,
   filename      TEXT         NOT NULL,
   file_size     BIGINT       NOT NULL,
@@ -545,15 +545,15 @@ CREATE TABLE attachments (
   updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   deleted_at    TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_att_drawer   FOREIGN KEY (drawer_id)   REFERENCES drawers(id),
+  CONSTRAINT fk_att_binder   FOREIGN KEY (binder_id)   REFERENCES binders(id),
   CONSTRAINT fk_att_uploader FOREIGN KEY (uploader_id) REFERENCES users(id),
-  CONSTRAINT chk_att_context CHECK (context_type IN ('SERIES_MESSAGE','EVENT','TASK','POST','CAST','SPECIAL_DAY')),
+  CONSTRAINT chk_att_context CHECK (context_type IN ('SECTION_MESSAGE','EVENT','TASK','POST','CAST','SPECIAL_DAY')),
   CONSTRAINT chk_att_status CHECK (status IN ('pending','processing','ready','hidden','deleted','rejected','error'))
 );
 CREATE INDEX idx_att_context   ON attachments (context_type, context_id) WHERE deleted_at IS NULL;
-CREATE INDEX idx_att_drawer    ON attachments (drawer_id, created_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_att_binder    ON attachments (binder_id, created_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_uploader  ON attachments (uploader_id) WHERE deleted_at IS NULL;
-CREATE INDEX idx_att_sync      ON attachments (drawer_id, updated_at);
+CREATE INDEX idx_att_sync      ON attachments (binder_id, updated_at);
 CREATE INDEX idx_att_lifecycle ON attachments (status, storage_class, hidden_at);
 CREATE INDEX idx_att_orphan    ON attachments (status, created_at) WHERE context_id IS NULL;
 
@@ -576,7 +576,7 @@ CREATE TABLE message_embeds (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at  TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_me_message FOREIGN KEY (message_id) REFERENCES series_messages(id)
+  CONSTRAINT fk_me_message FOREIGN KEY (message_id) REFERENCES section_messages(id)
 );
 CREATE INDEX idx_me_sync ON message_embeds (message_id, updated_at);
 
@@ -589,7 +589,7 @@ CREATE TABLE message_reactions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_mr_message FOREIGN KEY (message_id) REFERENCES series_messages(id),
+  CONSTRAINT fk_mr_message FOREIGN KEY (message_id) REFERENCES section_messages(id),
   CONSTRAINT fk_mr_user    FOREIGN KEY (user_id)    REFERENCES users(id)
 );
 CREATE UNIQUE INDEX uk_message_reactions_active
@@ -605,7 +605,7 @@ CREATE TABLE message_mentions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_mm_message FOREIGN KEY (message_id) REFERENCES series_messages(id),
+  CONSTRAINT fk_mm_message FOREIGN KEY (message_id) REFERENCES section_messages(id),
   CONSTRAINT fk_mm_user    FOREIGN KEY (user_id)    REFERENCES users(id)
 );
 CREATE UNIQUE INDEX uk_message_mentions_active
@@ -625,7 +625,7 @@ CREATE TABLE message_polls (
   updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   PRIMARY KEY (id),
   UNIQUE (message_id),
-  CONSTRAINT fk_mp_message FOREIGN KEY (message_id) REFERENCES series_messages(id) ON DELETE CASCADE
+  CONSTRAINT fk_mp_message FOREIGN KEY (message_id) REFERENCES section_messages(id) ON DELETE CASCADE
 );
 CREATE INDEX idx_poll_message ON message_polls (message_id);
 CREATE INDEX idx_poll_closing ON message_polls (closes_at)
@@ -654,17 +654,17 @@ CREATE TABLE message_poll_votes (
 CREATE INDEX idx_poll_vote_poll ON message_poll_votes (poll_id, option_id);
 CREATE INDEX idx_poll_vote_user ON message_poll_votes (user_id, poll_id);
 
-CREATE TABLE series_message_cursors (
+CREATE TABLE section_message_cursors (
   user_id               UUID        NOT NULL,
-  series_id             UUID        NOT NULL,
+  section_id             UUID        NOT NULL,
   last_read_message_id  UUID,
   last_read_message_at  TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, series_id),
-  CONSTRAINT fk_smc_user   FOREIGN KEY (user_id)   REFERENCES users(id),
-  CONSTRAINT fk_smc_series FOREIGN KEY (series_id) REFERENCES series(id)
+  PRIMARY KEY (user_id, section_id),
+  CONSTRAINT fk_scmc_user    FOREIGN KEY (user_id)   REFERENCES users(id),
+  CONSTRAINT fk_scmc_section FOREIGN KEY (section_id) REFERENCES sections(id)
 );
-CREATE INDEX idx_smc_sync ON series_message_cursors (user_id, updated_at);
+CREATE INDEX idx_scmc_sync ON section_message_cursors (user_id, updated_at);
 
 
 -- ============================================================
@@ -728,7 +728,7 @@ DROP TABLE IF EXISTS posts          CASCADE;
 
 CREATE TABLE posts (
   id              UUID         NOT NULL,
-  drawer_id       UUID         NOT NULL,
+  binder_id       UUID         NOT NULL,
   author_id       UUID         NOT NULL,
   -- 0=content(SNS형) 1=announcement(공지형)
   post_type       SMALLINT     NOT NULL DEFAULT 0,
@@ -743,15 +743,15 @@ CREATE TABLE posts (
   updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
   deleted_at      TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_p_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id),
+  CONSTRAINT fk_p_binder FOREIGN KEY (binder_id) REFERENCES binders(id),
   CONSTRAINT fk_p_author FOREIGN KEY (author_id) REFERENCES users(id),
   CONSTRAINT fk_p_special_day FOREIGN KEY (special_day_id) REFERENCES special_days(id) ON DELETE SET NULL
 );
-CREATE INDEX idx_p_drawer_recent ON posts (drawer_id, created_at DESC)
+CREATE INDEX idx_p_binder_recent ON posts (binder_id, created_at DESC)
   WHERE deleted_at IS NULL;
-CREATE INDEX idx_p_drawer_pinned ON posts (drawer_id, created_at DESC)
+CREATE INDEX idx_p_binder_pinned ON posts (binder_id, created_at DESC)
   WHERE is_pinned = TRUE AND deleted_at IS NULL;
-CREATE INDEX idx_p_drawer_public ON posts (drawer_id, created_at DESC)
+CREATE INDEX idx_p_binder_public ON posts (binder_id, created_at DESC)
   WHERE is_public = TRUE AND deleted_at IS NULL;
 
 CREATE TABLE post_comments (
@@ -793,7 +793,7 @@ DROP TABLE IF EXISTS audit_logs             CASCADE;
 
 CREATE TABLE audit_logs (
   id          BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY,
-  drawer_id   UUID,
+  binder_id   UUID,
   actor_id    UUID,
   device_uuid UUID,
   action_type VARCHAR(30) NOT NULL,
@@ -809,14 +809,14 @@ CREATE TABLE audit_logs_2026 PARTITION OF audit_logs
 CREATE TABLE audit_logs_2027 PARTITION OF audit_logs
   FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
 
-CREATE INDEX idx_al_drawer ON audit_logs (drawer_id);
+CREATE INDEX idx_al_binder ON audit_logs (binder_id);
 CREATE INDEX idx_al_actor  ON audit_logs (actor_id);
 CREATE INDEX idx_al_target ON audit_logs (target_type, target_id);
 CREATE INDEX idx_al_device ON audit_logs (device_uuid);
 
 CREATE TABLE activity_feeds (
   id          BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY,
-  drawer_id   UUID        NOT NULL,
+  binder_id   UUID        NOT NULL,
   actor_id    UUID,
   action_type VARCHAR(30) NOT NULL,
   target_type VARCHAR(30) NOT NULL,
@@ -824,7 +824,7 @@ CREATE TABLE activity_feeds (
   metadata    JSONB                DEFAULT '{}',
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (id, created_at),
-  CONSTRAINT fk_af_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id),
+  CONSTRAINT fk_af_binder FOREIGN KEY (binder_id) REFERENCES binders(id),
   CONSTRAINT fk_af_actor  FOREIGN KEY (actor_id)  REFERENCES users(id)
 ) PARTITION BY RANGE (created_at);
 
@@ -833,17 +833,17 @@ CREATE TABLE activity_feeds_2026 PARTITION OF activity_feeds
 CREATE TABLE activity_feeds_2027 PARTITION OF activity_feeds
   FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
 
-CREATE INDEX idx_feed_drawer_cursor ON activity_feeds (drawer_id, created_at DESC, id DESC);
+CREATE INDEX idx_feed_binder_cursor ON activity_feeds (binder_id, created_at DESC, id DESC);
 
 CREATE TABLE activity_feed_cursors (
   user_id            UUID        NOT NULL,
-  drawer_id          UUID        NOT NULL,
+  binder_id          UUID        NOT NULL,
   last_read_feed_id  BIGINT      NOT NULL DEFAULT 0,
   last_read_feed_at  TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, drawer_id),
+  PRIMARY KEY (user_id, binder_id),
   CONSTRAINT fk_afc_user   FOREIGN KEY (user_id)   REFERENCES users(id),
-  CONSTRAINT fk_afc_drawer FOREIGN KEY (drawer_id) REFERENCES drawers(id)
+  CONSTRAINT fk_afc_binder FOREIGN KEY (binder_id) REFERENCES binders(id)
 );
 CREATE INDEX idx_feed_cursors_sync ON activity_feed_cursors (user_id, updated_at);
 
@@ -874,7 +874,7 @@ CREATE TABLE notifications (
   notification_type VARCHAR(30) NOT NULL,
   route_type        VARCHAR(30) NOT NULL,
   route_id          UUID,
-  drawer_id         UUID,
+  binder_id         UUID,
   group_key         VARCHAR(100),
   title             TEXT,
   body              TEXT,
@@ -884,7 +884,7 @@ CREATE TABLE notifications (
   PRIMARY KEY (id, created_at),
   CONSTRAINT fk_noti_recipient FOREIGN KEY (recipient_id) REFERENCES users(id),
   CONSTRAINT fk_noti_sender    FOREIGN KEY (sender_id)    REFERENCES users(id),
-  CONSTRAINT fk_noti_drawer    FOREIGN KEY (drawer_id)    REFERENCES drawers(id)
+  CONSTRAINT fk_noti_binder    FOREIGN KEY (binder_id)    REFERENCES binders(id)
 ) PARTITION BY RANGE (created_at);
 
 CREATE TABLE notifications_2026 PARTITION OF notifications

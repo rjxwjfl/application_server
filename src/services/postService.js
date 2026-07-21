@@ -1,6 +1,6 @@
 const { PostDAO } = require('../daos/postDAO');
 const { AttachmentDAO } = require('../daos/attachmentDAO');
-const { DrawerDAO } = require('../daos/drawerDAO');
+const { BinderDAO } = require('../daos/binderDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const pool = require('../../config/db');
@@ -15,10 +15,10 @@ class PostService {
     return { ...post, attachments };
   }
 
-  async getPosts(drawerId, query, userId) {
-    const member = await DrawerDAO.getMember(pool, drawerId, userId);
+  async getPosts(binderId, query, userId) {
+    const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 조회할 수 있습니다');
-    const posts = await PostDAO.findByDrawerId(pool, drawerId, query);
+    const posts = await PostDAO.findByBinderId(pool, binderId, query);
     return await Promise.all(posts.map((post) => this.withAttachments(post)));
   }
 
@@ -29,7 +29,7 @@ class PostService {
   }
 
   async create(data, context) {
-    const member = await DrawerDAO.getMember(pool, data.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, data.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 게시물을 작성할 수 있습니다');
 
     const post = await PostDAO.create(pool, {
@@ -39,7 +39,7 @@ class PostService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: data.drawer_id,
+      binder_id: data.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -55,7 +55,7 @@ class PostService {
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
     if (post.author_id !== context.sender_id) {
-      const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+      const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
       if (!member || member.deleted_at || member.role > 1)
         throw new ForbiddenError('권한이 없습니다');
     }
@@ -63,7 +63,7 @@ class PostService {
     const updated = await PostDAO.update(pool, postId, data);
 
     eventBus.emit('sync', {
-      drawer_id: post.drawer_id,
+      binder_id: post.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,
@@ -79,7 +79,7 @@ class PostService {
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
     if (post.author_id !== context.sender_id) {
-      const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+      const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
       if (!member || member.deleted_at || member.role > 1)
         throw new ForbiddenError('권한이 없습니다');
     }
@@ -87,7 +87,7 @@ class PostService {
     await PostDAO.softDelete(pool, postId);
 
     eventBus.emit('sync', {
-      drawer_id: post.drawer_id,
+      binder_id: post.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,
@@ -108,7 +108,7 @@ class PostService {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 댓글을 달 수 있습니다');
 
     const comment = await PostDAO.createComment(pool, {
@@ -119,7 +119,7 @@ class PostService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: post.drawer_id,
+      binder_id: post.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -136,7 +136,7 @@ class PostService {
 
     const post = await PostDAO.findById(pool, comment.post_id);
     if (comment.user_id !== context.sender_id) {
-      const member = post ? await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id) : null;
+      const member = post ? await BinderDAO.getMember(pool, post.binder_id, context.sender_id) : null;
       if (!member || member.deleted_at || member.role > 1)
         throw new ForbiddenError('권한이 없습니다');
     }
@@ -144,7 +144,7 @@ class PostService {
     await PostDAO.softDeleteComment(pool, commentId);
 
     eventBus.emit('sync', {
-      drawer_id: post?.drawer_id,
+      binder_id: post?.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,
@@ -159,7 +159,7 @@ class PostService {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('서랍 멤버만 좋아요를 누를 수 있습니다');
 
     const existing = await PostDAO.findLike(pool, postId, context.sender_id);
@@ -172,7 +172,7 @@ class PostService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: post.drawer_id,
+      binder_id: post.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.REACT,
@@ -190,7 +190,7 @@ class PostService {
     await PostDAO.softDeleteLike(pool, postId, context.sender_id);
 
     eventBus.emit('sync', {
-      drawer_id: post.drawer_id,
+      binder_id: post.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UNREACT,
@@ -205,14 +205,14 @@ class PostService {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, post.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
     if (!member || member.deleted_at || member.role > 1)
       throw new ForbiddenError('관리자 이상만 게시물을 핀할 수 있습니다');
 
     const updated = await PostDAO.pinPost(pool, postId, is_pinned);
 
     eventBus.emit('sync', {
-      drawer_id: post.drawer_id,
+      binder_id: post.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,

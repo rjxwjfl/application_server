@@ -22,7 +22,7 @@ const stubs = {
       },
     },
   },
-  '../daos/drawerDAO': { DrawerDAO: {} },
+  '../daos/binderDAO': { BinderDAO: {} },
   '../utils/uuid': { generateUUID: () => 'generated-id' },
   '../events/eventBus': { emit() {} },
   '../../config/db': {},

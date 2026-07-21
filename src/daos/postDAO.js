@@ -14,9 +14,9 @@ class PostDAO {
     return result.rows[0] || null;
   }
 
-  async findByDrawerId(conn, drawerId, { cursor_at, limit = 20 } = {}) {
-    const params = [drawerId, limit];
-    let where = 'p.drawer_id = $1 AND p.deleted_at IS NULL';
+  async findByBinderId(conn, binderId, { cursor_at, limit = 20 } = {}) {
+    const params = [binderId, limit];
+    let where = 'p.binder_id = $1 AND p.deleted_at IS NULL';
     if (cursor_at) {
       where += ' AND p.created_at < $3';
       params.push(cursor_at);
@@ -34,13 +34,13 @@ class PostDAO {
   async create(conn, data) {
     const result = await conn.query(
       `INSERT INTO posts
-         (id, drawer_id, author_id, post_type, is_public, title, body_markdown,
+         (id, binder_id, author_id, post_type, is_public, title, body_markdown,
           thumbnail_url, cover_image_url, special_day_id, created_at, updated_at)
        VALUES ($1,$2,$3,COALESCE($4,0),COALESCE($5,false),$6,$7,$8,$9,$10,
                COALESCE($11,now()),COALESCE($12,now()))
        RETURNING *`,
       [
-        data.id, data.drawer_id, data.author_id, data.post_type, data.is_public,
+        data.id, data.binder_id, data.author_id, data.post_type, data.is_public,
         data.title, data.body_markdown, data.thumbnail_url, data.cover_image_url,
         data.special_day_id, data.created_at, data.updated_at,
       ]
@@ -187,16 +187,16 @@ class PostDAO {
   // search
   // ============================================
 
-  async searchByDrawer(conn, drawerId, { q, limit = 20 } = {}) {
+  async searchByBinder(conn, binderId, { q, limit = 20 } = {}) {
     const result = await conn.query(
       `SELECT p.id, p.title, p.body_markdown, p.created_at,
               ui.display_name AS author_name
        FROM posts p
        LEFT JOIN user_infos ui ON p.author_id = ui.user_id
-       WHERE p.drawer_id = $1 AND p.deleted_at IS NULL
+       WHERE p.binder_id = $1 AND p.deleted_at IS NULL
          AND (p.title ILIKE $2 OR p.body_markdown ILIKE $2)
        ORDER BY p.created_at DESC LIMIT $3`,
-      [drawerId, `%${q}%`, limit]
+      [binderId, `%${q}%`, limit]
     );
     return result.rows;
   }

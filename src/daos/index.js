@@ -11,7 +11,7 @@
  */
 
 // DAO 클래스 import
-const { DrawerDAO } = require('./drawerDAO');
+const { BinderDAO } = require('./binderDAO');
 const { UserDAO } = require('./userDAO');
 const { EventDAO } = require('./eventDAO');
 const { TaskDAO } = require('./taskDAO');
@@ -21,7 +21,7 @@ const { AuditDAO } = require('./auditDAO');
 const { ActivityFeedDAO } = require('./activityFeedDAO');
 const { ReminderDAO } = require('./reminderDAO');
 const { UserSettingsDAO } = require('./userSettingsDAO');
-const { SeriesDAO } = require('./seriesDAO');
+const { SectionDAO } = require('./sectionDAO');
 const { MessageDAO } = require('./messageDAO');
 const { CalendarDAO } = require('./calendarDAO');
 const { BillingDAO } = require('./billingDAO');
@@ -32,7 +32,7 @@ const { AttachmentDAO } = require('./attachmentDAO');
 
 // 모든 DAO를 export
 module.exports = {
-  DrawerDAO,
+  BinderDAO,
   UserDAO,
   EventDAO,
   TaskDAO,
@@ -42,7 +42,7 @@ module.exports = {
   ActivityFeedDAO,
   ReminderDAO,
   UserSettingsDAO,
-  SeriesDAO,
+  SectionDAO,
   MessageDAO,
   CalendarDAO,
   BillingDAO,

@@ -8,7 +8,7 @@ eventBus.on('sync', (data) => {
   if (!data.action || !data.target_type || !data.target_id) return;
 
   AuditDAO.insert(pool, {
-    drawer_id: data.drawer_id,
+    binder_id: data.binder_id,
     actor_id: data.sender_id,
     device_uuid: data.device_uuid,
     action_type: data.action,
@@ -20,7 +20,7 @@ eventBus.on('sync', (data) => {
 
 eventBus.on('user:registered', ({ user_id, provider }) => {
   AuditDAO.insert(pool, {
-    drawer_id: null,
+    binder_id: null,
     actor_id: user_id,
     action_type: ActionType.CREATE,
     target_type: TargetType.USER,
@@ -29,24 +29,24 @@ eventBus.on('user:registered', ({ user_id, provider }) => {
   }).catch((err) => logger.error('audit insert failed', { error: err.message }));
 });
 
-eventBus.on('member:joined', ({ user_id, drawer_id, action, device_uuid }) => {
+eventBus.on('member:joined', ({ user_id, binder_id, action, device_uuid }) => {
   AuditDAO.insert(pool, {
-    drawer_id,
+    binder_id,
     actor_id: user_id,
     device_uuid,
     action_type: action || ActionType.JOIN,
-    target_type: TargetType.DRAWER_MEMBER,
+    target_type: TargetType.BINDER_MEMBER,
     target_id: user_id,
   }).catch((err) => logger.error('audit insert failed', { error: err.message }));
 });
 
-eventBus.on('member:left', ({ user_id, drawer_id, actor_id, action, device_uuid }) => {
+eventBus.on('member:left', ({ user_id, binder_id, actor_id, action, device_uuid }) => {
   AuditDAO.insert(pool, {
-    drawer_id,
+    binder_id,
     actor_id: actor_id || user_id,
     device_uuid,
     action_type: action || ActionType.LEAVE,
-    target_type: TargetType.DRAWER_MEMBER,
+    target_type: TargetType.BINDER_MEMBER,
     target_id: user_id,
   }).catch((err) => logger.error('audit insert failed', { error: err.message }));
 });

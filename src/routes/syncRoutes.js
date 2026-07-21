@@ -15,10 +15,10 @@ router.post("/", syncController.pullChanges);
 router.get("/window", syncController.fetchCalendarWindow);
 
 // ── Contextual Fetch C: 신규 가입 서랍 즉시 동기화 ───────────────
-// GET /sync/drawer/:drawerId
+// GET /sync/binder/:binderId
 // 초대 코드로 서랍 가입 직후 해당 서랍의 전체 데이터를 즉시 가져올 때 호출
 // Sync Token 갱신 없음 (다음 pullChanges 에서 자동 반영)
-router.get("/drawer/:drawerId", syncController.syncNewDrawer);
+router.get("/binder/:binderId", syncController.syncNewBinder);
 
 // ── Settings Sync ─────────────────────────────────────────────────
 // PATCH /sync/settings

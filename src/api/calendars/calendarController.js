@@ -3,14 +3,14 @@ const asyncHandler = require('../../core/asyncHandler');
 const { BadRequestError } = require('../../core/errors');
 
 const calendarController = {
-  getDrawerCalendars: asyncHandler(async (req, res) => {
-    const { drawerId } = req.params;
-    const calendars = await CalendarService.getDrawerCalendars(drawerId, req.user_id);
+  getBinderCalendars: asyncHandler(async (req, res) => {
+    const { binderId } = req.params;
+    const calendars = await CalendarService.getBinderCalendars(binderId, req.user_id);
     res.json({ success: true, data: calendars });
   }),
 
   create: asyncHandler(async (req, res) => {
-    if (!req.body.drawer_id) throw new BadRequestError('drawer_id가 필요합니다');
+    if (!req.body.binder_id) throw new BadRequestError('binder_id가 필요합니다');
     if (!req.body.title)     throw new BadRequestError('title이 필요합니다');
 
     const calendar = await CalendarService.create(req.body, {

@@ -23,22 +23,22 @@ function getMediaBucket() {
   return process.env.GCS_BUCKET_MEDIA || 'rally-media';
 }
 
-function buildStorageKey(drawerId, attachmentId, filename) {
+function buildStorageKey(binderId, attachmentId, filename) {
   const now = new Date();
   const yyyy = now.getFullYear();
   const mm = String(now.getMonth() + 1).padStart(2, '0');
   const ext = filename ? filename.split('.').pop() : '';
-  return `attachments/${drawerId}/${yyyy}/${mm}/${attachmentId}${ext ? '.' + ext : ''}`;
+  return `attachments/${binderId}/${yyyy}/${mm}/${attachmentId}${ext ? '.' + ext : ''}`;
 }
 
 class MediaService {
   /**
-   * context_type: SERIES_MESSAGE | EVENT | TASK | POST | CAST | avatar | cover
+   * context_type: SECTION_MESSAGE | EVENT | TASK | POST | CAST | avatar | cover
    * context_id: UUID of the context entity
-   * drawer_id: UUID — required for non-avatar/cover contexts
+   * binder_id: UUID — required for non-avatar/cover contexts
    */
   async presign(data, context) {
-    const { filename, content_type, file_size, context_type, context_id, drawer_id } = data;
+    const { filename, content_type, file_size, context_type, context_id, binder_id } = data;
     const id = generateUUID();
 
     let storage_key;
@@ -46,8 +46,8 @@ class MediaService {
       // Avatar/cover use entity-centric path
       storage_key = `${context_type}s/${context_id}/${id}${filename ? '.' + filename.split('.').pop() : ''}`;
     } else {
-      if (!drawer_id) throw new Error('drawer_id required for attachment contexts');
-      storage_key = buildStorageKey(drawer_id, id, filename);
+      if (!binder_id) throw new Error('binder_id required for attachment contexts');
+      storage_key = buildStorageKey(binder_id, id, filename);
     }
 
     const bucket = storage.bucket(getMediaBucket());
@@ -65,11 +65,11 @@ class MediaService {
     if (context_type !== 'avatar' && context_type !== 'cover') {
       await pool.query(
         `INSERT INTO attachments
-           (id, drawer_id, context_type, context_id, storage_key, filename,
+           (id, binder_id, context_type, context_id, storage_key, filename,
             file_size, content_type, status, storage_class, uploader_id,
             created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','standard',$9,now(),now())`,
-        [id, drawer_id, context_type, context_id || null,
+        [id, binder_id, context_type, context_id || null,
          storage_key, filename || null, file_size || null,
          content_type || null, context.sender_id]
       );
@@ -134,14 +134,14 @@ class MediaService {
   }
 
   /**
-   * Restore all hidden attachments for a drawer after Boost purchase.
+   * Restore all hidden attachments for a binder after Boost purchase.
    * Called by webhook after payment confirmation.
    */
-  async restoreDrawerAttachments(drawerId) {
+  async restoreBinderAttachments(binderId) {
     const result = await pool.query(
       `SELECT id, storage_key, storage_class FROM attachments
-       WHERE drawer_id = $1 AND status = 'hidden' AND deleted_at IS NULL`,
-      [drawerId]
+       WHERE binder_id = $1 AND status = 'hidden' AND deleted_at IS NULL`,
+      [binderId]
     );
     const rows = result.rows;
     if (rows.length === 0) return 0;

@@ -3,7 +3,7 @@ const asyncHandler = require('../../core/asyncHandler');
 
 const postController = {
   getPosts: asyncHandler(async (req, res) => {
-    const posts = await PostService.getPosts(req.params.drawerId, req.query, req.user_id);
+    const posts = await PostService.getPosts(req.params.binderId, req.query, req.user_id);
     res.json({ success: true, data: posts });
   }),
 

@@ -1,6 +1,6 @@
 const { CastDAO } = require('../daos/castDAO');
 const { CalendarDAO } = require('../daos/calendarDAO');
-const { DrawerDAO } = require('../daos/drawerDAO');
+const { BinderDAO } = require('../daos/binderDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -28,7 +28,7 @@ class CastService {
     const cal = await CalendarDAO.findById(pool, castsData[0].calendar_id);
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('권한이 없습니다');
 
     const created = await withTransaction(async (client) => {
@@ -46,7 +46,7 @@ class CastService {
 
     for (const cast of created) {
       eventBus.emit('sync', {
-        drawer_id: cal.drawer_id,
+        binder_id: cal.binder_id,
         sender_id: context.sender_id,
         device_uuid: context.device_uuid,
         action: ActionType.CREATE,
@@ -63,14 +63,14 @@ class CastService {
     if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
 
     const cal = await CalendarDAO.findById(pool, cast.calendar_id);
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at || (member.role > 1 && cast.author_id !== context.sender_id))
       throw new ForbiddenError('권한이 없습니다');
 
     const updated = await CastDAO.update(pool, castId, data);
 
     eventBus.emit('sync', {
-      drawer_id: cal.drawer_id,
+      binder_id: cal.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,
@@ -86,14 +86,14 @@ class CastService {
     if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
 
     const cal = await CalendarDAO.findById(pool, cast.calendar_id);
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at || (member.role > 1 && cast.author_id !== context.sender_id))
       throw new ForbiddenError('권한이 없습니다');
 
     await CastDAO.softDelete(pool, castId);
 
     eventBus.emit('sync', {
-      drawer_id: cal.drawer_id,
+      binder_id: cal.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,
@@ -115,7 +115,7 @@ class CastService {
     if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
 
     const cal = await CalendarDAO.findById(pool, cast.calendar_id);
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('드로어 멤버만 댓글을 달 수 있습니다');
 
     const comment = await CastDAO.createComment(pool, {
@@ -126,7 +126,7 @@ class CastService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: cal.drawer_id,
+      binder_id: cal.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -152,7 +152,7 @@ class CastService {
     if (comment.user_id !== context.sender_id) {
       const cast = await CastDAO.findById(pool, comment.cast_id);
       const cal = cast ? await CalendarDAO.findById(pool, cast.calendar_id) : null;
-      const member = cal ? await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id) : null;
+      const member = cal ? await BinderDAO.getMember(pool, cal.binder_id, context.sender_id) : null;
       if (!member || member.deleted_at || member.role > 1)
         throw new ForbiddenError('권한이 없습니다');
     }
