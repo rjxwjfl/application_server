@@ -225,7 +225,7 @@ class TaskDAO {
 
   async findInstanceContext(conn, taskId, instanceId) {
     const result = await conn.query(`
-      SELECT ti.id, ti.completion_rule, ti.deleted_at, c.drawer_id
+      SELECT ti.id, ti.completion_rule, ti.deleted_at, c.binder_id
       FROM task_instances ti
       JOIN tasks t ON t.id = ti.task_id
       JOIN calendars c ON c.id = t.calendar_id
@@ -324,34 +324,34 @@ class TaskDAO {
   }
 
   // ============================================
-  // Task Series 릴레이션 테이블
+  // Task Section 릴레이션 테이블
   // ============================================
 
-  async addSeries(conn, taskId, seriesId) {
+  async addSection(conn, taskId, sectionId) {
     const query = `
-      INSERT INTO task_series (task_id, series_id, created_at, updated_at)
+      INSERT INTO task_sections (task_id, section_id, created_at, updated_at)
       VALUES ($1, $2, now(), now())
-      ON CONFLICT (task_id, series_id) DO UPDATE
+      ON CONFLICT (task_id, section_id) DO UPDATE
       SET deleted_at = NULL, updated_at = now()
     `;
-    await conn.query(query, [taskId, seriesId]);
+    await conn.query(query, [taskId, sectionId]);
   }
 
-  async removeSeries(conn, taskId, seriesId) {
+  async removeSection(conn, taskId, sectionId) {
     const query = `
-      UPDATE task_series
+      UPDATE task_sections
       SET deleted_at = now(), updated_at = now()
-      WHERE task_id = $1 AND series_id = $2 AND deleted_at IS NULL
+      WHERE task_id = $1 AND section_id = $2 AND deleted_at IS NULL
     `;
-    await conn.query(query, [taskId, seriesId]);
+    await conn.query(query, [taskId, sectionId]);
   }
 
-  async getSeriesByTaskId(conn, taskId) {
+  async getSectionByTaskId(conn, taskId) {
     const query = `
-      SELECT s.id, s.drawer_id, s.title, s.access_scope, s.required_grade, s.is_default,
+      SELECT s.id, s.binder_id, s.title, s.access_scope, s.required_grade, s.is_default,
              s.created_at, s.updated_at
-      FROM task_series ts
-      JOIN series s ON ts.series_id = s.id
+      FROM task_sections ts
+      JOIN sections s ON ts.section_id = s.id
       WHERE ts.task_id = $1 AND ts.deleted_at IS NULL AND s.deleted_at IS NULL
     `;
     const result = await conn.query(query, [taskId]);

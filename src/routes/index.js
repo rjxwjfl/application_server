@@ -5,10 +5,10 @@ const { firebaseAuth, firebaseAuthLight } = require('../middleware/authMiddlewar
 
 const authRoutes = require('./authRoutes');
 const userRoutes = require('./userRoutes');
-const drawerRoutes = require('./drawerRoutes');
+const binderRoutes = require('./binderRoutes');
 const eventRoutes = require('./eventRoutes');
 const taskRoutes = require('./taskRoutes');
-const seriesRoutes = require('./seriesRoutes');
+const sectionRoutes = require('./sectionRoutes');
 const syncRoutes = require('./syncRoutes');
 const billingRoutes = require('./billingRoutes');
 const webhookRoutes = require('./webhookRoutes');
@@ -37,10 +37,10 @@ const protectedRouter = express.Router();
 protectedRouter.use(firebaseAuth);
 
 protectedRouter.use('/users', userRoutes);
-protectedRouter.use('/drawers', drawerRoutes);
+protectedRouter.use('/binders', binderRoutes);
 protectedRouter.use('/events', eventRoutes);
 protectedRouter.use('/tasks', taskRoutes);
-protectedRouter.use('/series', seriesRoutes);
+protectedRouter.use('/sections', sectionRoutes);
 protectedRouter.use('/sync', syncRoutes);
 protectedRouter.use('/billing', billingRoutes);
 protectedRouter.use('/calendar', calendarRoutes);

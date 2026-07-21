@@ -34,16 +34,16 @@ async function hideExpiredAttachments() {
     const count = await AttachmentDAO.markHidden(pool, ids);
     logger.info('Lifecycle: attachments hidden', { count });
 
-    // 드로어별 집계 후 WebSocket 알림 (drawer_files_hidden)
-    const byDrawer = rows.reduce((acc, r) => {
-      acc[r.drawer_id] = (acc[r.drawer_id] || 0) + 1;
+    // 드로어별 집계 후 WebSocket 알림 (binder_files_hidden)
+    const byBinder = rows.reduce((acc, r) => {
+      acc[r.binder_id] = (acc[r.binder_id] || 0) + 1;
       return acc;
     }, {});
-    for (const [drawer_id, hiddenCount] of Object.entries(byDrawer)) {
+    for (const [binder_id, hiddenCount] of Object.entries(byBinder)) {
       eventBus.emit('ws:broadcast', {
-        drawer_id,
-        type: 'drawer_files_hidden',
-        payload: { drawer_id, count: hiddenCount },
+        binder_id,
+        type: 'binder_files_hidden',
+        payload: { binder_id, count: hiddenCount },
       });
     }
   } catch (err) {

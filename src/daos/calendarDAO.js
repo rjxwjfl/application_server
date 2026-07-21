@@ -5,7 +5,7 @@ class CalendarDAO {
 
   async findById(conn, calendarId) {
     const query = `
-      SELECT id, drawer_id, title, description, color, is_public,
+      SELECT id, binder_id, title, description, color, is_public,
              created_at, updated_at, deleted_at
       FROM calendars
       WHERE id = $1 AND deleted_at IS NULL
@@ -14,27 +14,27 @@ class CalendarDAO {
     return result.rows[0] || null;
   }
 
-  async findByDrawerId(conn, drawerId) {
+  async findByBinderId(conn, binderId) {
     const query = `
-      SELECT id, drawer_id, title, description, color, is_public,
+      SELECT id, binder_id, title, description, color, is_public,
              created_at, updated_at, deleted_at
       FROM calendars
-      WHERE drawer_id = $1 AND deleted_at IS NULL
+      WHERE binder_id = $1 AND deleted_at IS NULL
       ORDER BY created_at ASC
     `;
-    const result = await conn.query(query, [drawerId]);
+    const result = await conn.query(query, [binderId]);
     return result.rows;
   }
 
   async create(conn, data) {
     const query = `
-      INSERT INTO calendars (id, drawer_id, title, description, color, is_public, created_at, updated_at)
+      INSERT INTO calendars (id, binder_id, title, description, color, is_public, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), COALESCE($8, now()))
       RETURNING *
     `;
     const result = await conn.query(query, [
       data.id,
-      data.drawer_id,
+      data.binder_id,
       data.title,
       data.description || null,
       data.color || 0,
@@ -97,7 +97,7 @@ class CalendarDAO {
 
   async getSubscriptionsByUserId(conn, userId) {
     const query = `
-      SELECT c.id, c.drawer_id, c.title, c.description, c.color, c.is_public,
+      SELECT c.id, c.binder_id, c.title, c.description, c.color, c.is_public,
              c.created_at, c.updated_at,
              cs.created_at AS subscribed_at
       FROM calendar_subscriptions cs

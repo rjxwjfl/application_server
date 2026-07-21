@@ -1,6 +1,6 @@
 const { SpecialDayDAO } = require('../daos/specialDayDAO');
 const { CalendarDAO } = require('../daos/calendarDAO');
-const { DrawerDAO } = require('../daos/drawerDAO');
+const { BinderDAO } = require('../daos/binderDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -30,7 +30,7 @@ class SpecialDayService {
     const cal = await CalendarDAO.findById(pool, calendar_id);
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
 
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('권한이 없습니다');
     if (member.role > 2) throw new ForbiddenError('편집자 이상만 기념일을 생성할 수 있습니다');
 
@@ -43,7 +43,7 @@ class SpecialDayService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: cal.drawer_id,
+      binder_id: cal.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -59,13 +59,13 @@ class SpecialDayService {
     if (!specialDay) throw new NotFoundError('기념일을 찾을 수 없습니다');
 
     const cal = await CalendarDAO.findById(pool, specialDay.calendar_id);
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at || member.role > 2) throw new ForbiddenError('권한이 없습니다');
 
     const updated = await SpecialDayDAO.update(pool, id, data);
 
     eventBus.emit('sync', {
-      drawer_id: cal.drawer_id,
+      binder_id: cal.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,
@@ -81,13 +81,13 @@ class SpecialDayService {
     if (!specialDay) throw new NotFoundError('기념일을 찾을 수 없습니다');
 
     const cal = await CalendarDAO.findById(pool, specialDay.calendar_id);
-    const member = await DrawerDAO.getMember(pool, cal.drawer_id, context.sender_id);
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at || member.role > 2) throw new ForbiddenError('권한이 없습니다');
 
     await SpecialDayDAO.softDelete(pool, id);
 
     eventBus.emit('sync', {
-      drawer_id: cal.drawer_id,
+      binder_id: cal.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,

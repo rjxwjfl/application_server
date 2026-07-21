@@ -3,12 +3,12 @@ class SyncDAO {
   // =========================================================================
   // 권한 획득 유틸리티
   // =========================================================================
-  static async getDrawerIdsByUserId(pool, userId) {
+  static async getBinderIdsByUserId(pool, userId) {
     const { rows } = await pool.query(
-      `SELECT drawer_id FROM drawer_members WHERE user_id = $1 AND deleted_at IS NULL`,
+      `SELECT binder_id FROM binder_members WHERE user_id = $1 AND deleted_at IS NULL`,
       [userId]
     );
-    return rows.map(r => r.drawer_id);
+    return rows.map(r => r.binder_id);
   }
 
   static async getSubscribedCalIdsByUserId(pool, userId) {
@@ -22,12 +22,12 @@ class SyncDAO {
   // =========================================================================
   // Track A: Meta Data 쿼리 (무조건 100% 최신)
   // =========================================================================
-  static async getDrawersForSync(pool, currDIds, currCIds) {
+  static async getBindersForSync(pool, currDIds, currCIds) {
     const query = `
-      SELECT d.* FROM drawers d
+      SELECT d.* FROM binders d
       WHERE (
         d.id = ANY($1::uuid[])
-        OR d.id IN (SELECT drawer_id FROM calendars WHERE id = ANY($2::uuid[]))
+        OR d.id IN (SELECT binder_id FROM calendars WHERE id = ANY($2::uuid[]))
       )
       AND d.deleted_at IS NULL
     `;
@@ -35,24 +35,24 @@ class SyncDAO {
     return rows;
   }
 
-  static async getDrawerMembers(pool, currDIds) {
+  static async getBinderMembers(pool, currDIds) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT drawer_id, user_id, role, nickname_in_drawer, joined_at,
+      SELECT binder_id, user_id, role, nickname_in_binder, joined_at,
              created_at, updated_at, deleted_at
-      FROM drawer_members
-      WHERE drawer_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      FROM binder_members
+      WHERE binder_id = ANY($1::uuid[]) AND deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [currDIds]);
     return rows;
   }
 
-  static async getDrawerPreferences(pool, userId, currDIds) {
+  static async getBinderPreferences(pool, userId, currDIds) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT drawer_id, user_id, role, nickname_in_drawer, notification_level
-      FROM drawer_members
-      WHERE user_id = $1 AND drawer_id = ANY($2::uuid[]) AND deleted_at IS NULL
+      SELECT binder_id, user_id, role, nickname_in_binder, notification_level
+      FROM binder_members
+      WHERE user_id = $1 AND binder_id = ANY($2::uuid[]) AND deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [userId, currDIds]);
     return rows;
@@ -67,8 +67,8 @@ class SyncDAO {
       FROM user_infos ui
       JOIN users u ON ui.user_id = u.id
       WHERE ui.user_id IN (
-        SELECT DISTINCT dm.user_id FROM drawer_members dm
-        WHERE dm.drawer_id = ANY($1::uuid[]) AND dm.deleted_at IS NULL
+        SELECT DISTINCT dm.user_id FROM binder_members dm
+        WHERE dm.binder_id = ANY($1::uuid[]) AND dm.deleted_at IS NULL
       )
       ${oldTs ? 'AND ui.updated_at > $2' : ''}
     `;
@@ -77,19 +77,19 @@ class SyncDAO {
     return rows;
   }
 
-  static async getDrawerSettings(pool, currDIds) {
+  static async getBinderSettings(pool, currDIds) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT * FROM drawer_settings WHERE drawer_id = ANY($1::uuid[])
+      SELECT * FROM binder_settings WHERE binder_id = ANY($1::uuid[])
     `;
     const { rows } = await pool.query(query, [currDIds]);
     return rows;
   }
 
-  static async getSeries(pool, currDIds) {
+  static async getSection(pool, currDIds) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT * FROM series WHERE drawer_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      SELECT * FROM sections WHERE binder_id = ANY($1::uuid[]) AND deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [currDIds]);
     return rows;
@@ -98,7 +98,7 @@ class SyncDAO {
   static async getCalendarsForSync(pool, currDIds, currCIds) {
     const query = `
       SELECT * FROM calendars
-      WHERE (drawer_id = ANY($1::uuid[]) OR id = ANY($2::uuid[]))
+      WHERE (binder_id = ANY($1::uuid[]) OR id = ANY($2::uuid[]))
       AND deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [currDIds, currCIds]);
@@ -119,18 +119,18 @@ class SyncDAO {
   // =========================================================================
   static async getEventsDeltaFull(pool, ctx) {
     const query = `
-      SELECT e.*, es.series_id FROM events e
-      LEFT JOIN event_series es ON es.event_id = e.id
+      SELECT e.*, es.section_id FROM events e
+      LEFT JOIN event_sections es ON es.event_id = e.id
       JOIN calendars c ON e.calendar_id = c.id
-      WHERE (c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
+      WHERE (c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.updated_at > $3
 
       UNION ALL
 
-      SELECT e.*, es.series_id FROM events e
-      LEFT JOIN event_series es ON es.event_id = e.id
+      SELECT e.*, es.section_id FROM events e
+      LEFT JOIN event_sections es ON es.event_id = e.id
       JOIN calendars c ON e.calendar_id = c.id
-      WHERE (c.drawer_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[]))
+      WHERE (c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[]))
         AND e.deleted_at IS NULL
         AND (e.created_at >= $6 OR e.updated_at >= $6)
     `;
@@ -147,9 +147,9 @@ class SyncDAO {
       JOIN events e ON i.event_id = e.id
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (
-        ((c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND i.updated_at > $3)
+        ((c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND i.updated_at > $3)
         OR
-        ((c.drawer_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND i.start_date >= $6)
+        ((c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND i.start_date >= $6)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -166,9 +166,9 @@ class SyncDAO {
       JOIN events e ON i.event_id = e.id
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (
-        ((c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND ep.updated_at > $3)
+        ((c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND ep.updated_at > $3)
         OR
-        ((c.drawer_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL)
+        ((c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -183,9 +183,9 @@ class SyncDAO {
       SELECT t.* FROM tasks t
       JOIN calendars c ON t.calendar_id = c.id
       WHERE (
-        ((c.drawer_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND t.updated_at > $3)
+        ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND t.updated_at > $3)
         OR
-        ((c.drawer_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
+        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
       )
     `;
     const { rows } = await pool.query(query, [
@@ -201,9 +201,9 @@ class SyncDAO {
       JOIN tasks t ON ti.task_id = t.id
       JOIN calendars c ON t.calendar_id = c.id
       WHERE (
-        ((c.drawer_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND ti.updated_at > $3)
+        ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND ti.updated_at > $3)
         OR
-        ((c.drawer_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND ti.due_date >= $6)
+        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND ti.due_date >= $6)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -220,9 +220,9 @@ class SyncDAO {
       JOIN tasks t ON ti.task_id = t.id
       JOIN calendars c ON t.calendar_id = c.id
       WHERE (
-        ((c.drawer_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND tp.updated_at > $3)
+        ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND tp.updated_at > $3)
         OR
-        ((c.drawer_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL)
+        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -237,9 +237,9 @@ class SyncDAO {
       SELECT sd.* FROM special_days sd
       JOIN calendars c ON sd.calendar_id = c.id
       WHERE (
-        ((c.drawer_id = ANY($1::uuid[]) OR sd.calendar_id = ANY($2::uuid[])) AND sd.updated_at > $3)
+        ((c.binder_id = ANY($1::uuid[]) OR sd.calendar_id = ANY($2::uuid[])) AND sd.updated_at > $3)
         OR
-        ((c.drawer_id = ANY($4::uuid[]) OR sd.calendar_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL)
+        ((c.binder_id = ANY($4::uuid[]) OR sd.calendar_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -254,12 +254,12 @@ class SyncDAO {
   // =========================================================================
   static async getMessagesDeltaFull(pool, ctx) {
     const query = `
-      SELECT m.* FROM series_messages m
-      JOIN series s ON m.series_id = s.id
+      SELECT m.* FROM section_messages m
+      JOIN sections s ON m.section_id = s.id
       WHERE (
-        (s.drawer_id = ANY($1::uuid[]) AND m.updated_at > $2)
+        (s.binder_id = ANY($1::uuid[]) AND m.updated_at > $2)
         OR
-        (s.drawer_id = ANY($3::uuid[]) AND m.deleted_at IS NULL AND m.created_at >= $4)
+        (s.binder_id = ANY($3::uuid[]) AND m.deleted_at IS NULL AND m.created_at >= $4)
       )
       ORDER BY m.created_at DESC
     `;
@@ -275,7 +275,7 @@ class SyncDAO {
     const query = `
       SELECT id, context_id AS message_id, filename, file_size, content_type, storage_key, status, updated_at
       FROM attachments
-      WHERE context_type = 'SERIES_MESSAGE' AND context_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      WHERE context_type = 'SECTION_MESSAGE' AND context_id = ANY($1::uuid[]) AND deleted_at IS NULL
       ${oldTs ? 'AND updated_at > $2' : ''}
     `;
     const params = oldTs ? [messageIds, oldTs] : [messageIds];
@@ -367,9 +367,9 @@ class SyncDAO {
   static async getActivityFeedsForSync(pool, currDIds, oldTs) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT id, drawer_id, actor_id, action_type, target_type, target_id, metadata, created_at
+      SELECT id, binder_id, actor_id, action_type, target_type, target_id, metadata, created_at
       FROM activity_feeds
-      WHERE drawer_id = ANY($1::uuid[])
+      WHERE binder_id = ANY($1::uuid[])
       ${oldTs ? 'AND created_at > $2' : ''}
       ORDER BY created_at DESC
       LIMIT 500
@@ -382,9 +382,9 @@ class SyncDAO {
   static async getActivityFeedCursorsForSync(pool, userId, currDIds) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT user_id, drawer_id, last_read_feed_id, last_read_feed_at, updated_at
+      SELECT user_id, binder_id, last_read_feed_id, last_read_feed_at, updated_at
       FROM activity_feed_cursors
-      WHERE user_id = $1 AND drawer_id = ANY($2::uuid[])
+      WHERE user_id = $1 AND binder_id = ANY($2::uuid[])
     `;
     const { rows } = await pool.query(query, [userId, currDIds]);
     return rows;
@@ -408,7 +408,7 @@ class SyncDAO {
     const query = `
       SELECT e.* FROM events e
       JOIN calendars c ON e.calendar_id = c.id
-      WHERE (c.drawer_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
+      WHERE (c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [ctx.currDIds, ctx.currCIds]);

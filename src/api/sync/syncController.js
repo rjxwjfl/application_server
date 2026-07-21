@@ -24,9 +24,9 @@ const syncController = {
     res.json({ success: true, data });
   }),
 
-  syncNewDrawer: asyncHandler(async (req, res) => {
-    const { drawerId } = req.params;
-    const data = await SyncService.syncNewDrawer(req.user_id, drawerId);
+  syncNewBinder: asyncHandler(async (req, res) => {
+    const { binderId } = req.params;
+    const data = await SyncService.syncNewBinder(req.user_id, binderId);
     res.json({ success: true, data });
   }),
 

@@ -29,14 +29,14 @@ class NotificationDAO {
   /**
    * 유저가 속한 서랍 ID 목록 조회
    */
-  async getDrawerIdsByUserId(conn, userId) {
+  async getBinderIdsByUserId(conn, userId) {
     const query = `
-      SELECT drawer_id
-      FROM drawer_members
+      SELECT binder_id
+      FROM binder_members
       WHERE user_id = $1 AND deleted_at IS NULL
     `;
     const result = await conn.query(query, [userId]);
-    return result.rows.map((r) => r.drawer_id);
+    return result.rows.map((r) => r.binder_id);
   }
 
   /**
@@ -56,15 +56,15 @@ class NotificationDAO {
    * notification_level 기준으로 서랍 멤버 필터링
    * notification_level: 0=모두, 1=관련만, 2=멘션만, 3=수신거부
    */
-  async getMembersForAlert(conn, drawerId, maxLevel) {
+  async getMembersForAlert(conn, binderId, maxLevel) {
     const query = `
       SELECT dm.user_id, dm.notification_level, dm.role
-      FROM drawer_members dm
-      WHERE dm.drawer_id = $1
+      FROM binder_members dm
+      WHERE dm.binder_id = $1
         AND dm.deleted_at IS NULL
         AND dm.notification_level <= $2
     `;
-    const result = await conn.query(query, [drawerId, maxLevel]);
+    const result = await conn.query(query, [binderId, maxLevel]);
     return result.rows;
   }
 
@@ -89,7 +89,7 @@ class NotificationDAO {
         n.notification_type,
         n.route_type,
         n.route_id || null,
-        n.drawer_id || null,
+        n.binder_id || null,
         n.title || null,
         n.body || null,
         n.payload ? JSON.stringify(n.payload) : null,
@@ -97,7 +97,7 @@ class NotificationDAO {
     }
 
     const query = `
-      INSERT INTO notifications (id, recipient_id, sender_id, notification_type, route_type, route_id, drawer_id, title, body, payload)
+      INSERT INTO notifications (id, recipient_id, sender_id, notification_type, route_type, route_id, binder_id, title, body, payload)
       VALUES ${values.join(', ')}
     `;
     await conn.query(query, params);
@@ -119,7 +119,7 @@ class NotificationDAO {
 
     const query = `
       SELECT id, recipient_id, sender_id, notification_type, route_type, route_id,
-             drawer_id, group_key, title, body, payload, is_read, created_at
+             binder_id, group_key, title, body, payload, is_read, created_at
       FROM notifications
       WHERE ${conditions.join(' AND ')}
       ORDER BY created_at DESC

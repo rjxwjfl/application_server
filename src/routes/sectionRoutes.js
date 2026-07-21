@@ -1,38 +1,38 @@
 const express = require("express");
 const router = express.Router();
-const seriesController = require("../api/series/seriesController");
+const sectionController = require("../api/sections/sectionController");
 
-router.route("/:seriesId")
-  .patch(seriesController.updateSeries)
-  .delete(seriesController.deleteSeries);
+router.route("/:sectionId")
+  .patch(sectionController.updateSection)
+  .delete(sectionController.deleteSection);
 
 // Cursor (읽음 위치 갱신)
-router.put("/:seriesId/cursor", seriesController.updateCursor);
+router.put("/:sectionId/cursor", sectionController.updateCursor);
 
-// Pinned Messages — /:seriesId/messages/:messageId 보다 앞에 등록
-router.get("/:seriesId/messages/pinned", seriesController.getPinnedMessages);
+// Pinned Messages — /:sectionId/messages/:messageId 보다 앞에 등록
+router.get("/:sectionId/messages/pinned", sectionController.getPinnedMessages);
 
 // Messages
-router.route("/:seriesId/messages")
-  .get(seriesController.getMessages)
-  .post(seriesController.createMessage);
+router.route("/:sectionId/messages")
+  .get(sectionController.getMessages)
+  .post(sectionController.createMessage);
 
-router.route("/:seriesId/messages/:messageId")
-  .patch(seriesController.updateMessage)
-  .delete(seriesController.deleteMessage);
+router.route("/:sectionId/messages/:messageId")
+  .patch(sectionController.updateMessage)
+  .delete(sectionController.deleteMessage);
 
-router.patch("/:seriesId/messages/:messageId/pin", seriesController.togglePin);
+router.patch("/:sectionId/messages/:messageId/pin", sectionController.togglePin);
 
 // Files
-router.get("/:seriesId/files", seriesController.listFiles);
+router.get("/:sectionId/files", sectionController.listFiles);
 
 // Reactions
-router.post("/:seriesId/messages/:messageId/reactions", seriesController.addReaction);
-router.delete("/:seriesId/messages/:messageId/reactions/:emoji", seriesController.removeReaction);
+router.post("/:sectionId/messages/:messageId/reactions", sectionController.addReaction);
+router.delete("/:sectionId/messages/:messageId/reactions/:emoji", sectionController.removeReaction);
 
 // Polls
-router.get("/:seriesId/messages/:messageId/polls/:pollId", seriesController.getPoll);
-router.post("/:seriesId/messages/:messageId/polls/:pollId/vote", seriesController.votePoll);
-router.patch("/:seriesId/messages/:messageId/polls/:pollId/close", seriesController.closePoll);
+router.get("/:sectionId/messages/:messageId/polls/:pollId", sectionController.getPoll);
+router.post("/:sectionId/messages/:messageId/polls/:pollId/vote", sectionController.votePoll);
+router.patch("/:sectionId/messages/:messageId/polls/:pollId/close", sectionController.closePoll);
 
 module.exports = router;

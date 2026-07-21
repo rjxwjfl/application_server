@@ -1,5 +1,5 @@
 const { TaskDAO } = require('../daos/taskDAO');
-const { DrawerDAO } = require('../daos/drawerDAO');
+const { BinderDAO } = require('../daos/binderDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -26,7 +26,7 @@ class TaskService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: taskData.drawer_id,
+      binder_id: taskData.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE, target_type: TargetType.TASK, target_id: task.id,
@@ -44,7 +44,7 @@ class TaskService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: task.drawer_id,
+      binder_id: task.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.TASK, target_id: taskId,
@@ -62,7 +62,7 @@ class TaskService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: instance.drawer_id,
+      binder_id: instance.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.TASK_INSTANCE, target_id: instanceId,
@@ -84,7 +84,7 @@ class TaskService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: splitData.drawer_id,
+      binder_id: splitData.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE, target_type: TargetType.TASK, target_id: newTaskId,
@@ -94,15 +94,15 @@ class TaskService {
   }
 
   async deleteTask(taskId, context) {
-    const { drawer_id } = await withTransaction(async (client) => {
+    const { binder_id } = await withTransaction(async (client) => {
       const task = await TaskDAO.findById(client, taskId);
       if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
       await TaskDAO.softDeleteTask(client, taskId);
-      return { drawer_id: task.drawer_id };
+      return { binder_id: task.binder_id };
     });
 
     eventBus.emit('sync', {
-      drawer_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE, target_type: TargetType.TASK, target_id: taskId,
@@ -110,15 +110,15 @@ class TaskService {
   }
 
   async deleteTaskInstance(instanceId, context) {
-    const { drawer_id } = await withTransaction(async (client) => {
+    const { binder_id } = await withTransaction(async (client) => {
       const instance = await TaskDAO.findInstanceById(client, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
       await TaskDAO.softDeleteTaskInstance(client, instanceId);
-      return { drawer_id: instance.drawer_id };
+      return { binder_id: instance.binder_id };
     });
 
     eventBus.emit('sync', {
-      drawer_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE, target_type: TargetType.TASK_INSTANCE, target_id: instanceId,
@@ -130,17 +130,17 @@ class TaskService {
     const result = await withTransaction(async (client) => {
       const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
-      const actor = await DrawerDAO.getMember(client, instance.drawer_id, context.sender_id);
+      const actor = await BinderDAO.getMember(client, instance.binder_id, context.sender_id);
       if (!actor || actor.deleted_at) throw new ForbiddenError('서랍 멤버만 참여할 수 있습니다');
       if (data.user_id !== context.sender_id && actor.role > 2)
         throw new ForbiddenError('편집자 이상만 타인을 추가할 수 있습니다');
-      const target = await DrawerDAO.getMember(client, instance.drawer_id, data.user_id);
+      const target = await BinderDAO.getMember(client, instance.binder_id, data.user_id);
       if (!target || target.deleted_at) throw new BadRequestError('서랍 멤버만 추가할 수 있습니다');
       const participant = await TaskDAO.addParticipant(client, instanceId, data.user_id, context.sender_id);
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
-      return { participant, drawer_id: instance.drawer_id };
+      return { participant, binder_id: instance.binder_id };
     });
-    this.emitParticipantSync(result.drawer_id, instanceId, context, ActionType.CREATE);
+    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.CREATE);
     return result.participant;
   }
 
@@ -165,9 +165,9 @@ class TaskService {
         client, instanceId, userId, data.state, data.state === 2 ? data.memo.trim() : null
       );
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
-      return { participant: updated, drawer_id: instance.drawer_id };
+      return { participant: updated, binder_id: instance.binder_id };
     });
-    this.emitParticipantSync(result.drawer_id, instanceId, context, ActionType.UPDATE);
+    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.UPDATE);
     return result.participant;
   }
 
@@ -175,7 +175,7 @@ class TaskService {
     const result = await withTransaction(async (client) => {
       const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
-      const actor = await DrawerDAO.getMember(client, instance.drawer_id, context.sender_id);
+      const actor = await BinderDAO.getMember(client, instance.binder_id, context.sender_id);
       if (!actor || actor.deleted_at) throw new ForbiddenError('서랍 멤버만 제거할 수 있습니다');
       if (targetUserId !== context.sender_id && actor.role > 2)
         throw new ForbiddenError('편집자 이상만 타인을 제거할 수 있습니다');
@@ -184,15 +184,15 @@ class TaskService {
         throw new NotFoundError('활성 참여자를 찾을 수 없습니다', 'TASK_PARTICIPANT_NOT_FOUND');
       const removed = await TaskDAO.removeParticipant(client, instanceId, targetUserId);
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
-      return { participant: removed, drawer_id: instance.drawer_id };
+      return { participant: removed, binder_id: instance.binder_id };
     });
-    this.emitParticipantSync(result.drawer_id, instanceId, context, ActionType.DELETE);
+    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.DELETE);
     return result.participant;
   }
 
-  emitParticipantSync(drawerId, instanceId, context, action) {
+  emitParticipantSync(binderId, instanceId, context, action) {
     eventBus.emit('sync', {
-      drawer_id: drawerId,
+      binder_id: binderId,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action,

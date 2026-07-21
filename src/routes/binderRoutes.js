@@ -1,87 +1,87 @@
 const express = require("express");
 const router = express.Router();
-const drawerController = require("../api/drawers/drawerController");
+const binderController = require("../api/binders/binderController");
 const postController = require("../api/posts/postController");
 const calendarController = require("../api/calendars/calendarController");
-const seriesController = require("../api/series/seriesController");
+const sectionController = require("../api/sections/sectionController");
 
 // 검색 / 생성
-router.get("/", drawerController.searchDrawers);
-router.post("/", drawerController.createDrawer);
+router.get("/", binderController.searchBinders);
+router.post("/", binderController.createBinder);
 
-// 초대 토큰으로 가입 (POST /drawers/join — /invitations/:code 보다 앞에)
-router.post("/join", drawerController.joinDrawerByInvitation);
+// 초대 토큰으로 가입 (POST /binders/join — /invitations/:code 보다 앞에)
+router.post("/join", binderController.joinBinderByInvitation);
 
-// 초대 미리보기 (/:drawerId 보다 앞에 등록)
-router.get("/invitations/:invitationCode", drawerController.getInvitationPreview);
+// 초대 미리보기 (/:binderId 보다 앞에 등록)
+router.get("/invitations/:invitationCode", binderController.getInvitationPreview);
 
 // 단건 조회 / 수정 / 삭제
-router.get("/:drawerId", drawerController.getDrawer);
-router.patch("/:drawerId", drawerController.updateDrawer);
-router.delete("/:drawerId", drawerController.deleteDrawer);
+router.get("/:binderId", binderController.getBinder);
+router.patch("/:binderId", binderController.updateBinder);
+router.delete("/:binderId", binderController.deleteBinder);
 
 // 서랍 설정 수정 (master 전용)
-router.patch("/:drawerId/settings", drawerController.updateDrawerSettings);
+router.patch("/:binderId/settings", binderController.updateBinderSettings);
 
 // 초대 토큰 발급
-router.post("/:drawerId/invitations", drawerController.issueDrawerInvitation);
+router.post("/:binderId/invitations", binderController.issueBinderInvitation);
 
-// 공개 Drawer 가입 신청
-router.post("/:drawerId/join-request", drawerController.requestDrawerJoin);
+// 공개 Binder 가입 신청
+router.post("/:binderId/join-request", binderController.requestBinderJoin);
 
 // 가입 신청 관리 (미설계 라우트 — 관리자용 유지)
-router.get("/:drawerId/join-requests", drawerController.getJoinRequests);
-router.patch("/:drawerId/join-requests/approve", drawerController.approveJoinRequest);
-router.delete("/:drawerId/join-requests/reject", drawerController.rejectJoinRequest);
+router.get("/:binderId/join-requests", binderController.getJoinRequests);
+router.patch("/:binderId/join-requests/approve", binderController.approveJoinRequest);
+router.delete("/:binderId/join-requests/reject", binderController.rejectJoinRequest);
 
 // 멤버 목록
-router.get("/:drawerId/members", drawerController.getDrawerMembers);
+router.get("/:binderId/members", binderController.getBinderMembers);
 
 // 멤버 역할 변경 (/:userId/role — /me 보다 앞에 등록 불필요, Express는 static 우선)
-router.patch("/:drawerId/members/me/nickname", drawerController.updateNickname);
-router.delete("/:drawerId/members/me", drawerController.leaveDrawer);
-router.patch("/:drawerId/members/:userId/role", drawerController.updateDrawerMemberRole);
-router.delete("/:drawerId/members/:userId", drawerController.kickDrawerMember);
+router.patch("/:binderId/members/me/nickname", binderController.updateNickname);
+router.delete("/:binderId/members/me", binderController.leaveBinder);
+router.patch("/:binderId/members/:userId/role", binderController.updateBinderMemberRole);
+router.delete("/:binderId/members/:userId", binderController.kickBinderMember);
 
 // 마스터 이전
-router.post("/:drawerId/members/transfer-master", drawerController.transferDrawerMaster);
+router.post("/:binderId/members/transfer-master", binderController.transferBinderMaster);
 
 // 알림 환경설정
-router.patch("/:drawerId/preferences", drawerController.updatePreferences);
+router.patch("/:binderId/preferences", binderController.updatePreferences);
 
-// Drawer Boost
-router.get("/:drawerId/boost", drawerController.getBoost);
-router.get("/:drawerId/boost/check", drawerController.checkBoost);
-router.post("/:drawerId/boost/verify-purchase", drawerController.verifyBoost);
-router.patch("/:drawerId/boost/transfer", drawerController.transferBoost);
-router.delete("/:drawerId/boost", drawerController.cancelBoost);
+// Binder Boost
+router.get("/:binderId/boost", binderController.getBoost);
+router.get("/:binderId/boost/check", binderController.checkBoost);
+router.post("/:binderId/boost/verify-purchase", binderController.verifyBoost);
+router.patch("/:binderId/boost/transfer", binderController.transferBoost);
+router.delete("/:binderId/boost", binderController.cancelBoost);
 
 // 첨부파일
-router.get("/:drawerId/attachments", drawerController.listAttachments);
-router.delete("/:drawerId/attachments/:attachmentId", drawerController.deleteAttachment);
+router.get("/:binderId/attachments", binderController.listAttachments);
+router.delete("/:binderId/attachments/:attachmentId", binderController.deleteAttachment);
 
 // 게시물
-router.get("/:drawerId/posts", postController.getPosts);
-router.post("/:drawerId/posts", (req, res, next) => {
-  req.body.drawer_id = req.params.drawerId;
+router.get("/:binderId/posts", postController.getPosts);
+router.post("/:binderId/posts", (req, res, next) => {
+  req.body.binder_id = req.params.binderId;
   postController.create(req, res, next);
 });
 
 // 캘린더
-router.get("/:drawerId/calendars", calendarController.getDrawerCalendars);
-router.post("/:drawerId/calendars", (req, res, next) => {
-  req.body.drawer_id = req.params.drawerId;
+router.get("/:binderId/calendars", calendarController.getBinderCalendars);
+router.post("/:binderId/calendars", (req, res, next) => {
+  req.body.binder_id = req.params.binderId;
   calendarController.create(req, res, next);
 });
 
-// 시리즈
-router.get("/:drawerId/series", seriesController.getSeries);
-router.post("/:drawerId/series", (req, res, next) => {
-  req.body.drawer_id = req.params.drawerId;
-  seriesController.createSeries(req, res, next);
+// 섹션
+router.get("/:binderId/sections", sectionController.getSection);
+router.post("/:binderId/sections", (req, res, next) => {
+  req.body.binder_id = req.params.binderId;
+  sectionController.createSection(req, res, next);
 });
 
-// 검색 (drawer 내 전체 검색)
-router.get("/:drawerId/search", drawerController.search);
+// 검색 (binder 내 전체 검색)
+router.get("/:binderId/search", binderController.search);
 
 module.exports = router;

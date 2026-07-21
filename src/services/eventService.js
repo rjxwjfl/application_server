@@ -1,8 +1,8 @@
 const { EventDAO } = require('../daos/eventDAO');
 const { CalendarDAO } = require('../daos/calendarDAO');
-const { SeriesDAO } = require('../daos/seriesDAO');
+const { SectionDAO } = require('../daos/sectionDAO');
 const { ReminderDAO } = require('../daos/reminderDAO');
-const { DrawerDAO } = require('../daos');
+const { BinderDAO } = require('../daos');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -26,17 +26,17 @@ class EventService {
         }
       }
 
-      if (data.series) {
-        const existing = await SeriesDAO.findById(client, data.series.id);
+      if (data.section) {
+        const existing = await SectionDAO.findById(client, data.section.id);
         if (!existing) {
-          await SeriesDAO.create(client, data.series);
+          await SectionDAO.create(client, data.section);
         }
       }
 
       const created = await EventDAO.createEvent(client, data);
 
-      if (data.series_id) {
-        await EventDAO.addSeries(client, data.id, data.series_id);
+      if (data.section_id) {
+        await EventDAO.addSection(client, data.id, data.section_id);
       }
 
       if (data.reminders && data.reminders.length > 0) {
@@ -52,7 +52,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: data.drawer_id,
+      binder_id: data.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -75,10 +75,10 @@ class EventService {
 
     if (participants.size > 0) {
       eventBus.emit('alert', {
-        drawer_id: data.drawer_id,
+        binder_id: data.binder_id,
         sender_id: context.sender_id,
         type: 'assignment',
-        title: data.drawer_name || '새로운 일정',
+        title: data.binder_name || '새로운 일정',
         body: `'${data.summary}' 일정에 배정되었습니다.`,
         target_user_ids: Array.from(participants),
         requiredLevel: 1,
@@ -99,7 +99,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: event.drawer_id,
+      binder_id: event.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,
@@ -119,7 +119,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: instance.drawer_id,
+      binder_id: instance.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE,
@@ -143,7 +143,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: splitData.drawer_id,
+      binder_id: splitData.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -155,15 +155,15 @@ class EventService {
   }
 
   async deleteEvent(event_id, context) {
-    const { drawer_id } = await withTransaction(async (client) => {
+    const { binder_id } = await withTransaction(async (client) => {
       const event = await EventDAO.findById(client, event_id);
       if (!event) throw new NotFoundError('이벤트를 찾을 수 없습니다');
       await EventDAO.softDeleteEvent(client, event_id);
-      return { drawer_id: event.drawer_id };
+      return { binder_id: event.binder_id };
     });
 
     eventBus.emit('sync', {
-      drawer_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,
@@ -173,15 +173,15 @@ class EventService {
   }
 
   async deleteEventInstance(instance_id, context) {
-    const { drawer_id } = await withTransaction(async (client) => {
+    const { binder_id } = await withTransaction(async (client) => {
       const instance = await EventDAO.findInstanceById(client, instance_id);
       if (!instance) throw new NotFoundError('이벤트 인스턴스를 찾을 수 없습니다');
       await EventDAO.softDeleteEventInstance(client, instance_id);
-      return { drawer_id: instance.drawer_id };
+      return { binder_id: instance.binder_id };
     });
 
     eventBus.emit('sync', {
-      drawer_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,
@@ -198,9 +198,9 @@ class EventService {
       return await EventDAO.addParticipant(client, instance_id, user_id, context.sender_id);
     });
 
-    if (participantData.drawer_id) {
+    if (participantData.binder_id) {
       eventBus.emit('sync', {
-        drawer_id: participantData.drawer_id,
+        binder_id: participantData.binder_id,
         sender_id: context.sender_id,
         device_uuid: context.device_uuid,
         action: ActionType.CREATE,
@@ -209,10 +209,10 @@ class EventService {
       });
 
       eventBus.emit('alert', {
-        drawer_id: participantData.drawer_id,
+        binder_id: participantData.binder_id,
         sender_id: context.sender_id,
         type: 'assignment',
-        title: participantData.drawer_name || '',
+        title: participantData.binder_name || '',
         body: participantData.alert_body || '이벤트에 참가자로 배정되었습니다.',
         target_user_ids: [user_id],
         requiredLevel: 1,
@@ -240,9 +240,9 @@ class EventService {
       await EventDAO.updateParticipantState(client, instance_id, user_id, state);
     });
 
-    if (updateData.drawer_id) {
+    if (updateData.binder_id) {
       eventBus.emit('sync', {
-        drawer_id: updateData.drawer_id,
+        binder_id: updateData.binder_id,
         sender_id: context.sender_id,
         device_uuid: context.device_uuid,
         action: ActionType.RSVP_UPDATE,
@@ -252,9 +252,9 @@ class EventService {
     }
   }
 
-  async rejectApply(instance_id, targetUserId, drawerId, context) {
+  async rejectApply(instance_id, targetUserId, binderId, context) {
     await withTransaction(async (client) => {
-      const requester = await DrawerDAO.getMember(client, drawerId, context.sender_id);
+      const requester = await BinderDAO.getMember(client, binderId, context.sender_id);
       if (!requester || requester.role > 1) throw new ForbiddenError('권한이 없습니다');
 
       const participant = await EventDAO.findParticipant(client, instance_id, targetUserId);
@@ -268,7 +268,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: drawerId,
+      binder_id: binderId,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.REJECT,
@@ -277,13 +277,13 @@ class EventService {
     });
   }
 
-  async restoreRejected(instance_id, targetUserId, newState, drawerId, context) {
+  async restoreRejected(instance_id, targetUserId, newState, binderId, context) {
     if (newState !== 3 && newState !== 4) {
       throw new BadRequestError('accept(3) 또는 tentative(4)로만 복원할 수 있습니다');
     }
 
     await withTransaction(async (client) => {
-      const requester = await DrawerDAO.getMember(client, drawerId, context.sender_id);
+      const requester = await BinderDAO.getMember(client, binderId, context.sender_id);
       if (!requester || requester.role > 1) throw new ForbiddenError('권한이 없습니다');
 
       const participant = await EventDAO.findParticipant(client, instance_id, targetUserId);
@@ -295,7 +295,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      drawer_id: drawerId,
+      binder_id: binderId,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.RSVP_UPDATE,

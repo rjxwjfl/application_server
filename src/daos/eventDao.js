@@ -231,32 +231,32 @@ class EventDAO {
   }
 
   // ============================================
-  // Event Series 릴레이션 테이블
+  // Event Section 릴레이션 테이블
   // ============================================
 
-  async addSeries(conn, eventId, seriesId) {
+  async addSection(conn, eventId, sectionId) {
     const query = `
-      INSERT INTO event_series (event_id, series_id)
+      INSERT INTO event_sections (event_id, section_id)
       VALUES ($1, $2)
-      ON CONFLICT (event_id, series_id) DO NOTHING
+      ON CONFLICT (event_id, section_id) DO NOTHING
     `;
-    await conn.query(query, [eventId, seriesId]);
+    await conn.query(query, [eventId, sectionId]);
   }
 
-  async removeSeries(conn, eventId, seriesId) {
+  async removeSection(conn, eventId, sectionId) {
     const query = `
-      DELETE FROM event_series
-      WHERE event_id = $1 AND series_id = $2
+      DELETE FROM event_sections
+      WHERE event_id = $1 AND section_id = $2
     `;
-    await conn.query(query, [eventId, seriesId]);
+    await conn.query(query, [eventId, sectionId]);
   }
 
-  async getSeriesByEventId(conn, eventId) {
+  async getSectionByEventId(conn, eventId) {
     const query = `
-      SELECT s.id, s.drawer_id, s.title, s.access_scope, s.required_grade, s.is_default,
+      SELECT s.id, s.binder_id, s.title, s.access_scope, s.required_grade, s.is_default,
              s.created_at, s.updated_at
-      FROM event_series es
-      JOIN series s ON es.series_id = s.id
+      FROM event_sections es
+      JOIN sections s ON es.section_id = s.id
       WHERE es.event_id = $1 AND s.deleted_at IS NULL
     `;
     const result = await conn.query(query, [eventId]);

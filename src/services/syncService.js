@@ -32,7 +32,7 @@ class SyncService {
 
     // 2. 현재 유저의 '진짜' 권한 조회 (DB 기준)
     const [currDIds, currCIds] = await Promise.all([
-      SyncDAO.getDrawerIdsByUserId(pool, userId),
+      SyncDAO.getBinderIdsByUserId(pool, userId),
       SyncDAO.getSubscribedCalIdsByUserId(pool, userId),
     ]);
 
@@ -87,7 +87,7 @@ class SyncService {
     const endDate = new Date(endIso);
 
     const [currDIds, currCIds] = await Promise.all([
-      SyncDAO.getDrawerIdsByUserId(pool, userId),
+      SyncDAO.getBinderIdsByUserId(pool, userId),
       SyncDAO.getSubscribedCalIdsByUserId(pool, userId),
     ]);
 
@@ -109,20 +109,20 @@ class SyncService {
 
   async _fetchTrackAMeta(userId, currDIds, currCIds, oldTs) {
     // 뼈대 데이터는 ts, old/new 따지지 않고 무조건 현재 소속 기준으로 100% 덮어씌움 (FK 에러 방지)
-    const [drawers, drawerMembers, drawerPreferences, drawerSettings, users, series, calendars, subscribedCals] = await Promise.all([
-      SyncDAO.getDrawersForSync(pool, currDIds, currCIds),
-      SyncDAO.getDrawerMembers(pool, currDIds),
-      SyncDAO.getDrawerPreferences(pool, userId, currDIds),
-      SyncDAO.getDrawerSettings(pool, currDIds),
+    const [binders, binderMembers, binderPreferences, binderSettings, users, section, calendars, subscribedCals] = await Promise.all([
+      SyncDAO.getBindersForSync(pool, currDIds, currCIds),
+      SyncDAO.getBinderMembers(pool, currDIds),
+      SyncDAO.getBinderPreferences(pool, userId, currDIds),
+      SyncDAO.getBinderSettings(pool, currDIds),
       SyncDAO.getUsersForSync(pool, currDIds, oldTs),
-      SyncDAO.getSeries(pool, currDIds),
+      SyncDAO.getSection(pool, currDIds),
       SyncDAO.getCalendarsForSync(pool, currDIds, currCIds),
       SyncDAO.getSubscribedCalendarRecords(pool, currCIds)
     ]);
 
     return {
-      drawers, drawer_members: drawerMembers, drawer_preferences: drawerPreferences,
-      drawer_settings: drawerSettings, users, series, calendars,
+      binders, binder_members: binderMembers, binder_preferences: binderPreferences,
+      binder_settings: binderSettings, users, section, calendars,
       subscribed_calendars: subscribedCals
     };
   }
