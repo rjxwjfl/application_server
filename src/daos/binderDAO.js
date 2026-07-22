@@ -204,10 +204,15 @@ class BinderDAO {
   async removeMember(conn, binderId, userId) {
     const query = `
       UPDATE binder_members
-      SET deleted_at = now(), updated_at = now()
+      SET deleted_at = now(), updated_at = now(), primary_group_id = NULL
       WHERE binder_id = $1 AND user_id = $2 AND deleted_at IS NULL
     `;
     await conn.query(query, [binderId, userId]);
+    await conn.query(
+      `UPDATE group_members gm SET deleted_at = now(), updated_at = now()
+       FROM groups g WHERE gm.group_id = g.id AND g.binder_id = $1 AND gm.user_id = $2 AND gm.deleted_at IS NULL`,
+      [binderId, userId]
+    );
   }
 
   // ============================================

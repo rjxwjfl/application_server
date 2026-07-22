@@ -2,6 +2,7 @@ const { Storage } = require('@google-cloud/storage');
 const { generateUUID } = require('../utils/uuid');
 const pool = require('../../config/db');
 const { NotFoundError, ForbiddenError } = require('../core/errors');
+const { SectionDAO } = require('../daos/sectionDAO');
 
 const storage = new Storage();
 
@@ -40,6 +41,13 @@ class MediaService {
   async presign(data, context) {
     const { filename, content_type, file_size, context_type, context_id, binder_id } = data;
     const id = generateUUID();
+
+    if (context_type === 'SECTION_MESSAGE') {
+      const sectionId = await SectionDAO.findSectionIdByMessage(pool, context_id);
+      if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, context.sender_id))) {
+        throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
+      }
+    }
 
     let storage_key;
     if (context_type === 'avatar' || context_type === 'cover') {
@@ -93,11 +101,17 @@ class MediaService {
 
   async getSignedUrl(attachmentId, userId) {
     const result = await pool.query(
-      `SELECT id, storage_key, content_type, status FROM attachments WHERE id = $1`,
+      `SELECT id, storage_key, content_type, status, context_type, context_id FROM attachments WHERE id = $1`,
       [attachmentId]
     );
     const attachment = result.rows[0];
     if (!attachment) throw new NotFoundError('첨부 파일을 찾을 수 없습니다');
+    if (attachment.context_type === 'SECTION_MESSAGE') {
+      const sectionId = await SectionDAO.findSectionIdByMessage(pool, attachment.context_id);
+      if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, userId))) {
+        throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
+      }
+    }
     if (attachment.status === 'hidden') throw new ForbiddenError('잠긴 파일입니다. Boost로 복원하세요.');
     if (attachment.status === 'rejected') throw new ForbiddenError('접근할 수 없는 파일입니다');
 

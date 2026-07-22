@@ -4,6 +4,8 @@ const binderController = require("../api/binders/binderController");
 const postController = require("../api/posts/postController");
 const calendarController = require("../api/calendars/calendarController");
 const sectionController = require("../api/sections/sectionController");
+const asyncHandler = require('../core/asyncHandler');
+const { GroupService } = require('../services/groupService');
 
 // 검색 / 생성
 router.get("/", binderController.searchBinders);
@@ -80,6 +82,9 @@ router.post("/:binderId/sections", (req, res, next) => {
   req.body.binder_id = req.params.binderId;
   sectionController.createSection(req, res, next);
 });
+
+router.get('/:binderId/groups', asyncHandler(async (req, res) => res.json({ success: true, data: { groups: await GroupService.getGroups(req.params.binderId, req.user_id) } })));
+router.post('/:binderId/groups', asyncHandler(async (req, res) => res.status(201).json({ success: true, data: await GroupService.createGroup(req.params.binderId, req.body, req.user_id) })));
 
 // 검색 (binder 내 전체 검색)
 router.get("/:binderId/search", binderController.search);

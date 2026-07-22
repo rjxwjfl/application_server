@@ -95,6 +95,33 @@ class SyncDAO {
     return rows;
   }
 
+  static async getGroups(pool, currDIds, oldTs) {
+    if (!currDIds.length) return [];
+    const { rows } = await pool.query(
+      `SELECT * FROM groups WHERE binder_id = ANY($1::uuid[]) ${oldTs ? 'AND updated_at > $2' : ''}`,
+      oldTs ? [currDIds, oldTs] : [currDIds]
+    );
+    return rows;
+  }
+
+  static async getOwnGroupMembers(pool, userId, oldTs) {
+    const { rows } = await pool.query(
+      `SELECT * FROM group_members WHERE user_id = $1 ${oldTs ? 'AND updated_at > $2' : ''}`,
+      oldTs ? [userId, oldTs] : [userId]
+    );
+    return rows;
+  }
+
+  static async getSectionGroups(pool, currDIds, oldTs) {
+    if (!currDIds.length) return [];
+    const { rows } = await pool.query(
+      `SELECT sg.* FROM section_groups sg JOIN groups g ON g.id = sg.group_id
+       WHERE g.binder_id = ANY($1::uuid[]) ${oldTs ? 'AND sg.updated_at > $2' : ''}`,
+      oldTs ? [currDIds, oldTs] : [currDIds]
+    );
+    return rows;
+  }
+
   static async getCalendarsForSync(pool, currDIds, currCIds) {
     const query = `
       SELECT * FROM calendars
@@ -256,7 +283,10 @@ class SyncDAO {
     const query = `
       SELECT m.* FROM section_messages m
       JOIN sections s ON m.section_id = s.id
-      WHERE (
+      WHERE (s.access_scope = 0 OR EXISTS (
+        SELECT 1 FROM section_groups sg JOIN group_members gm ON gm.group_id = sg.group_id
+        WHERE sg.section_id = s.id AND gm.user_id = $5 AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL
+      )) AND (
         (s.binder_id = ANY($1::uuid[]) AND m.updated_at > $2)
         OR
         (s.binder_id = ANY($3::uuid[]) AND m.deleted_at IS NULL AND m.created_at >= $4)
@@ -265,7 +295,7 @@ class SyncDAO {
     `;
     const { rows } = await pool.query(query, [
       ctx.oldDIds, ctx.oldTs || new Date(0),
-      ctx.newDIds, ctx.msgWindowFrom
+      ctx.newDIds, ctx.msgWindowFrom, ctx.userId
     ]);
     return rows;
   }

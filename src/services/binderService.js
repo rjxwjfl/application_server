@@ -238,7 +238,7 @@ class BinderService {
     if (!q || q.length < 2) throw new BadRequestError('2자 이상 입력해주세요');
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
-    const types = type ? type.split(',').map((t) => t.trim()) : ['events', 'tasks', 'posts'];
+    const types = type ? type.split(',').map((t) => t.trim()) : ['events', 'tasks', 'posts', 'messages'];
     const pattern = `%${q}%`;
     const result = {};
 
@@ -276,6 +276,20 @@ class BinderService {
         [binderId, pattern, lim]
       );
       result.posts = rows.rows;
+    }
+
+    if (types.includes('messages')) {
+      const rows = await pool.query(
+        `SELECT m.id, m.section_id, m.content, m.created_at
+         FROM section_messages m JOIN sections s ON s.id = m.section_id
+         WHERE s.binder_id = $1 AND m.deleted_at IS NULL AND m.content ILIKE $2
+           AND (s.access_scope = 0 OR EXISTS (
+             SELECT 1 FROM section_groups sg JOIN group_members gm ON gm.group_id = sg.group_id
+             WHERE sg.section_id = s.id AND gm.user_id = $3 AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL))
+         ORDER BY m.created_at DESC LIMIT $4`,
+        [binderId, pattern, userId, lim]
+      );
+      result.messages = rows.rows;
     }
 
     return result;
