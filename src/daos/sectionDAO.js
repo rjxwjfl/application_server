@@ -91,7 +91,9 @@ class SectionDAO {
     const { rowCount } = await conn.query(
       `SELECT 1 FROM sections s JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.user_id = $2 AND bm.deleted_at IS NULL
        WHERE s.id = $1 AND s.deleted_at IS NULL AND (s.access_scope = 0 OR EXISTS (
-         SELECT 1 FROM section_groups sg JOIN group_members gm ON gm.group_id = sg.group_id
+         SELECT 1 FROM section_groups sg
+         JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
+         JOIN group_members gm ON gm.group_id = sg.group_id
          WHERE sg.section_id = s.id AND gm.user_id = $2 AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL))`,
       [sectionId, userId]
     );

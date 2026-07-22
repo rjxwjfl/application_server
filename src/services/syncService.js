@@ -61,6 +61,7 @@ class SyncService {
       hydrate_section_ids: diff(accessibleSectionIds, previousSectionIds),
       purge_section_ids: diff(previousSectionIds, accessibleSectionIds),
     };
+    ctx.hydrateSectionIds = accessReconciliation.hydrate_section_ids;
 
     // 접근집합 재계산 뒤 hydrate/purge 지시를 확정한 다음 일반 delta를 조회한다.
     const [calendarData, messagingData, personalData] = await Promise.all([
@@ -128,7 +129,7 @@ class SyncService {
       SyncDAO.getGroups(pool, currDIds, oldTs),
       SyncDAO.getOwnGroupMembers(pool, userId, oldTs),
       SyncDAO.getSectionGroups(pool, currDIds, oldTs),
-      SyncDAO.getSection(pool, currDIds),
+      SyncDAO.getSection(pool, userId, currDIds),
       SyncDAO.getCalendarsForSync(pool, currDIds, currCIds),
       SyncDAO.getSubscribedCalendarRecords(pool, currCIds)
     ]);
@@ -167,11 +168,12 @@ class SyncService {
     }
 
     const messageIds = messages.map(m => m.id);
+    const relatedOldTs = ctx.hydrateSectionIds.length ? null : ctx.oldTs;
     const [attachments, embeds, reactions, mentions] = await Promise.all([
-      SyncDAO.getMessageAttachments(pool, messageIds, ctx.oldTs),
-      SyncDAO.getMessageEmbeds(pool, messageIds, ctx.oldTs),
-      SyncDAO.getMessageReactions(pool, messageIds, ctx.oldTs),
-      SyncDAO.getMessageMentions(pool, messageIds, ctx.oldTs)
+      SyncDAO.getMessageAttachments(pool, messageIds, relatedOldTs),
+      SyncDAO.getMessageEmbeds(pool, messageIds, relatedOldTs),
+      SyncDAO.getMessageReactions(pool, messageIds, relatedOldTs),
+      SyncDAO.getMessageMentions(pool, messageIds, relatedOldTs)
     ]);
 
     return { messages, attachments, message_embeds: embeds, message_reactions: reactions, message_mentions: mentions };

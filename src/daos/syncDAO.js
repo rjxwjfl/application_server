@@ -86,12 +86,22 @@ class SyncDAO {
     return rows;
   }
 
-  static async getSection(pool, currDIds) {
+  static async getSection(pool, userId, currDIds) {
     if (!currDIds.length) return [];
     const query = `
-      SELECT * FROM sections WHERE binder_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      SELECT s.* FROM sections s
+      JOIN binder_members bm ON bm.binder_id = s.binder_id
+        AND bm.user_id = $1 AND bm.deleted_at IS NULL
+      WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
+        AND (bm.role <= 1 OR s.access_scope = 0 OR EXISTS (
+          SELECT 1 FROM section_groups sg
+          JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
+          JOIN group_members gm ON gm.group_id = sg.group_id
+          WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
+            AND gm.user_id = $1 AND gm.deleted_at IS NULL
+        ))
     `;
-    const { rows } = await pool.query(query, [currDIds]);
+    const { rows } = await pool.query(query, [userId, currDIds]);
     return rows;
   }
 
@@ -284,18 +294,22 @@ class SyncDAO {
       SELECT m.* FROM section_messages m
       JOIN sections s ON m.section_id = s.id
       WHERE (s.access_scope = 0 OR EXISTS (
-        SELECT 1 FROM section_groups sg JOIN group_members gm ON gm.group_id = sg.group_id
+        SELECT 1 FROM section_groups sg
+        JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
+        JOIN group_members gm ON gm.group_id = sg.group_id
         WHERE sg.section_id = s.id AND gm.user_id = $5 AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL
       )) AND (
         (s.binder_id = ANY($1::uuid[]) AND m.updated_at > $2)
         OR
         (s.binder_id = ANY($3::uuid[]) AND m.deleted_at IS NULL AND m.created_at >= $4)
+        OR
+        (s.id = ANY($6::uuid[]) AND m.deleted_at IS NULL AND m.created_at >= $4)
       )
       ORDER BY m.created_at DESC
     `;
     const { rows } = await pool.query(query, [
       ctx.oldDIds, ctx.oldTs || new Date(0),
-      ctx.newDIds, ctx.msgWindowFrom, ctx.userId
+      ctx.newDIds, ctx.msgWindowFrom, ctx.userId, ctx.hydrateSectionIds
     ]);
     return rows;
   }
@@ -442,6 +456,7 @@ class SyncDAO {
        WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
          AND (s.access_scope = 0 OR EXISTS (
            SELECT 1 FROM section_groups sg
+           JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
            JOIN group_members gm ON gm.group_id = sg.group_id
            WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
              AND gm.user_id = $1 AND gm.deleted_at IS NULL

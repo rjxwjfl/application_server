@@ -46,6 +46,14 @@ class GroupDAO {
     await conn.query(
       `UPDATE binder_members SET primary_group_id = NULL, updated_at = now() WHERE primary_group_id = $1`, [groupId]
     );
+    await conn.query(
+      `UPDATE group_members SET deleted_at = now(), updated_at = now()
+       WHERE group_id = $1 AND deleted_at IS NULL`, [groupId]
+    );
+    await conn.query(
+      `UPDATE section_groups SET deleted_at = now(), updated_at = now()
+       WHERE group_id = $1 AND deleted_at IS NULL`, [groupId]
+    );
     const { rowCount } = await conn.query(
       `UPDATE groups SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, [groupId]
     );
