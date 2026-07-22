@@ -253,7 +253,7 @@ class EventDAO {
 
   async getSectionByEventId(conn, eventId) {
     const query = `
-      SELECT s.id, s.binder_id, s.title, s.access_scope, s.required_grade, s.is_default,
+      SELECT s.id, s.binder_id, s.title, s.access_scope, s.group_id, s.is_default,
              s.created_at, s.updated_at
       FROM event_sections es
       JOIN sections s ON es.section_id = s.id

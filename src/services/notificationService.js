@@ -76,6 +76,20 @@ class NotificationService {
         userIds = userIds.filter((id) => id !== sender_id);
       }
 
+      if (routeData.route_type === TargetType.SECTION_MESSAGE && routeData.route_id) {
+        const { rows } = await pool.query(
+          `SELECT bm.user_id FROM section_messages m
+           JOIN sections s ON s.id = m.section_id
+           JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.deleted_at IS NULL
+           WHERE m.id = $1 AND bm.user_id = ANY($2::uuid[]) AND (s.access_scope = 0 OR
+             (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM group_members gm WHERE gm.group_id = s.group_id
+                 AND gm.user_id = bm.user_id AND gm.deleted_at IS NULL)))`,
+          [routeData.route_id, userIds]
+        );
+        userIds = rows.map((row) => row.user_id);
+      }
+
       if (userIds.length === 0) return;
 
       const devices = await NotificationDAO.getActiveTokensByUserIds(pool, userIds);

@@ -348,7 +348,7 @@ class TaskDAO {
 
   async getSectionByTaskId(conn, taskId) {
     const query = `
-      SELECT s.id, s.binder_id, s.title, s.access_scope, s.required_grade, s.is_default,
+      SELECT s.id, s.binder_id, s.title, s.access_scope, s.group_id, s.is_default,
              s.created_at, s.updated_at
       FROM task_sections ts
       JOIN sections s ON ts.section_id = s.id

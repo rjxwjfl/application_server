@@ -134,11 +134,16 @@ class BinderService {
 
   async updateBinderMemberRole(binderId, targetUserId, role, requesterId) {
     await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, requesterId);
-      if (!requester || requester.role !== 0) throw new ForbiddenError('권한이 없습니다');
-
       const validRoles = [0, 1, 2, 3];
       if (!validRoles.includes(role)) throw new BadRequestError('유효하지 않은 역할입니다');
+
+      const members = await BinderDAO.getMembersForUpdate(client, binderId, [requesterId, targetUserId]);
+      const requester = members.find((member) => member.user_id === requesterId);
+      const target = members.find((member) => member.user_id === targetUserId);
+      if (!requester || requester.deleted_at || !target || target.deleted_at
+        || requester.role >= target.role || requester.role >= role) {
+        throw new ForbiddenError('동급 또는 상위 역할의 멤버를 변경할 수 없습니다');
+      }
 
       await BinderDAO.updateMemberRole(client, binderId, targetUserId, role);
     });
@@ -152,8 +157,12 @@ class BinderService {
 
   async kickBinderMember(binderId, targetUserId, requesterId, device_uuid) {
     await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, requesterId);
-      if (!requester || requester.role !== 0) throw new ForbiddenError('권한이 없습니다');
+      const members = await BinderDAO.getMembersForUpdate(client, binderId, [requesterId, targetUserId]);
+      const requester = members.find((member) => member.user_id === requesterId);
+      const target = members.find((member) => member.user_id === targetUserId);
+      if (!requester || requester.deleted_at || !target || target.deleted_at || requester.role >= target.role) {
+        throw new ForbiddenError('동급 또는 상위 역할의 멤버를 강퇴할 수 없습니다');
+      }
 
       await BinderDAO.removeMember(client, binderId, targetUserId);
       await BinderDAO.decrementMemberCount(client, binderId);
@@ -196,11 +205,15 @@ class BinderService {
 
   async transferBinderMaster(binderId, newMasterId, userId) {
     await withTransaction(async (client) => {
-      const currentMaster = await BinderDAO.getMember(client, binderId, userId);
+      const members = await BinderDAO.getMembersForUpdate(client, binderId, [userId, newMasterId]);
+      const currentMaster = members.find((member) => member.user_id === userId);
       if (!currentMaster || currentMaster.role !== 0) throw new ForbiddenError('권한이 없습니다');
 
-      const newMasterMember = await BinderDAO.getMember(client, binderId, newMasterId);
+      const newMasterMember = members.find((member) => member.user_id === newMasterId);
       if (!newMasterMember || newMasterMember.deleted_at) throw new NotFoundError('새 마스터는 멤버여야 합니다');
+      if (newMasterId === userId || currentMaster.role >= newMasterMember.role) {
+        throw new ForbiddenError('마스터 권한은 하위 역할의 다른 멤버에게만 이전할 수 있습니다');
+      }
 
       await BinderDAO.updateMemberRole(client, binderId, newMasterId, 0);
       await BinderDAO.updateMemberRole(client, binderId, userId, 1);
@@ -238,7 +251,7 @@ class BinderService {
     if (!q || q.length < 2) throw new BadRequestError('2자 이상 입력해주세요');
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
-    const types = type ? type.split(',').map((t) => t.trim()) : ['events', 'tasks', 'posts'];
+    const types = type ? type.split(',').map((t) => t.trim()) : ['events', 'tasks', 'posts', 'messages'];
     const pattern = `%${q}%`;
     const result = {};
 
@@ -276,6 +289,20 @@ class BinderService {
         [binderId, pattern, lim]
       );
       result.posts = rows.rows;
+    }
+
+    if (types.includes('messages')) {
+      const rows = await pool.query(
+        `SELECT m.id, m.section_id, m.content, m.created_at
+         FROM section_messages m JOIN sections s ON s.id = m.section_id
+         WHERE s.binder_id = $1 AND m.deleted_at IS NULL AND m.content ILIKE $2
+           AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM group_members gm WHERE gm.group_id = s.group_id
+               AND gm.user_id = $3 AND gm.deleted_at IS NULL)))
+         ORDER BY m.created_at DESC LIMIT $4`,
+        [binderId, pattern, userId, lim]
+      );
+      result.messages = rows.rows;
     }
 
     return result;
@@ -358,13 +385,21 @@ class BinderService {
     const { AttachmentDAO } = require('../daos/attachmentDAO');
     const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 파일을 조회할 수 있습니다');
-    return await AttachmentDAO.findByBinder(pool, binderId, query);
+    return await AttachmentDAO.findByBinder(pool, binderId, userId, query);
   }
 
   async deleteAttachment(binderId, attachmentId, userId) {
     const { AttachmentDAO } = require('../daos/attachmentDAO');
     const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버가 아닙니다');
+    const attachment = await AttachmentDAO.findById(pool, attachmentId);
+    if (!attachment || attachment.binder_id !== binderId) throw new NotFoundError('첨부 파일을 찾을 수 없습니다');
+    if (attachment.context_type === 'SECTION_MESSAGE') {
+      const sectionId = await SectionDAO.findSectionIdByMessage(pool, attachment.context_id);
+      if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, userId))) {
+        throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
+      }
+    }
     await AttachmentDAO.softDelete(pool, attachmentId, userId);
   }
 

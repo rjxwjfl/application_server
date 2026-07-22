@@ -21,6 +21,7 @@ const postCommentRoutes = require('./postCommentRoutes');
 const postRoutes = require('./postRoutes');
 const mediaRoutes = require('./mediaRoutes');
 const attachmentRoutes = require('./attachmentRoutes');
+const groupRoutes = require('./groupRoutes');
 
 // 웹훅: Firebase Auth 밖에 마운트 (외부 서비스가 고정 URL 사용 — 버전 비적용)
 router.use('/webhooks', webhookRoutes);
@@ -41,6 +42,7 @@ protectedRouter.use('/binders', binderRoutes);
 protectedRouter.use('/events', eventRoutes);
 protectedRouter.use('/tasks', taskRoutes);
 protectedRouter.use('/sections', sectionRoutes);
+protectedRouter.use('/groups', groupRoutes);
 protectedRouter.use('/sync', syncRoutes);
 protectedRouter.use('/billing', billingRoutes);
 protectedRouter.use('/calendar', calendarRoutes);

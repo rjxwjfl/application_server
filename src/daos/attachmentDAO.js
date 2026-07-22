@@ -37,12 +37,21 @@ class AttachmentDAO {
     return result.rows;
   }
 
-  async findByBinder(conn, binderId, { context_type, q, cursor_at, limit = 30 } = {}) {
-    const params = [binderId, limit];
+  async findByBinder(conn, binderId, userId, { context_type, q, cursor_at, limit = 30 } = {}) {
+    const params = [binderId, limit, userId];
     const conditions = [
       'a.binder_id = $1',
       'a.deleted_at IS NULL',
       "a.status IN ('ready', 'hidden')",
+      `(a.context_type <> 'SECTION_MESSAGE' OR EXISTS (
+        SELECT 1 FROM section_messages sm
+        JOIN sections s ON s.id = sm.section_id
+        WHERE sm.id = a.context_id AND s.deleted_at IS NULL
+          AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM group_members gm
+            WHERE gm.group_id = s.group_id AND gm.user_id = $3 AND gm.deleted_at IS NULL
+          ))
+      ))`,
     ];
 
     if (context_type) {

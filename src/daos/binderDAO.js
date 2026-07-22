@@ -148,6 +148,18 @@ class BinderDAO {
     return result.rows[0] || null;
   }
 
+  async getMembersForUpdate(conn, binderId, userIds) {
+    const query = `
+      SELECT binder_id, user_id, role, deleted_at
+      FROM binder_members
+      WHERE binder_id = $1 AND user_id = ANY($2::uuid[])
+      ORDER BY user_id
+      FOR UPDATE
+    `;
+    const result = await conn.query(query, [binderId, userIds]);
+    return result.rows;
+  }
+
   async getMembers(conn, binderId) {
     const query = `
       SELECT dm.binder_id, dm.user_id, dm.role, dm.notification_level,
@@ -204,10 +216,15 @@ class BinderDAO {
   async removeMember(conn, binderId, userId) {
     const query = `
       UPDATE binder_members
-      SET deleted_at = now(), updated_at = now()
+      SET deleted_at = now(), updated_at = now(), primary_group_id = NULL
       WHERE binder_id = $1 AND user_id = $2 AND deleted_at IS NULL
     `;
     await conn.query(query, [binderId, userId]);
+    await conn.query(
+      `UPDATE group_members gm SET deleted_at = now(), updated_at = now()
+       FROM groups g WHERE gm.group_id = g.id AND g.binder_id = $1 AND gm.user_id = $2 AND gm.deleted_at IS NULL`,
+      [binderId, userId]
+    );
   }
 
   // ============================================
