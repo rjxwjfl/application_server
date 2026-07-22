@@ -6,9 +6,6 @@ router.route("/:sectionId")
   .patch(sectionController.updateSection)
   .delete(sectionController.deleteSection);
 
-router.post('/:sectionId/groups', sectionController.connectGroup);
-router.delete('/:sectionId/groups/:groupId', sectionController.disconnectGroup);
-
 // Cursor (읽음 위치 갱신)
 router.put("/:sectionId/cursor", sectionController.updateCursor);
 

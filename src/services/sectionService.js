@@ -21,14 +21,15 @@ class SectionService {
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
       const scope = data.access_scope ?? 0;
       if (![0, 1].includes(scope)) throw new BadRequestError('access_scope는 0 또는 1이어야 합니다');
-      if (scope === 1 && (!Array.isArray(data.group_ids) || !data.group_ids.length)) throw new AppError('private 섹션에는 그룹이 필요합니다', 422, 'SECTION_GRANT_REQUIRED');
+      if (scope === 1 && !data.group_id) throw new AppError('private 섹션에는 그룹이 필요합니다', 422, 'SECTION_GRANT_REQUIRED');
       const created = await SectionDAO.create(client, {
         id: data.id || generateUUID(),
         binder_id: data.binder_id,
         title: data.title,
         access_scope: scope,
+        group_id: scope === 1 ? data.group_id : null,
       });
-      if (scope === 1) await SectionDAO.replaceGroups(client, created.id, [...new Set(data.group_ids)].map((groupId) => ({ id: generateUUID(), groupId })));
+      if (!created) throw new BadRequestError('그룹이 바인더에 속하지 않습니다');
       return created;
     });
 
@@ -44,17 +45,18 @@ class SectionService {
 
   async updateSection(sectionId, updateData, context) {
     const { section, result } = await withTransaction(async (client) => {
-      const section = await SectionDAO.findById(client, sectionId);
+      const section = await SectionDAO.findById(client, sectionId, true);
       if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
       const actor = await BinderDAO.getMember(client, section.binder_id, context.sender_id);
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
       const scope = updateData.access_scope ?? section.access_scope;
-      if (section.is_default && scope === 1) throw new BadRequestError('기본 섹션은 private으로 전환할 수 없습니다');
-      const groups = updateData.group_ids;
-      if (scope === 1 && ((Array.isArray(groups) && !groups.length) || (section.access_scope === 0 && !Array.isArray(groups)))) throw new AppError('private 섹션에는 그룹이 필요합니다', 422, 'SECTION_GRANT_REQUIRED');
+      const hasGroupId = Object.prototype.hasOwnProperty.call(updateData, 'group_id');
+      const groupId = hasGroupId ? updateData.group_id : section.group_id;
+      if (section.is_default && (scope === 1 || groupId !== null)) throw new BadRequestError('기본 섹션에는 그룹을 설정할 수 없습니다');
+      if (scope === 1 && groupId === null) throw new AppError('private 섹션의 group_id는 비울 수 없습니다', 422, 'SECTION_GRANT_REQUIRED');
 
-      const result = await SectionDAO.update(client, sectionId, updateData);
-      if (Array.isArray(groups)) await SectionDAO.replaceGroups(client, sectionId, scope === 1 ? [...new Set(groups)].map((groupId) => ({ id: generateUUID(), groupId })) : []);
+      const result = await SectionDAO.update(client, sectionId, updateData, hasGroupId);
+      if (!result) throw new BadRequestError('그룹이 바인더에 속하지 않습니다');
       return { section, result };
     });
 
@@ -105,28 +107,6 @@ class SectionService {
     const sectionId = await SectionDAO.findSectionIdByMessage(pool, messageId);
     if (!sectionId) throw new NotFoundError('메시지를 찾을 수 없습니다');
     return this.assertContentAccess(sectionId, userId);
-  }
-
-  async connectGroup(sectionId, data, actorId) {
-    return withTransaction(async (client) => {
-      const section = await SectionDAO.findById(client, sectionId, true);
-      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
-      if (section.is_default) throw new BadRequestError('기본 섹션에는 그룹을 연결할 수 없습니다');
-      const actor = await BinderDAO.getMember(client, section.binder_id, actorId);
-      if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
-      return SectionDAO.addGroup(client, data.id || generateUUID(), sectionId, data.group_id);
-    });
-  }
-
-  async disconnectGroup(sectionId, groupId, actorId) {
-    return withTransaction(async (client) => {
-      const section = await SectionDAO.findById(client, sectionId, true);
-      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
-      const actor = await BinderDAO.getMember(client, section.binder_id, actorId);
-      if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
-      if (section.access_scope === 1 && await SectionDAO.countGroups(client, sectionId) <= 1) throw new AppError('private 섹션의 마지막 그룹은 제거할 수 없습니다', 422, 'SECTION_GRANT_REQUIRED');
-      return SectionDAO.removeGroup(client, sectionId, groupId);
-    });
   }
 
 }

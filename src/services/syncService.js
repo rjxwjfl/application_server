@@ -120,7 +120,7 @@ class SyncService {
 
   async _fetchTrackAMeta(userId, currDIds, currCIds, oldTs) {
     // 뼈대 데이터는 ts, old/new 따지지 않고 무조건 현재 소속 기준으로 100% 덮어씌움 (FK 에러 방지)
-    const [binders, binderMembers, binderPreferences, binderSettings, users, groups, groupMembers, sectionGroups, section, calendars, subscribedCals] = await Promise.all([
+    const [binders, binderMembers, binderPreferences, binderSettings, users, groups, groupMembers, section, calendars, subscribedCals] = await Promise.all([
       SyncDAO.getBindersForSync(pool, currDIds, currCIds),
       SyncDAO.getBinderMembers(pool, currDIds),
       SyncDAO.getBinderPreferences(pool, userId, currDIds),
@@ -128,7 +128,6 @@ class SyncService {
       SyncDAO.getUsersForSync(pool, currDIds, oldTs),
       SyncDAO.getGroups(pool, currDIds, oldTs),
       SyncDAO.getOwnGroupMembers(pool, userId, oldTs),
-      SyncDAO.getSectionGroups(pool, currDIds, oldTs),
       SyncDAO.getSection(pool, userId, currDIds),
       SyncDAO.getCalendarsForSync(pool, currDIds, currCIds),
       SyncDAO.getSubscribedCalendarRecords(pool, currCIds)
@@ -137,7 +136,7 @@ class SyncService {
     return {
       binders, binder_members: binderMembers, binder_preferences: binderPreferences,
       binder_settings: binderSettings, users, groups, group_members: groupMembers,
-      section_groups: sectionGroups, section, calendars,
+      section, calendars,
       subscribed_calendars: subscribedCals
     };
   }

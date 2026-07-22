@@ -47,11 +47,9 @@ class AttachmentDAO {
         SELECT 1 FROM section_messages sm
         JOIN sections s ON s.id = sm.section_id
         WHERE sm.id = a.context_id AND s.deleted_at IS NULL
-          AND (s.access_scope = 0 OR EXISTS (
-            SELECT 1 FROM section_groups sg
-            JOIN group_members gm ON gm.group_id = sg.group_id
-            WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
-              AND gm.user_id = $3 AND gm.deleted_at IS NULL
+          AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM group_members gm
+            WHERE gm.group_id = s.group_id AND gm.user_id = $3 AND gm.deleted_at IS NULL
           ))
       ))`,
     ];

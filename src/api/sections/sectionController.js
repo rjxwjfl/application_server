@@ -32,16 +32,6 @@ const sectionController = {
     res.json({ success: true, message: '섹션이 삭제되었습니다' });
   }),
 
-  connectGroup: asyncHandler(async (req, res) => {
-    const grant = await SectionService.connectGroup(req.params.sectionId, req.body, req.user_id);
-    res.status(201).json({ success: true, data: grant });
-  }),
-
-  disconnectGroup: asyncHandler(async (req, res) => {
-    await SectionService.disconnectGroup(req.params.sectionId, req.params.groupId, req.user_id);
-    res.json({ success: true });
-  }),
-
   // ============================================
   // Messages
   // ============================================

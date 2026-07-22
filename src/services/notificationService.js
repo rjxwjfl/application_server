@@ -81,10 +81,10 @@ class NotificationService {
           `SELECT bm.user_id FROM section_messages m
            JOIN sections s ON s.id = m.section_id
            JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.deleted_at IS NULL
-           WHERE m.id = $1 AND bm.user_id = ANY($2::uuid[]) AND (s.access_scope = 0 OR EXISTS (
-             SELECT 1 FROM section_groups sg JOIN group_members gm ON gm.group_id = sg.group_id
-             WHERE sg.section_id = s.id AND gm.user_id = bm.user_id
-               AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL))`,
+           WHERE m.id = $1 AND bm.user_id = ANY($2::uuid[]) AND (s.access_scope = 0 OR
+             (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM group_members gm WHERE gm.group_id = s.group_id
+                 AND gm.user_id = bm.user_id AND gm.deleted_at IS NULL)))`,
           [routeData.route_id, userIds]
         );
         userIds = rows.map((row) => row.user_id);

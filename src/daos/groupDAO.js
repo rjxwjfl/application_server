@@ -22,10 +22,10 @@ class GroupDAO {
     const { rows } = await conn.query(
       `SELECT g.id, g.binder_id, g.name, g.color, g.created_by, g.created_at, g.updated_at,
               COUNT(DISTINCT gm.user_id)::int AS member_count,
-              COUNT(DISTINCT sg.section_id)::int AS linked_section_count
+              COUNT(DISTINCT s.id)::int AS linked_section_count
        FROM groups g
        LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.deleted_at IS NULL
-       LEFT JOIN section_groups sg ON sg.group_id = g.id AND sg.deleted_at IS NULL
+       LEFT JOIN sections s ON s.group_id = g.id AND s.deleted_at IS NULL
        WHERE g.binder_id = $1 AND g.deleted_at IS NULL
        GROUP BY g.id ORDER BY g.created_at`,
       [binderId]
@@ -51,7 +51,7 @@ class GroupDAO {
        WHERE group_id = $1 AND deleted_at IS NULL`, [groupId]
     );
     await conn.query(
-      `UPDATE section_groups SET deleted_at = now(), updated_at = now()
+      `UPDATE sections SET group_id = NULL, updated_at = now()
        WHERE group_id = $1 AND deleted_at IS NULL`, [groupId]
     );
     const { rowCount } = await conn.query(

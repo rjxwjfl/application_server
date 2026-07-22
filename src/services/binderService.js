@@ -292,9 +292,9 @@ class BinderService {
         `SELECT m.id, m.section_id, m.content, m.created_at
          FROM section_messages m JOIN sections s ON s.id = m.section_id
          WHERE s.binder_id = $1 AND m.deleted_at IS NULL AND m.content ILIKE $2
-           AND (s.access_scope = 0 OR EXISTS (
-             SELECT 1 FROM section_groups sg JOIN group_members gm ON gm.group_id = sg.group_id
-             WHERE sg.section_id = s.id AND gm.user_id = $3 AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL))
+           AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM group_members gm WHERE gm.group_id = s.group_id
+               AND gm.user_id = $3 AND gm.deleted_at IS NULL)))
          ORDER BY m.created_at DESC LIMIT $4`,
         [binderId, pattern, userId, lim]
       );

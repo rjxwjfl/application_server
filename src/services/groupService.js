@@ -1,10 +1,9 @@
 const { GroupDAO } = require('../daos/groupDAO');
 const { BinderDAO } = require('../daos');
-const { SectionDAO } = require('../daos/sectionDAO');
 const { generateUUID } = require('../utils/uuid');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { AppError, BadRequestError, ForbiddenError, NotFoundError } = require('../core/errors');
+const { BadRequestError, ForbiddenError, NotFoundError } = require('../core/errors');
 
 class GroupService {
   async requireManager(conn, binderId, actorId) {
@@ -41,7 +40,6 @@ class GroupService {
       const group = await GroupDAO.findById(client, groupId, true);
       if (!group) throw new NotFoundError('그룹을 찾을 수 없습니다');
       await this.requireManager(client, group.binder_id, actorId);
-      if (await SectionDAO.isLastGrantGroup(client, groupId)) throw new AppError('private 섹션의 마지막 그룹은 삭제할 수 없습니다', 422, 'SECTION_GRANT_REQUIRED');
       return GroupDAO.deleteGroup(client, groupId);
     });
   }

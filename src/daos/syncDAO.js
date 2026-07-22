@@ -93,12 +93,9 @@ class SyncDAO {
       JOIN binder_members bm ON bm.binder_id = s.binder_id
         AND bm.user_id = $1 AND bm.deleted_at IS NULL
       WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
-        AND (bm.role <= 1 OR s.access_scope = 0 OR EXISTS (
-          SELECT 1 FROM section_groups sg
-          JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
-          JOIN group_members gm ON gm.group_id = sg.group_id
-          WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
-            AND gm.user_id = $1 AND gm.deleted_at IS NULL
+        AND (bm.role <= 1 OR s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM group_members gm
+          WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
         ))
     `;
     const { rows } = await pool.query(query, [userId, currDIds]);
@@ -118,16 +115,6 @@ class SyncDAO {
     const { rows } = await pool.query(
       `SELECT * FROM group_members WHERE user_id = $1 ${oldTs ? 'AND updated_at > $2' : ''}`,
       oldTs ? [userId, oldTs] : [userId]
-    );
-    return rows;
-  }
-
-  static async getSectionGroups(pool, currDIds, oldTs) {
-    if (!currDIds.length) return [];
-    const { rows } = await pool.query(
-      `SELECT sg.* FROM section_groups sg JOIN groups g ON g.id = sg.group_id
-       WHERE g.binder_id = ANY($1::uuid[]) ${oldTs ? 'AND sg.updated_at > $2' : ''}`,
-      oldTs ? [currDIds, oldTs] : [currDIds]
     );
     return rows;
   }
@@ -293,11 +280,9 @@ class SyncDAO {
     const query = `
       SELECT m.* FROM section_messages m
       JOIN sections s ON m.section_id = s.id
-      WHERE (s.access_scope = 0 OR EXISTS (
-        SELECT 1 FROM section_groups sg
-        JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
-        JOIN group_members gm ON gm.group_id = sg.group_id
-        WHERE sg.section_id = s.id AND gm.user_id = $5 AND sg.deleted_at IS NULL AND gm.deleted_at IS NULL
+      WHERE (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM group_members gm
+        WHERE gm.group_id = s.group_id AND gm.user_id = $5 AND gm.deleted_at IS NULL
       )) AND (
         (s.binder_id = ANY($1::uuid[]) AND m.updated_at > $2)
         OR
@@ -420,22 +405,18 @@ class SyncDAO {
             SELECT 1 FROM sections s
             WHERE s.id = activity_feeds.target_id
               AND s.deleted_at IS NULL
-              AND (s.access_scope = 0 OR EXISTS (
-                SELECT 1 FROM section_groups sg
-                JOIN group_members gm ON gm.group_id = sg.group_id
-                WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
-                  AND gm.user_id = $1 AND gm.deleted_at IS NULL
+              AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM group_members gm
+                WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
               ))
           )
           WHEN target_type = 'SECTION_MESSAGE' THEN EXISTS (
             SELECT 1 FROM section_messages sm
             JOIN sections s ON s.id = sm.section_id
             WHERE sm.id = activity_feeds.target_id
-              AND (s.access_scope = 0 OR EXISTS (
-                SELECT 1 FROM section_groups sg
-                JOIN group_members gm ON gm.group_id = sg.group_id
-                WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
-                  AND gm.user_id = $1 AND gm.deleted_at IS NULL
+              AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM group_members gm
+                WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
               ))
           )
           ELSE true
@@ -454,12 +435,9 @@ class SyncDAO {
       `SELECT s.id
        FROM sections s
        WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
-         AND (s.access_scope = 0 OR EXISTS (
-           SELECT 1 FROM section_groups sg
-           JOIN groups g ON g.id = sg.group_id AND g.deleted_at IS NULL
-           JOIN group_members gm ON gm.group_id = sg.group_id
-           WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
-             AND gm.user_id = $1 AND gm.deleted_at IS NULL
+         AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+           SELECT 1 FROM group_members gm
+           WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
          ))`,
       [userId, binderIds]
     );
