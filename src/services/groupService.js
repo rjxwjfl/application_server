@@ -57,6 +57,13 @@ class GroupService {
     });
   }
 
+  async getMembers(groupId, actorId) {
+    const group = await GroupDAO.findById(pool, groupId);
+    if (!group) throw new NotFoundError('그룹을 찾을 수 없습니다');
+    await this.requireManager(pool, group.binder_id, actorId);
+    return GroupDAO.getMembers(pool, groupId);
+  }
+
   async removeMember(groupId, userId, actorId) {
     return withTransaction(async (client) => {
       const group = await GroupDAO.findById(client, groupId, true);

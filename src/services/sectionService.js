@@ -111,6 +111,7 @@ class SectionService {
     return withTransaction(async (client) => {
       const section = await SectionDAO.findById(client, sectionId, true);
       if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+      if (section.is_default) throw new BadRequestError('기본 섹션에는 그룹을 연결할 수 없습니다');
       const actor = await BinderDAO.getMember(client, section.binder_id, actorId);
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
       return SectionDAO.addGroup(client, data.id || generateUUID(), sectionId, data.group_id);

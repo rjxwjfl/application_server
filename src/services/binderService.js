@@ -134,11 +134,16 @@ class BinderService {
 
   async updateBinderMemberRole(binderId, targetUserId, role, requesterId) {
     await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, requesterId);
-      if (!requester || requester.role !== 0) throw new ForbiddenError('권한이 없습니다');
-
       const validRoles = [0, 1, 2, 3];
       if (!validRoles.includes(role)) throw new BadRequestError('유효하지 않은 역할입니다');
+
+      const members = await BinderDAO.getMembersForUpdate(client, binderId, [requesterId, targetUserId]);
+      const requester = members.find((member) => member.user_id === requesterId);
+      const target = members.find((member) => member.user_id === targetUserId);
+      if (!requester || requester.deleted_at || !target || target.deleted_at
+        || requester.role >= target.role || requester.role >= role) {
+        throw new ForbiddenError('동급 또는 상위 역할의 멤버를 변경할 수 없습니다');
+      }
 
       await BinderDAO.updateMemberRole(client, binderId, targetUserId, role);
     });
@@ -152,8 +157,12 @@ class BinderService {
 
   async kickBinderMember(binderId, targetUserId, requesterId, device_uuid) {
     await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, requesterId);
-      if (!requester || requester.role !== 0) throw new ForbiddenError('권한이 없습니다');
+      const members = await BinderDAO.getMembersForUpdate(client, binderId, [requesterId, targetUserId]);
+      const requester = members.find((member) => member.user_id === requesterId);
+      const target = members.find((member) => member.user_id === targetUserId);
+      if (!requester || requester.deleted_at || !target || target.deleted_at || requester.role >= target.role) {
+        throw new ForbiddenError('동급 또는 상위 역할의 멤버를 강퇴할 수 없습니다');
+      }
 
       await BinderDAO.removeMember(client, binderId, targetUserId);
       await BinderDAO.decrementMemberCount(client, binderId);

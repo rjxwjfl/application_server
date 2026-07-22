@@ -148,6 +148,18 @@ class BinderDAO {
     return result.rows[0] || null;
   }
 
+  async getMembersForUpdate(conn, binderId, userIds) {
+    const query = `
+      SELECT binder_id, user_id, role, deleted_at
+      FROM binder_members
+      WHERE binder_id = $1 AND user_id = ANY($2::uuid[])
+      ORDER BY user_id
+      FOR UPDATE
+    `;
+    const result = await conn.query(query, [binderId, userIds]);
+    return result.rows;
+  }
+
   async getMembers(conn, binderId) {
     const query = `
       SELECT dm.binder_id, dm.user_id, dm.role, dm.notification_level,
