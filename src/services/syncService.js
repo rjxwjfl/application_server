@@ -27,7 +27,8 @@ class SyncService {
     const msgWindowFrom = new Date(now.getTime() - (MESSAGING_PAST_DAYS * 24 * 60 * 60 * 1000));
 
     // 1. 토큰 디코딩
-    const prevToken = SyncToken.decode(rawToken) || { ts: 0, d_ids: [], c_ids: [] };
+    const prevToken = SyncToken.decode(rawToken) || { ts: 0, d_ids: [], c_ids: [], s_ids: [] };
+    const previousSectionIds = Array.isArray(prevToken.s_ids) ? prevToken.s_ids : [];
     const oldTsDate = prevToken.ts > 0 ? new Date(prevToken.ts * 1000) : null;
 
     // 2. 현재 유저의 '진짜' 권한 조회 (DB 기준)
@@ -53,9 +54,16 @@ class SyncService {
       msgWindowFrom
     };
 
-    // 4. 병렬 데이터 패칭 (3 트랙 완벽 분리)
-    const [metaData, calendarData, messagingData, personalData] = await Promise.all([
-      this._fetchTrackAMeta(userId, currDIds, currCIds, oldTsDate),
+    // ACL은 콘텐츠보다 먼저 읽어 revoke tombstone이 새 접근 필터에 가려지지 않게 한다.
+    const metaData = await this._fetchTrackAMeta(userId, currDIds, currCIds, oldTsDate);
+    const accessibleSectionIds = await SyncDAO.getAccessibleSectionIds(pool, userId, currDIds);
+    const accessReconciliation = {
+      hydrate_section_ids: diff(accessibleSectionIds, previousSectionIds),
+      purge_section_ids: diff(previousSectionIds, accessibleSectionIds),
+    };
+
+    // 접근집합 재계산 뒤 hydrate/purge 지시를 확정한 다음 일반 delta를 조회한다.
+    const [calendarData, messagingData, personalData] = await Promise.all([
       this._fetchTrackBCalendar(ctx),
       this._fetchTrackCMessaging(ctx),
       this._fetchPersonalData(userId, currDIds, oldTsDate, msgWindowFrom)
@@ -66,11 +74,13 @@ class SyncService {
       ts: Math.floor(now.getTime() / 1000),
       d_ids: currDIds,
       c_ids: currCIds,
+      s_ids: accessibleSectionIds,
     });
     
     return {
       data: {
         ...metaData,
+        access_reconciliation: accessReconciliation,
         ...calendarData,
         ...messagingData,
         ...personalData,
@@ -170,7 +180,7 @@ class SyncService {
   async _fetchPersonalData(userId, currDIds, oldTs, msgWindowFrom) {
     const [notifications, activityFeeds, activityFeedCursors, subscriptions, assets, holidayCountries] = await Promise.all([
       SyncDAO.getNotifications(pool, userId, oldTs || msgWindowFrom),
-      SyncDAO.getActivityFeedsForSync(pool, currDIds, oldTs),
+      SyncDAO.getActivityFeedsForSync(pool, userId, currDIds, oldTs),
       SyncDAO.getActivityFeedCursorsForSync(pool, userId, currDIds),
       SyncDAO.getUserSubscriptions(pool, userId, oldTs),
       SyncDAO.getUserAssets(pool, userId, oldTs),
@@ -195,7 +205,7 @@ class SyncService {
   _buildEmptyResponse(now, currDIds, currCIds) {
     return {
       data: {},
-      next_sync_token: SyncToken.encode({ ts: Math.floor(now.getTime() / 1000), d_ids: currDIds, c_ids: currCIds })
+      next_sync_token: SyncToken.encode({ ts: Math.floor(now.getTime() / 1000), d_ids: currDIds, c_ids: currCIds, s_ids: [] })
     };
   }
 }

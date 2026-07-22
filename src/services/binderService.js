@@ -372,13 +372,21 @@ class BinderService {
     const { AttachmentDAO } = require('../daos/attachmentDAO');
     const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 파일을 조회할 수 있습니다');
-    return await AttachmentDAO.findByBinder(pool, binderId, query);
+    return await AttachmentDAO.findByBinder(pool, binderId, userId, query);
   }
 
   async deleteAttachment(binderId, attachmentId, userId) {
     const { AttachmentDAO } = require('../daos/attachmentDAO');
     const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버가 아닙니다');
+    const attachment = await AttachmentDAO.findById(pool, attachmentId);
+    if (!attachment || attachment.binder_id !== binderId) throw new NotFoundError('첨부 파일을 찾을 수 없습니다');
+    if (attachment.context_type === 'SECTION_MESSAGE') {
+      const sectionId = await SectionDAO.findSectionIdByMessage(pool, attachment.context_id);
+      if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, userId))) {
+        throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
+      }
+    }
     await AttachmentDAO.softDelete(pool, attachmentId, userId);
   }
 

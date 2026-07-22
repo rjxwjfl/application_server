@@ -394,19 +394,61 @@ class SyncDAO {
     return rows.map(r => r.country_code);
   }
 
-  static async getActivityFeedsForSync(pool, currDIds, oldTs) {
+  static async getActivityFeedsForSync(pool, userId, currDIds, oldTs) {
     if (!currDIds.length) return [];
     const query = `
       SELECT id, binder_id, actor_id, action_type, target_type, target_id, metadata, created_at
       FROM activity_feeds
-      WHERE binder_id = ANY($1::uuid[])
-      ${oldTs ? 'AND created_at > $2' : ''}
+      WHERE binder_id = ANY($2::uuid[])
+      ${oldTs ? 'AND created_at > $3' : ''}
+        AND CASE
+          WHEN target_type = 'SECTION' THEN EXISTS (
+            SELECT 1 FROM sections s
+            WHERE s.id = activity_feeds.target_id
+              AND s.deleted_at IS NULL
+              AND (s.access_scope = 0 OR EXISTS (
+                SELECT 1 FROM section_groups sg
+                JOIN group_members gm ON gm.group_id = sg.group_id
+                WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
+                  AND gm.user_id = $1 AND gm.deleted_at IS NULL
+              ))
+          )
+          WHEN target_type = 'SECTION_MESSAGE' THEN EXISTS (
+            SELECT 1 FROM section_messages sm
+            JOIN sections s ON s.id = sm.section_id
+            WHERE sm.id = activity_feeds.target_id
+              AND (s.access_scope = 0 OR EXISTS (
+                SELECT 1 FROM section_groups sg
+                JOIN group_members gm ON gm.group_id = sg.group_id
+                WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
+                  AND gm.user_id = $1 AND gm.deleted_at IS NULL
+              ))
+          )
+          ELSE true
+        END
       ORDER BY created_at DESC
       LIMIT 500
     `;
-    const params = oldTs ? [currDIds, oldTs] : [currDIds];
+    const params = oldTs ? [userId, currDIds, oldTs] : [userId, currDIds];
     const { rows } = await pool.query(query, params);
     return rows;
+  }
+
+  static async getAccessibleSectionIds(pool, userId, binderIds) {
+    if (!binderIds.length) return [];
+    const { rows } = await pool.query(
+      `SELECT s.id
+       FROM sections s
+       WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
+         AND (s.access_scope = 0 OR EXISTS (
+           SELECT 1 FROM section_groups sg
+           JOIN group_members gm ON gm.group_id = sg.group_id
+           WHERE sg.section_id = s.id AND sg.deleted_at IS NULL
+             AND gm.user_id = $1 AND gm.deleted_at IS NULL
+         ))`,
+      [userId, binderIds]
+    );
+    return rows.map((row) => row.id);
   }
 
   static async getActivityFeedCursorsForSync(pool, userId, currDIds) {
