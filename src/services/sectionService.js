@@ -50,12 +50,17 @@ class SectionService {
       const actor = await BinderDAO.getMember(client, section.binder_id, context.sender_id);
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
       const scope = updateData.access_scope ?? section.access_scope;
+      if (![0, 1].includes(scope)) throw new BadRequestError('access_scope는 0 또는 1이어야 합니다');
       const hasGroupId = Object.prototype.hasOwnProperty.call(updateData, 'group_id');
-      const groupId = hasGroupId ? updateData.group_id : section.group_id;
+      if (section.access_scope === 0 && scope === 1 && !hasGroupId) {
+        throw new AppError('private 섹션에는 그룹이 필요합니다', 422, 'SECTION_GRANT_REQUIRED');
+      }
+      const groupId = scope === 0 ? null : (hasGroupId ? updateData.group_id : section.group_id);
       if (section.is_default && (scope === 1 || groupId !== null)) throw new BadRequestError('기본 섹션에는 그룹을 설정할 수 없습니다');
       if (scope === 1 && groupId === null) throw new AppError('private 섹션의 group_id는 비울 수 없습니다', 422, 'SECTION_GRANT_REQUIRED');
 
-      const result = await SectionDAO.update(client, sectionId, updateData, hasGroupId);
+      const normalizedUpdate = { ...updateData, access_scope: scope, group_id: groupId };
+      const result = await SectionDAO.update(client, sectionId, normalizedUpdate, true);
       if (!result) throw new BadRequestError('그룹이 바인더에 속하지 않습니다');
       return { section, result };
     });

@@ -39,7 +39,11 @@ class SectionDAO {
   async update(conn, sectionId, { title, access_scope, group_id }, hasGroupId) {
     const { rows } = await conn.query(
       `UPDATE sections s SET title = COALESCE($1, s.title), access_scope = COALESCE($2, s.access_scope),
-         group_id = CASE WHEN $3::boolean THEN $4 ELSE s.group_id END, updated_at = now()
+         group_id = CASE
+           WHEN COALESCE($2, s.access_scope) = 0 THEN NULL
+           WHEN $3::boolean THEN $4
+           ELSE s.group_id
+         END, updated_at = now()
        WHERE s.id = $5 AND s.deleted_at IS NULL AND ($4::uuid IS NULL OR EXISTS (
          SELECT 1 FROM groups g WHERE g.id = $4 AND g.binder_id = s.binder_id AND g.deleted_at IS NULL))
        RETURNING id, binder_id, title, access_scope, group_id, is_default, created_at, updated_at`,
