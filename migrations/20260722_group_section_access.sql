@@ -1,3 +1,15 @@
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM sections
+    WHERE access_scope NOT IN (0, 1)
+  ) THEN
+    RAISE EXCEPTION
+      'cannot migrate sections: legacy access_scope values outside 0=public and 1=private require an explicit product-approved mapping';
+  END IF;
+END
+$$;
 ALTER TABLE sections DROP COLUMN required_grade;
 ALTER TABLE sections ADD CONSTRAINT chk_sections_access_scope CHECK (access_scope IN (0, 1));
 COMMENT ON COLUMN sections.access_scope IS '0=public (active binder members), 1=private (group_id membership)';

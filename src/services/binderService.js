@@ -205,11 +205,15 @@ class BinderService {
 
   async transferBinderMaster(binderId, newMasterId, userId) {
     await withTransaction(async (client) => {
-      const currentMaster = await BinderDAO.getMember(client, binderId, userId);
+      const members = await BinderDAO.getMembersForUpdate(client, binderId, [userId, newMasterId]);
+      const currentMaster = members.find((member) => member.user_id === userId);
       if (!currentMaster || currentMaster.role !== 0) throw new ForbiddenError('권한이 없습니다');
 
-      const newMasterMember = await BinderDAO.getMember(client, binderId, newMasterId);
+      const newMasterMember = members.find((member) => member.user_id === newMasterId);
       if (!newMasterMember || newMasterMember.deleted_at) throw new NotFoundError('새 마스터는 멤버여야 합니다');
+      if (newMasterId === userId || currentMaster.role >= newMasterMember.role) {
+        throw new ForbiddenError('마스터 권한은 하위 역할의 다른 멤버에게만 이전할 수 있습니다');
+      }
 
       await BinderDAO.updateMemberRole(client, binderId, newMasterId, 0);
       await BinderDAO.updateMemberRole(client, binderId, userId, 1);
