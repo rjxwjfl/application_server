@@ -7,7 +7,7 @@ CREATE TABLE groups (
   binder_id UUID NOT NULL REFERENCES binders(id),
   name VARCHAR(100) NOT NULL,
   color VARCHAR(20),
-  created_by UUID NOT NULL REFERENCES users(id),
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ

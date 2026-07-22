@@ -86,19 +86,28 @@ class SyncDAO {
     return rows;
   }
 
-  static async getSection(pool, userId, currDIds) {
+  static async getSection(pool, userId, currDIds, oldTs, previousSectionIds) {
     if (!currDIds.length) return [];
     const query = `
       SELECT s.* FROM sections s
       JOIN binder_members bm ON bm.binder_id = s.binder_id
         AND bm.user_id = $1 AND bm.deleted_at IS NULL
-      WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
-        AND (bm.role <= 1 OR s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
-          SELECT 1 FROM group_members gm
-          WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
-        ))
+      WHERE s.binder_id = ANY($2::uuid[])
+        AND (
+          (s.deleted_at IS NULL AND (
+            bm.role <= 1
+            OR s.access_scope = 0
+            OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM group_members gm
+              WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
+            ))
+          ))
+          OR ($3::timestamptz IS NOT NULL
+            AND s.id = ANY($4::uuid[])
+            AND s.updated_at > $3)
+        )
     `;
-    const { rows } = await pool.query(query, [userId, currDIds]);
+    const { rows } = await pool.query(query, [userId, currDIds, oldTs, previousSectionIds]);
     return rows;
   }
 

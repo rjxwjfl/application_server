@@ -55,7 +55,13 @@ class SyncService {
     };
 
     // ACL은 콘텐츠보다 먼저 읽어 revoke tombstone이 새 접근 필터에 가려지지 않게 한다.
-    const metaData = await this._fetchTrackAMeta(userId, currDIds, currCIds, oldTsDate);
+    const metaData = await this._fetchTrackAMeta(
+      userId,
+      currDIds,
+      currCIds,
+      oldTsDate,
+      previousSectionIds
+    );
     const accessibleSectionIds = await SyncDAO.getAccessibleSectionIds(pool, userId, currDIds);
     const accessReconciliation = {
       hydrate_section_ids: diff(accessibleSectionIds, previousSectionIds),
@@ -118,7 +124,7 @@ class SyncService {
   // PRIVATE METHODS : 도메인별 패칭 로직 (JS 필터링 제거)
   // =========================================================================
 
-  async _fetchTrackAMeta(userId, currDIds, currCIds, oldTs) {
+  async _fetchTrackAMeta(userId, currDIds, currCIds, oldTs, previousSectionIds) {
     // 뼈대 데이터는 ts, old/new 따지지 않고 무조건 현재 소속 기준으로 100% 덮어씌움 (FK 에러 방지)
     const [binders, binderMembers, binderPreferences, binderSettings, users, groups, groupMembers, section, calendars, subscribedCals] = await Promise.all([
       SyncDAO.getBindersForSync(pool, currDIds, currCIds),
@@ -128,7 +134,7 @@ class SyncService {
       SyncDAO.getUsersForSync(pool, currDIds, oldTs),
       SyncDAO.getGroups(pool, currDIds, oldTs),
       SyncDAO.getOwnGroupMembers(pool, userId, oldTs),
-      SyncDAO.getSection(pool, userId, currDIds),
+      SyncDAO.getSection(pool, userId, currDIds, oldTs, previousSectionIds),
       SyncDAO.getCalendarsForSync(pool, currDIds, currCIds),
       SyncDAO.getSubscribedCalendarRecords(pool, currCIds)
     ]);
