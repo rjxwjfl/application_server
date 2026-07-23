@@ -111,6 +111,28 @@ class SyncDAO {
     return rows;
   }
 
+  static async fetchSectionMembers(pool, binderId, userId, since) {
+    const { rows } = await pool.query(
+      `SELECT sm.*
+       FROM section_members sm
+       JOIN sections s ON s.id = sm.section_id
+       WHERE s.binder_id = $1
+         AND (
+           (sm.deleted_at IS NULL AND s.deleted_at IS NULL AND EXISTS (
+             SELECT 1 FROM section_members own_sm
+             WHERE own_sm.section_id = sm.section_id
+               AND own_sm.user_id = $2
+               AND own_sm.deleted_at IS NULL
+           ))
+           OR (sm.user_id = $2 AND sm.deleted_at IS NOT NULL
+             AND ($3::timestamptz IS NULL OR sm.updated_at > $3))
+         )
+       ORDER BY sm.updated_at, sm.id`,
+      [binderId, userId, since]
+    );
+    return rows;
+  }
+
   static async getGroups(pool, currDIds, oldTs) {
     if (!currDIds.length) return [];
     const { rows } = await pool.query(

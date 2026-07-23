@@ -126,7 +126,7 @@ class SyncService {
 
   async _fetchTrackAMeta(userId, currDIds, currCIds, oldTs, previousSectionIds) {
     // 뼈대 데이터는 ts, old/new 따지지 않고 무조건 현재 소속 기준으로 100% 덮어씌움 (FK 에러 방지)
-    const [binders, binderMembers, binderPreferences, binderSettings, users, groups, groupMembers, section, calendars, subscribedCals] = await Promise.all([
+    const [binders, binderMembers, binderPreferences, binderSettings, users, groups, groupMembers, sectionMembersByBinder, section, calendars, subscribedCals] = await Promise.all([
       SyncDAO.getBindersForSync(pool, currDIds, currCIds),
       SyncDAO.getBinderMembers(pool, currDIds),
       SyncDAO.getBinderPreferences(pool, userId, currDIds),
@@ -134,6 +134,7 @@ class SyncService {
       SyncDAO.getUsersForSync(pool, currDIds, oldTs),
       SyncDAO.getGroups(pool, currDIds, oldTs),
       SyncDAO.getOwnGroupMembers(pool, userId, oldTs),
+      Promise.all(currDIds.map((binderId) => SyncDAO.fetchSectionMembers(pool, binderId, userId, oldTs))),
       SyncDAO.getSection(pool, userId, currDIds, oldTs, previousSectionIds),
       SyncDAO.getCalendarsForSync(pool, currDIds, currCIds),
       SyncDAO.getSubscribedCalendarRecords(pool, currCIds)
@@ -142,7 +143,7 @@ class SyncService {
     return {
       binders, binder_members: binderMembers, binder_preferences: binderPreferences,
       binder_settings: binderSettings, users, groups, group_members: groupMembers,
-      section, calendars,
+      sectionMembers: sectionMembersByBinder.flat(), section, calendars,
       subscribed_calendars: subscribedCals
     };
   }
@@ -211,7 +212,7 @@ class SyncService {
 
   _buildEmptyResponse(now, currDIds, currCIds) {
     return {
-      data: {},
+      data: { sectionMembers: [] },
       next_sync_token: SyncToken.encode({ ts: Math.floor(now.getTime() / 1000), d_ids: currDIds, c_ids: currCIds, s_ids: [] })
     };
   }
