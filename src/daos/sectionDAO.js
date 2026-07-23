@@ -102,6 +102,20 @@ class SectionDAO {
     return rows[0].count;
   }
 
+  async softDeleteEmptyPrivateSections(conn, binderId) {
+    const { rows } = await conn.query(
+      `SELECT s.id FROM sections s
+       WHERE s.binder_id = $1 AND s.access_scope = 1
+         AND s.deleted_at IS NULL AND s.is_default = FALSE
+         AND NOT EXISTS (SELECT 1 FROM section_members sm
+           WHERE sm.section_id = s.id AND sm.deleted_at IS NULL)
+       FOR UPDATE`,
+      [binderId]
+    );
+    for (const { id } of rows) await this.softDelete(conn, id);
+    return rows.map(({ id }) => id);
+  }
+
   async findSectionIdByMessage(conn, messageId) {
     const { rows } = await conn.query(`SELECT section_id FROM section_messages WHERE id = $1 AND deleted_at IS NULL`, [messageId]);
     return rows[0]?.section_id || null;

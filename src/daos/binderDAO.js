@@ -1,3 +1,5 @@
+const { SectionDAO } = require('./sectionDAO');
+
 class BinderDAO {
   /**
    * Binder ID로 조회
@@ -231,13 +233,7 @@ class BinderDAO {
          AND sm.user_id = $2 AND sm.deleted_at IS NULL`,
       [binderId, userId]
     );
-    await conn.query(
-      `UPDATE sections s SET deleted_at = now(), updated_at = now()
-       WHERE s.binder_id = $1 AND s.access_scope = 1 AND s.deleted_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM section_members sm
-           WHERE sm.section_id = s.id AND sm.deleted_at IS NULL)`,
-      [binderId]
-    );
+    await SectionDAO.softDeleteEmptyPrivateSections(conn, binderId);
   }
 
   // ============================================
