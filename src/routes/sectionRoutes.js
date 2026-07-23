@@ -6,6 +6,9 @@ router.route("/:sectionId")
   .patch(sectionController.updateSection)
   .delete(sectionController.deleteSection);
 
+router.post("/:sectionId/members", sectionController.addMembers);
+router.delete("/:sectionId/members/:userId", sectionController.removeMember);
+
 // Cursor (읽음 위치 갱신)
 router.put("/:sectionId/cursor", sectionController.updateCursor);
 

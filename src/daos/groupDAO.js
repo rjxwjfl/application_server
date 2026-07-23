@@ -21,11 +21,9 @@ class GroupDAO {
   async getGroups(conn, binderId) {
     const { rows } = await conn.query(
       `SELECT g.id, g.binder_id, g.name, g.color, g.created_by, g.created_at, g.updated_at,
-              COUNT(DISTINCT gm.user_id)::int AS member_count,
-              COUNT(DISTINCT s.id)::int AS linked_section_count
+              COUNT(DISTINCT gm.user_id)::int AS member_count
        FROM groups g
        LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.deleted_at IS NULL
-       LEFT JOIN sections s ON s.group_id = g.id AND s.deleted_at IS NULL
        WHERE g.binder_id = $1 AND g.deleted_at IS NULL
        GROUP BY g.id ORDER BY g.created_at`,
       [binderId]
@@ -44,14 +42,7 @@ class GroupDAO {
 
   async deleteGroup(conn, groupId) {
     await conn.query(
-      `UPDATE binder_members SET primary_group_id = NULL, updated_at = now() WHERE primary_group_id = $1`, [groupId]
-    );
-    await conn.query(
       `UPDATE group_members SET deleted_at = now(), updated_at = now()
-       WHERE group_id = $1 AND deleted_at IS NULL`, [groupId]
-    );
-    await conn.query(
-      `UPDATE sections SET group_id = NULL, updated_at = now()
        WHERE group_id = $1 AND deleted_at IS NULL`, [groupId]
     );
     const { rowCount } = await conn.query(
@@ -72,11 +63,6 @@ class GroupDAO {
     const { rowCount } = await conn.query(
       `UPDATE group_members SET deleted_at = now(), updated_at = now()
        WHERE group_id = $1 AND user_id = $2 AND deleted_at IS NULL`, [groupId, userId]
-    );
-    await conn.query(
-      `UPDATE binder_members bm SET primary_group_id = NULL, updated_at = now()
-       FROM groups g WHERE g.id = $1 AND bm.binder_id = g.binder_id
-         AND bm.user_id = $2 AND bm.primary_group_id = $1`, [groupId, userId]
     );
     return rowCount > 0;
   }

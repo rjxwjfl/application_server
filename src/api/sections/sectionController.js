@@ -32,6 +32,18 @@ const sectionController = {
     res.json({ success: true, message: '섹션이 삭제되었습니다' });
   }),
 
+  addMembers: asyncHandler(async (req, res) => {
+    const result = await SectionService.addMembers(req.params.sectionId, req.body.user_ids,
+      { sender_id: req.user_id, device_uuid: req.device_uuid });
+    res.status(201).json({ success: true, data: result });
+  }),
+
+  removeMember: asyncHandler(async (req, res) => {
+    const result = await SectionService.removeMember(req.params.sectionId, req.params.userId,
+      { sender_id: req.user_id, device_uuid: req.device_uuid });
+    res.json({ success: true, data: result });
+  }),
+
   // ============================================
   // Messages
   // ============================================
