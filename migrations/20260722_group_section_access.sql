@@ -10,7 +10,9 @@ BEGIN
   END IF;
 END
 $$;
-ALTER TABLE sections DROP COLUMN required_grade;
+ALTER TABLE sections DROP COLUMN IF EXISTS required_grade;
+ALTER TABLE sections DROP COLUMN IF EXISTS group_id;
+ALTER TABLE binder_members DROP COLUMN IF EXISTS primary_group_id;
 ALTER TABLE sections ADD CONSTRAINT chk_sections_access_scope CHECK (access_scope IN (0, 1));
 COMMENT ON COLUMN sections.access_scope IS '0=public (active binder members), 1=private (section_members membership); immutable after creation';
 
@@ -24,8 +26,8 @@ CREATE TABLE section_members (
 );
 CREATE UNIQUE INDEX uq_section_members_active ON section_members (section_id, user_id)
   WHERE deleted_at IS NULL;
-CREATE INDEX idx_sm_user_sync ON section_members (user_id, updated_at);
-CREATE INDEX idx_sm_section ON section_members (section_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_section_members_section_id ON section_members (section_id);
+CREATE INDEX idx_section_members_user_id ON section_members (user_id);
 
 CREATE TABLE groups (
   id UUID PRIMARY KEY,

@@ -440,8 +440,8 @@ CREATE TABLE section_members (
 );
 CREATE UNIQUE INDEX uq_section_members_active ON section_members (section_id, user_id)
   WHERE deleted_at IS NULL;
-CREATE INDEX idx_sm_user_sync ON section_members (user_id, updated_at);
-CREATE INDEX idx_sm_section ON section_members (section_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_section_members_section_id ON section_members (section_id);
+CREATE INDEX idx_section_members_user_id ON section_members (user_id);
 
 -- event_sections (events → sections M:N)
 CREATE TABLE event_sections (
