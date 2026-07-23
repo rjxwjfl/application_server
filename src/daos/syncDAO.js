@@ -132,6 +132,7 @@ class SyncDAO {
            -- tombstones: self-removal OR other members removed from sections requester is still in
            OR (sm.deleted_at IS NOT NULL AND (
              sm.user_id = $2
+             OR s.access_scope = 0
              OR EXISTS (
                SELECT 1 FROM section_members own_sm
                WHERE own_sm.section_id = sm.section_id
