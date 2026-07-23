@@ -12,7 +12,20 @@ END
 $$;
 ALTER TABLE sections DROP COLUMN required_grade;
 ALTER TABLE sections ADD CONSTRAINT chk_sections_access_scope CHECK (access_scope IN (0, 1));
-COMMENT ON COLUMN sections.access_scope IS '0=public (active binder members), 1=private (group_id membership)';
+COMMENT ON COLUMN sections.access_scope IS '0=public (active binder members), 1=private (section_members membership); immutable after creation';
+
+CREATE TABLE section_members (
+  id UUID PRIMARY KEY,
+  section_id UUID NOT NULL REFERENCES sections(id),
+  user_id UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX uq_section_members_active ON section_members (section_id, user_id)
+  WHERE deleted_at IS NULL;
+CREATE INDEX idx_sm_user_sync ON section_members (user_id, updated_at);
+CREATE INDEX idx_sm_section ON section_members (section_id) WHERE deleted_at IS NULL;
 
 CREATE TABLE groups (
   id UUID PRIMARY KEY,
@@ -37,11 +50,3 @@ CREATE TABLE group_members (
 CREATE UNIQUE INDEX uq_group_members_active ON group_members (group_id, user_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_gm_user_sync ON group_members (user_id, updated_at);
 CREATE INDEX idx_gm_group ON group_members (group_id) WHERE deleted_at IS NULL;
-
-ALTER TABLE sections ADD COLUMN group_id UUID;
-ALTER TABLE sections ADD CONSTRAINT fk_sec_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL;
-CREATE INDEX idx_sections_group ON sections (group_id) WHERE deleted_at IS NULL;
-
-ALTER TABLE binder_members ADD COLUMN primary_group_id UUID;
-ALTER TABLE binder_members ADD CONSTRAINT fk_bm_primary_group
-  FOREIGN KEY (primary_group_id) REFERENCES groups(id) ON DELETE SET NULL;

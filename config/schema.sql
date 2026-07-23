@@ -408,24 +408,40 @@ DROP TABLE IF EXISTS message_reactions       CASCADE;
 DROP TABLE IF EXISTS message_embeds          CASCADE;
 DROP TABLE IF EXISTS attachments              CASCADE;
 DROP TABLE IF EXISTS section_messages         CASCADE;
+DROP TABLE IF EXISTS section_members          CASCADE;
 DROP TABLE IF EXISTS sections                CASCADE;
 
 CREATE TABLE sections (
   id             UUID        NOT NULL,
   binder_id      UUID        NOT NULL,
   title          TEXT        NOT NULL,
-  -- 0=public 1=gradeLimit 2=whiteList(미구현)
+  -- 0=public 1=private (생성 후 변경 불가)
   access_scope   SMALLINT    NOT NULL DEFAULT 0,
-  -- role <= required_grade 이어야 접근 가능
-  required_grade SMALLINT             DEFAULT 3,
   is_default     BOOLEAN     NOT NULL DEFAULT FALSE,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at     TIMESTAMPTZ,
   PRIMARY KEY (id),
-  CONSTRAINT fk_sec_binder FOREIGN KEY (binder_id) REFERENCES binders(id)
+  CONSTRAINT fk_sec_binder FOREIGN KEY (binder_id) REFERENCES binders(id),
+  CONSTRAINT chk_sections_access_scope CHECK (access_scope IN (0, 1))
 );
 CREATE INDEX idx_sections_sync ON sections (binder_id, updated_at);
+
+CREATE TABLE section_members (
+  id          UUID        NOT NULL,
+  section_id  UUID        NOT NULL,
+  user_id     UUID        NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at  TIMESTAMPTZ,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_secm_section FOREIGN KEY (section_id) REFERENCES sections(id),
+  CONSTRAINT fk_secm_user FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE UNIQUE INDEX uq_section_members_active ON section_members (section_id, user_id)
+  WHERE deleted_at IS NULL;
+CREATE INDEX idx_sm_user_sync ON section_members (user_id, updated_at);
+CREATE INDEX idx_sm_section ON section_members (section_id) WHERE deleted_at IS NULL;
 
 -- event_sections (events → sections M:N)
 CREATE TABLE event_sections (

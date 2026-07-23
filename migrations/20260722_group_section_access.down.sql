@@ -1,8 +1,4 @@
-ALTER TABLE binder_members DROP CONSTRAINT IF EXISTS fk_bm_primary_group;
-ALTER TABLE binder_members DROP COLUMN IF EXISTS primary_group_id;
-DROP INDEX IF EXISTS idx_sections_group;
-ALTER TABLE sections DROP CONSTRAINT IF EXISTS fk_sec_group;
-ALTER TABLE sections DROP COLUMN IF EXISTS group_id;
+DROP TABLE IF EXISTS section_members;
 DROP TABLE IF EXISTS group_members;
 DROP TABLE IF EXISTS groups;
 ALTER TABLE sections DROP CONSTRAINT IF EXISTS chk_sections_access_scope;

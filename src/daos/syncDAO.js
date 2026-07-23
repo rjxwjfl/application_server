@@ -97,10 +97,10 @@ class SyncDAO {
           (s.deleted_at IS NULL AND (
             bm.role <= 1
             OR s.access_scope = 0
-            OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
-              SELECT 1 FROM group_members gm
-              WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
-            ))
+            OR EXISTS (
+              SELECT 1 FROM section_members sm
+              WHERE sm.section_id = s.id AND sm.user_id = $1 AND sm.deleted_at IS NULL
+            )
           ))
           OR ($3::timestamptz IS NOT NULL
             AND s.id = ANY($4::uuid[])
@@ -108,6 +108,28 @@ class SyncDAO {
         )
     `;
     const { rows } = await pool.query(query, [userId, currDIds, oldTs, previousSectionIds]);
+    return rows;
+  }
+
+  static async fetchSectionMembers(pool, binderId, userId, since) {
+    const { rows } = await pool.query(
+      `SELECT sm.*
+       FROM section_members sm
+       JOIN sections s ON s.id = sm.section_id
+       WHERE s.binder_id = $1
+         AND (
+           (sm.deleted_at IS NULL AND s.deleted_at IS NULL AND EXISTS (
+             SELECT 1 FROM section_members own_sm
+             WHERE own_sm.section_id = sm.section_id
+               AND own_sm.user_id = $2
+               AND own_sm.deleted_at IS NULL
+           ))
+           OR (sm.user_id = $2 AND sm.deleted_at IS NOT NULL
+             AND ($3::timestamptz IS NULL OR sm.updated_at > $3))
+         )
+       ORDER BY sm.updated_at, sm.id`,
+      [binderId, userId, since]
+    );
     return rows;
   }
 
@@ -289,9 +311,9 @@ class SyncDAO {
     const query = `
       SELECT m.* FROM section_messages m
       JOIN sections s ON m.section_id = s.id
-      WHERE (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM group_members gm
-        WHERE gm.group_id = s.group_id AND gm.user_id = $5 AND gm.deleted_at IS NULL
+      WHERE (s.access_scope = 0 OR EXISTS (
+        SELECT 1 FROM section_members sm
+        WHERE sm.section_id = s.id AND sm.user_id = $5 AND sm.deleted_at IS NULL
       )) AND (
         (s.binder_id = ANY($1::uuid[]) AND m.updated_at > $2)
         OR
@@ -414,18 +436,18 @@ class SyncDAO {
             SELECT 1 FROM sections s
             WHERE s.id = activity_feeds.target_id
               AND s.deleted_at IS NULL
-              AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
-                SELECT 1 FROM group_members gm
-                WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
+              AND (s.access_scope = 0 OR EXISTS (
+                SELECT 1 FROM section_members secm
+                WHERE secm.section_id = s.id AND secm.user_id = $1 AND secm.deleted_at IS NULL
               ))
           )
           WHEN target_type = 'SECTION_MESSAGE' THEN EXISTS (
             SELECT 1 FROM section_messages sm
             JOIN sections s ON s.id = sm.section_id
             WHERE sm.id = activity_feeds.target_id
-              AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
-                SELECT 1 FROM group_members gm
-                WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
+              AND (s.access_scope = 0 OR EXISTS (
+                SELECT 1 FROM section_members secm
+                WHERE secm.section_id = s.id AND secm.user_id = $1 AND secm.deleted_at IS NULL
               ))
           )
           ELSE true
@@ -444,9 +466,9 @@ class SyncDAO {
       `SELECT s.id
        FROM sections s
        WHERE s.binder_id = ANY($2::uuid[]) AND s.deleted_at IS NULL
-         AND (s.access_scope = 0 OR (s.access_scope = 1 AND s.group_id IS NOT NULL AND EXISTS (
-           SELECT 1 FROM group_members gm
-           WHERE gm.group_id = s.group_id AND gm.user_id = $1 AND gm.deleted_at IS NULL
+         AND (s.access_scope = 0 OR EXISTS (
+           SELECT 1 FROM section_members sm
+           WHERE sm.section_id = s.id AND sm.user_id = $1 AND sm.deleted_at IS NULL
          ))`,
       [userId, binderIds]
     );

@@ -1,3 +1,5 @@
+const { SectionDAO } = require('./sectionDAO');
+
 class BinderDAO {
   /**
    * Binder ID로 조회
@@ -216,7 +218,7 @@ class BinderDAO {
   async removeMember(conn, binderId, userId) {
     const query = `
       UPDATE binder_members
-      SET deleted_at = now(), updated_at = now(), primary_group_id = NULL
+      SET deleted_at = now(), updated_at = now()
       WHERE binder_id = $1 AND user_id = $2 AND deleted_at IS NULL
     `;
     await conn.query(query, [binderId, userId]);
@@ -225,6 +227,13 @@ class BinderDAO {
        FROM groups g WHERE gm.group_id = g.id AND g.binder_id = $1 AND gm.user_id = $2 AND gm.deleted_at IS NULL`,
       [binderId, userId]
     );
+    await conn.query(
+      `UPDATE section_members sm SET deleted_at = now(), updated_at = now()
+       FROM sections s WHERE sm.section_id = s.id AND s.binder_id = $1
+         AND sm.user_id = $2 AND sm.deleted_at IS NULL`,
+      [binderId, userId]
+    );
+    await SectionDAO.softDeleteEmptyPrivateSections(conn, binderId);
   }
 
   // ============================================

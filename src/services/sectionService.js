@@ -5,7 +5,7 @@ const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { AppError, NotFoundError, BadRequestError, ForbiddenError } = require('../core/errors');
+const { NotFoundError, BadRequestError, ForbiddenError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class SectionService {
@@ -19,17 +19,16 @@ class SectionService {
     const section = await withTransaction(async (client) => {
       const actor = await BinderDAO.getMember(client, data.binder_id, context.sender_id);
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
+      if (Object.prototype.hasOwnProperty.call(data, 'group_id')) throw new BadRequestError('group_id는 지원하지 않습니다');
       const scope = data.access_scope ?? 0;
       if (![0, 1].includes(scope)) throw new BadRequestError('access_scope는 0 또는 1이어야 합니다');
-      if (scope === 1 && !data.group_id) throw new AppError('private 섹션에는 그룹이 필요합니다', 422, 'SECTION_GRANT_REQUIRED');
       const created = await SectionDAO.create(client, {
         id: data.id || generateUUID(),
         binder_id: data.binder_id,
         title: data.title,
         access_scope: scope,
-        group_id: scope === 1 ? data.group_id : null,
       });
-      if (!created) throw new BadRequestError('그룹이 바인더에 속하지 않습니다');
+      if (scope === 1) await SectionDAO.addMember(client, created.id, context.sender_id, generateUUID());
       return created;
     });
 
@@ -49,19 +48,10 @@ class SectionService {
       if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
       const actor = await BinderDAO.getMember(client, section.binder_id, context.sender_id);
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
-      const scope = updateData.access_scope ?? section.access_scope;
-      if (![0, 1].includes(scope)) throw new BadRequestError('access_scope는 0 또는 1이어야 합니다');
-      const hasGroupId = Object.prototype.hasOwnProperty.call(updateData, 'group_id');
-      if (section.access_scope === 0 && scope === 1 && !hasGroupId) {
-        throw new AppError('private 섹션에는 그룹이 필요합니다', 422, 'SECTION_GRANT_REQUIRED');
+      if (Object.keys(updateData).some((key) => key !== 'title')) {
+        throw new BadRequestError('수정 가능한 필드는 title뿐입니다');
       }
-      const groupId = scope === 0 ? null : (hasGroupId ? updateData.group_id : section.group_id);
-      if (section.is_default && (scope === 1 || groupId !== null)) throw new BadRequestError('기본 섹션에는 그룹을 설정할 수 없습니다');
-      if (scope === 1 && groupId === null) throw new AppError('private 섹션의 group_id는 비울 수 없습니다', 422, 'SECTION_GRANT_REQUIRED');
-
-      const normalizedUpdate = { ...updateData, access_scope: scope, group_id: groupId };
-      const result = await SectionDAO.update(client, sectionId, normalizedUpdate, true);
-      if (!result) throw new BadRequestError('그룹이 바인더에 속하지 않습니다');
+      const result = await SectionDAO.update(client, sectionId, updateData);
       return { section, result };
     });
 
@@ -93,6 +83,45 @@ class SectionService {
       device_uuid: context.device_uuid,
       action: ActionType.DELETE, target_type: TargetType.SECTION, target_id: sectionId,
     });
+  }
+
+  async addMembers(sectionId, userIds, context) {
+    if (!Array.isArray(userIds) || userIds.length === 0) throw new BadRequestError('user_ids 배열이 필요합니다');
+    const uniqueUserIds = [...new Set(userIds)];
+    const result = await withTransaction(async (client) => {
+      const section = await SectionDAO.findById(client, sectionId, true);
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+      const actor = await BinderDAO.getMember(client, section.binder_id, context.sender_id);
+      if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
+      if (section.access_scope !== 1) throw new BadRequestError('public 섹션에는 멤버를 추가할 수 없습니다');
+      const added = [];
+      for (const userId of uniqueUserIds) {
+        const target = await BinderDAO.getMember(client, section.binder_id, userId);
+        if (!target || target.deleted_at) throw new BadRequestError('모든 user_id는 활성 바인더 멤버여야 합니다');
+        if (await SectionDAO.addMember(client, sectionId, userId, generateUUID())) added.push(userId);
+      }
+      return { binderId: section.binder_id, added_user_ids: added, member_count: await SectionDAO.countMembers(client, sectionId) };
+    });
+    eventBus.emit('sync', { binder_id: result.binderId, sender_id: context.sender_id, device_uuid: context.device_uuid,
+      action: ActionType.UPDATE, target_type: TargetType.SECTION, target_id: sectionId });
+    return { added_user_ids: result.added_user_ids, member_count: result.member_count };
+  }
+
+  async removeMember(sectionId, userId, context) {
+    const result = await withTransaction(async (client) => {
+      const section = await SectionDAO.findById(client, sectionId, true);
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+      const actor = await BinderDAO.getMember(client, section.binder_id, context.sender_id);
+      if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
+      if (section.access_scope !== 1) throw new BadRequestError('public 섹션에는 멤버가 없습니다');
+      await SectionDAO.removeMember(client, sectionId, userId);
+      const memberCount = await SectionDAO.countMembers(client, sectionId);
+      const sectionDeleted = memberCount === 0 ? await SectionDAO.softDelete(client, sectionId) : false;
+      return { binderId: section.binder_id, removed_user_id: userId, member_count: memberCount, section_deleted: sectionDeleted };
+    });
+    eventBus.emit('sync', { binder_id: result.binderId, sender_id: context.sender_id, device_uuid: context.device_uuid,
+      action: ActionType.UPDATE, target_type: TargetType.SECTION, target_id: sectionId });
+    return { removed_user_id: result.removed_user_id, member_count: result.member_count, section_deleted: result.section_deleted };
   }
 
   async listFiles(sectionId, query, userId) {
