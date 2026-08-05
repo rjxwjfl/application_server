@@ -1,9 +1,11 @@
 const { Storage } = require('@google-cloud/storage');
 const { generateUUID } = require('../utils/uuid');
 const pool = require('../../config/db');
-const { NotFoundError, ForbiddenError, BadRequestError } = require('../core/errors');
+const withTransaction = require('../core/withTransaction');
+const { NotFoundError, ForbiddenError, BadRequestError, PaymentRequiredError } = require('../core/errors');
 const { SectionDAO } = require('../daos/sectionDAO');
 const { CastDAO } = require('../daos/castDAO');
+const { AttachmentDAO } = require('../daos/attachmentDAO');
 const { requireBinderMember, requireBinderMemberByCalendarId } = require('../core/authz');
 
 const storage = new Storage();
@@ -56,6 +58,21 @@ class MediaService {
       await requireBinderMember(pool, binder_id, context.sender_id);
     }
 
+    // F-S9 — 한도 집행 지점. avatar/cover는 binder_storage_usage 대상이 아니다(binder_id 없음).
+    // SECTION_MESSAGE도 binder_id로 집계되므로 같이 검사한다(결정 33·SC-billing.md 액션 E).
+    if (context_type !== 'avatar' && context_type !== 'cover') {
+      const [bytesUsed, limitBytes] = await Promise.all([
+        AttachmentDAO.getBytesUsed(pool, binder_id),
+        AttachmentDAO.getStorageLimitBytes(pool, binder_id),
+      ]);
+      if (bytesUsed + (Number(file_size) || 0) > limitBytes) {
+        throw new PaymentRequiredError(
+          '바인더 저장 공간이 부족합니다. Binder Boost로 용량을 늘려보세요.',
+          'BOOST_STORAGE_LIMIT'
+        );
+      }
+    }
+
     let storage_key;
     if (context_type === 'avatar' || context_type === 'cover') {
       // Avatar/cover use entity-centric path
@@ -93,16 +110,30 @@ class MediaService {
   }
 
   async confirm(attachmentId, context) {
-    const result = await pool.query(
-      `UPDATE attachments
-       SET status = 'ready', updated_at = now()
-       WHERE id = $1 AND uploader_id = $2 AND status = 'pending'
-       RETURNING *`,
-      [attachmentId, context.sender_id]
-    );
+    return withTransaction(async (client) => {
+      const result = await client.query(
+        `UPDATE attachments
+         SET status = 'ready', updated_at = now()
+         WHERE id = $1 AND uploader_id = $2 AND status = 'pending'
+         RETURNING *`,
+        [attachmentId, context.sender_id]
+      );
 
-    if (!result.rows[0]) throw new NotFoundError('첨부 파일을 찾을 수 없거나 이미 처리되었습니다');
-    return result.rows[0];
+      const attachment = result.rows[0];
+      if (!attachment) throw new NotFoundError('첨부 파일을 찾을 수 없거나 이미 처리되었습니다');
+
+      // F-S9 — 첨부 행 갱신과 같은 트랜잭션에서 원자 갱신(같은 storage_key의 다른 활성 행이
+      // 이미 있으면 0 — 멱등 재confirm·복제 승계 양쪽에 forward-compatible).
+      await AttachmentDAO.applyStorageDelta(client, {
+        binderId: attachment.binder_id,
+        storageKey: attachment.storage_key,
+        fileSize: attachment.file_size,
+        attachmentId: attachment.id,
+        sign: 1,
+      });
+
+      return attachment;
+    });
   }
 
   async getSignedUrl(attachmentId, userId) {
@@ -157,19 +188,38 @@ class MediaService {
   }
 
   async deleteAttachment(attachmentId, userId) {
-    const result = await pool.query(
-      `UPDATE attachments
-       SET deleted_at = now(), updated_at = now()
-       WHERE id = $1 AND uploader_id = $2 AND deleted_at IS NULL
-       RETURNING storage_key`,
-      [attachmentId, userId]
-    );
-    if (!result.rows[0]) throw new NotFoundError('첨부 파일을 찾을 수 없거나 권한이 없습니다');
+    // F-S9 — 첨부 행 soft delete와 binder_storage_usage 차감을 같은 트랜잭션에서 원자 갱신한다.
+    // 네트워크 I/O(GCS 삭제)는 트랜잭션 밖에서 한다(DB 트랜잭션 안에서 외부 호출을 기다리지 않는다).
+    const attachment = await withTransaction(async (client) => {
+      const result = await client.query(
+        `UPDATE attachments
+         SET deleted_at = now(), updated_at = now()
+         WHERE id = $1 AND uploader_id = $2 AND deleted_at IS NULL
+         RETURNING id, binder_id, storage_key, file_size`,
+        [attachmentId, userId]
+      );
+      const att = result.rows[0];
+      if (!att) throw new NotFoundError('첨부 파일을 찾을 수 없거나 권한이 없습니다');
 
-    const { storage_key } = result.rows[0];
+      // 같은 binder_id에 같은 storage_key의 다른 활성 행이 남아 있으면(복제 승계) 0 — 마지막이면 차감.
+      await AttachmentDAO.applyStorageDelta(client, {
+        binderId: att.binder_id,
+        storageKey: att.storage_key,
+        fileSize: att.file_size,
+        attachmentId: att.id,
+        sign: -1,
+      });
+
+      return att;
+    });
+
+    // ⚠️ storage_key를 다른 활성 행이 공유하고 있으면 여기서 물리 객체를 지우는 순간 그 행의
+    // 파일도 함께 사라진다(F-S6 결정 61이 이 호출 자체를 하드 삭제 시점으로 옮길 때까지 미해결).
+    // F-S6이 아직 착수되지 않아 현재는 복제 자체가 없으므로 이 경합은 아직 발생하지 않는다 —
+    // F-S6 착수 시 AC-S6-3(이 네트워크 호출 제거)이 먼저 반영되어야 안전하다.
     try {
       const bucket = storage.bucket(getMediaBucket());
-      await bucket.file(storage_key).delete({ ignoreNotFound: true });
+      await bucket.file(attachment.storage_key).delete({ ignoreNotFound: true });
     } catch {
       // GCS 삭제 실패는 로그만 남기고 200 반환 (DB 레코드는 이미 soft-delete)
     }
