@@ -16,8 +16,8 @@ class BinderService {
     return await BinderDAO.searchByName(pool, keyword, limit, offset);
   }
 
-  async createBinder(data, device_uuid) {
-    const { user_id, name } = data;
+  async createBinder(data, userId, device_uuid) {
+    const { name } = data;
     if (!name || name.trim().length === 0) {
       throw new BadRequestError('Binder 이름이 필요합니다');
     }
@@ -25,7 +25,8 @@ class BinderService {
     const result = await withTransaction(async (client) => {
       const binder = await BinderDAO.create(client, data);
       const settings = await BinderDAO.createSettings(client, binder.id);
-      const member = await BinderDAO.addMember(client, binder.id, user_id, 0);
+      // 소유자(master)는 항상 인증된 요청자다 — 요청 본문의 user_id는 신원으로 신뢰하지 않는다.
+      const member = await BinderDAO.addMember(client, binder.id, userId, 0);
 
       const calendar = await CalendarDAO.create(client, {
         id: generateUUID(),
@@ -50,7 +51,7 @@ class BinderService {
       };
     });
 
-    eventBus.emit('member:joined', { user_id, binder_id: result.binder.id, device_uuid });
+    eventBus.emit('member:joined', { user_id: userId, binder_id: result.binder.id, device_uuid });
 
     return result;
   }
