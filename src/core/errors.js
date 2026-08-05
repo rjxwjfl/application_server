@@ -55,6 +55,21 @@ class NotImplementedError extends AppError {
   }
 }
 
+// RLY-20260806-015 — media.md §4-3(confirm 실제 크기 재확인 계약)의 "±10% 초과 시 422" 명시값.
+class UnprocessableEntityError extends AppError {
+  constructor(message = '요청을 처리할 수 없습니다', errorCode = null) {
+    super(message, 422, errorCode);
+  }
+}
+
+// RLY-20260806-015 — GCS 메타데이터 조회 실패(네트워크·권한 등 일시적 장애) 시 선언값으로
+// 조용히 대체하지 않고 클라이언트가 재시도할 수 있도록 명시적으로 알린다.
+class ServiceUnavailableError extends AppError {
+  constructor(message = '일시적으로 처리할 수 없습니다. 잠시 후 다시 시도해주세요', errorCode = null) {
+    super(message, 503, errorCode);
+  }
+}
+
 module.exports = {
   AppError,
   BadRequestError,
@@ -65,4 +80,6 @@ module.exports = {
   PaymentRequiredError,
   GoneError,
   NotImplementedError,
+  UnprocessableEntityError,
+  ServiceUnavailableError,
 };

@@ -82,6 +82,23 @@ async function mockQuery(sql, params = []) {
     return { rows: row && !row.deleted_at ? [row] : [] };
   }
 
+  // MediaService.confirm — RLY-20260806-015 사전 확인(pending 소유 검증, GCS 호출 전)
+  if (s.startsWith('SELECT id, binder_id, storage_key, file_size FROM attachments WHERE id = $1 AND uploader_id = $2 AND status = \'pending\'')) {
+    const [id, uploaderId] = params;
+    const att = db.attachments[id];
+    if (!att || att.uploader_id !== uploaderId || att.status !== 'pending') return { rows: [] };
+    return { rows: [{ id: att.id, binder_id: att.binder_id, storage_key: att.storage_key, file_size: att.file_size }] };
+  }
+
+  // MediaService._rejectAndCleanup
+  if (s.startsWith("UPDATE attachments SET status = 'rejected'")) {
+    const [id] = params;
+    const att = db.attachments[id];
+    if (!att || att.status !== 'pending') return { rows: [] };
+    att.status = 'rejected';
+    return { rows: [{ ...att }] };
+  }
+
   // MediaService.presign — INSERT INTO attachments
   if (s.startsWith('INSERT INTO attachments')) {
     const [id, binder_id, , , storage_key, , file_size, , uploader_id] = params;
@@ -91,12 +108,13 @@ async function mockQuery(sql, params = []) {
     return { rows: [], rowCount: 1 };
   }
 
-  // MediaService.confirm
+  // MediaService.confirm — 최종 확정(RLY-20260806-015: file_size를 실제 재확인 값으로 갱신)
   if (s.startsWith("UPDATE attachments SET status = 'ready'")) {
-    const [id, uploaderId] = params;
+    const [id, uploaderId, actualSize] = params;
     const att = db.attachments[id];
     if (!att || att.uploader_id !== uploaderId || att.status !== 'pending') return { rows: [] };
     att.status = 'ready';
+    att.file_size = actualSize;
     return { rows: [{ ...att }] };
   }
 
@@ -194,16 +212,41 @@ const dbPath = require.resolve('../../config/db');
 require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: mockDb };
 
 // ── @google-cloud/storage 스텁 — presign/confirm/delete 해피패스가 실제 GCS를 부르지 않게 ──
+// RLY-20260806-015 — confirm의 getMetadata() 실제 크기 재확인 경로 검증용. 기본값은 db.attachments의
+// file_size(선언값)와 동일하게 응답해(=재확인 통과) 기존 회귀의 델타 기대값을 그대로 유지하고,
+// 개별 테스트가 gcsSizeOverrides로 storage_key별 응답(실제 크기 불일치·404·네트워크 오류)을 주입한다.
+const gcsSizeOverrides = {};
+const gcsDeleteLog = [];
+
 const gcsStub = {
   Storage: class {
     bucket() {
       return {
-        file() {
+        file(storageKey) {
           return {
             async generateSignedPostPolicyV4() { return ['https://fake-upload-url']; },
             async getSignedUrl() { return ['https://fake-signed-url']; },
-            async delete() {},
+            async delete() { gcsDeleteLog.push(storageKey); },
             async copy() {},
+            async getMetadata() {
+              const override = gcsSizeOverrides[storageKey];
+              if (override && override.notFound) {
+                const err = new Error('No such object');
+                err.code = 404;
+                throw err;
+              }
+              if (override && override.networkError) {
+                throw new Error('ECONNRESET (fake)');
+              }
+              if (typeof override === 'number') {
+                return [{ size: String(override) }];
+              }
+              const att = Object.values(db.attachments).find(
+                (a) => a.storage_key === storageKey && !a.deleted_at
+              );
+              const size = att ? Number(att.file_size) || 0 : 0;
+              return [{ size: String(size) }];
+            },
           };
         },
       };
@@ -386,6 +429,100 @@ async function run() {
     );
     assert.ok(result.id);
   });
+
+  // ═══════════════════════════════════════════════════════════════
+  // RLY-20260806-015 — confirm 실제 크기 서버 재확인
+  // ═══════════════════════════════════════════════════════════════
+  db.binder_storage_usage.b1.bytes_used = 0; // 이전 시나리오 잔여값 리셋 — 이 블록은 절대값으로 단언한다
+
+  await check('실제 크기 재확인 — 편차가 tolerance 이내면 실제 값(선언값 아님)으로 file_size·회계 반영', async () => {
+    const key = 'attachments/b1/2026/08/close-match.png';
+    const id = insertAttachment({ binder_id: 'b1', storage_key: key, file_size: 100, uploader_id: 'u1' });
+    gcsSizeOverrides[key] = 105; // declared=100, actual=105 — ±10% 이내(105 <= 110)
+    await MediaService.confirm(id, ctx('u1'));
+    assert.strictEqual(db.attachments[id].file_size, 105, 'file_size가 실제 값으로 갱신되어야 한다');
+    assert.strictEqual(db.binder_storage_usage.b1.bytes_used, 105, '회계도 실제 값으로 반영되어야 한다(선언값 100이 아님)');
+  });
+
+  {
+    const key = 'attachments/b1/2026/08/fraud-declare.png';
+    const id = insertAttachment({ binder_id: 'b1', storage_key: key, file_size: 1, uploader_id: 'u1' });
+    gcsSizeOverrides[key] = 5 * 1024 ** 3; // 선언값 1바이트, 실제 5GB — 전형적 선언값 위조 시나리오
+    const before = db.binder_storage_usage.b1.bytes_used;
+    await expectStatus(
+      '실제 크기가 선언값 대비 ±10% 초과 시 422 거부(ATTACHMENT_SIZE_MISMATCH)',
+      () => MediaService.confirm(id, ctx('u1')),
+      422,
+      'ATTACHMENT_SIZE_MISMATCH'
+    );
+    await check('위 거부 후 — attachment rejected + GCS 객체 삭제 + bytes_used 불변', async () => {
+      assert.strictEqual(db.attachments[id].status, 'rejected');
+      assert.ok(gcsDeleteLog.includes(key), 'GCS 객체가 삭제 호출되어야 한다');
+      assert.strictEqual(db.binder_storage_usage.b1.bytes_used, before, '거부된 첨부는 회계에 반영되지 않아야 한다');
+    });
+  }
+
+  {
+    // §2 Orchestrator 확정(2026-08-06): ±10% tolerance 이내면 한도를 근소 초과해도 거부하지 않는다 —
+    // 위조 방어는 편차 검사가 이미 담당하고, 남는 것은 선의의 오차뿐이므로 사용자 데이터를 지우지 않는다.
+    // 실제 값으로 집계하고 confirm은 통과시키며, 한도 초과 상태는 다음 presign이 402로 막아 자연 수렴한다.
+    const key = 'attachments/b1/2026/08/over-limit.png';
+    const declared = 100;
+    const id = insertAttachment({ binder_id: 'b1', storage_key: key, file_size: declared, uploader_id: 'u1' });
+    // presign 시점엔 통과했을 값(선언값 기준 딱 한도)이지만 실제 크기 반영 시 한도를 넘기도록 세팅.
+    db.binder_storage_usage.b1.bytes_used = FREE_LIMIT - declared;
+    gcsSizeOverrides[key] = declared + 5; // 실제는 5바이트 더 큼(±10% 이내) — 한도 초과로 전환
+
+    await check('실제 크기가 tolerance 이내면서 한도를 근소 초과해도 confirm은 통과 + 실제 값으로 집계', async () => {
+      await MediaService.confirm(id, ctx('u1'));
+      assert.strictEqual(db.attachments[id].status, 'ready', '근소 초과로 거부하지 않는다');
+      assert.strictEqual(db.attachments[id].file_size, declared + 5, '실제 값으로 file_size 갱신');
+      assert.strictEqual(db.binder_storage_usage.b1.bytes_used, FREE_LIMIT + 5, '실제 값 그대로 집계(한도 초과 상태 허용)');
+      assert.ok(!gcsDeleteLog.includes(key), '수용 경로이므로 GCS 객체를 삭제하지 않는다');
+    });
+
+    await expectStatus(
+      '한도 초과 상태가 남으면 다음 presign이 402로 막아 자연 수렴한다',
+      () => MediaService.presign(
+        { context_type: 'EVENT', context_id: 'e1', binder_id: 'b1', filename: 'next.png', content_type: 'image/png', file_size: 1 },
+        ctx('u1')
+      ),
+      402,
+      'BOOST_STORAGE_LIMIT'
+    );
+  }
+
+  {
+    const key = 'attachments/b1/2026/08/gcs-down.png';
+    const id = insertAttachment({ binder_id: 'b1', storage_key: key, file_size: 100, uploader_id: 'u1' });
+    gcsSizeOverrides[key] = { networkError: true };
+    const before = db.binder_storage_usage.b1.bytes_used;
+    await expectStatus(
+      'GCS 메타데이터 조회 실패(네트워크 등 일시 장애) 시 503 — 선언값으로 조용히 대체하지 않는다',
+      () => MediaService.confirm(id, ctx('u1')),
+      503,
+      'ATTACHMENT_VERIFY_UNAVAILABLE'
+    );
+    await check('위 503 이후 — attachment는 pending 유지(재시도 가능), 회계 불변', async () => {
+      assert.strictEqual(db.attachments[id].status, 'pending', 'GCS 조회 실패는 상태를 바꾸지 않고 재시도 가능해야 한다');
+      assert.strictEqual(db.binder_storage_usage.b1.bytes_used, before);
+    });
+  }
+
+  {
+    const key = 'attachments/b1/2026/08/never-uploaded.png';
+    const id = insertAttachment({ binder_id: 'b1', storage_key: key, file_size: 100, uploader_id: 'u1' });
+    gcsSizeOverrides[key] = { notFound: true };
+    await expectStatus(
+      'GCS에 객체가 존재하지 않으면(404) 404 거부(선언만 하고 업로드하지 않은 경우)',
+      () => MediaService.confirm(id, ctx('u1')),
+      404,
+      'ATTACHMENT_OBJECT_NOT_FOUND'
+    );
+    await check('위 404 이후 — attachment rejected 전환', async () => {
+      assert.strictEqual(db.attachments[id].status, 'rejected');
+    });
+  }
 
   // ═══════════════════════════════════════════════════════════════
   // 결과 출력
