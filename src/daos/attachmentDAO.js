@@ -1,3 +1,12 @@
+// F-S9 — tier(SMALLINT 0=free 1=lite 2=plus, config/schema.sql:186) → 저장 한도(bytes).
+// SC-billing.md:26-28 확정값(Free 5GB · Boost Lite 50GB · Boost Plus 200GB). 1GB = 1024^3
+// (server/api.md:2266 storage_limit_bytes 예시값 1073741824과 정합).
+const TIER_STORAGE_LIMIT_BYTES = [
+  5 * 1024 ** 3,
+  50 * 1024 ** 3,
+  200 * 1024 ** 3,
+];
+
 class AttachmentDAO {
   async create(conn, data) {
     const result = await conn.query(
@@ -174,12 +183,84 @@ class AttachmentDAO {
   }
 
   async softDelete(conn, id) {
-    await conn.query(
+    const result = await conn.query(
       `UPDATE attachments SET deleted_at = now(), updated_at = now()
-       WHERE id = $1 AND deleted_at IS NULL`,
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, binder_id, storage_key, file_size`,
       [id]
     );
+    return result.rows[0] || null;
+  }
+
+  // ============================================
+  // F-S9 — binder_storage_usage 집계 (결정 33 · 결정 56)
+  // ============================================
+
+  /**
+   * storage_key 단위 최초/마지막 판정으로 binder_storage_usage 를 원자 갱신한다.
+   * 결정 56: storage_key 를 여러 attachments 행이 공유할 수 있으므로(복제) "행 하나마다
+   * ±file_size" 가 아니라 "이 바인더에서 이 키가 유일한 활성(deleted_at IS NULL) 행인가"만 본다.
+   * 판정 쿼리는 결정 56의 하드 삭제 가드(F-S6 C56-2)와 같은 술어를 쓴다 — attachments(storage_key)
+   * 인덱스를 공유한다(F-S0 idx_att_storage_key).
+   *
+   * @param {object} conn - Pool 또는 트랜잭션 client. 호출부가 첨부 행 갱신과 같은 트랜잭션에서 호출해야 한다.
+   * @param {object} params
+   * @param {string} params.binderId
+   * @param {string} params.storageKey
+   * @param {number|string} params.fileSize
+   * @param {string} params.attachmentId - 판정에서 자기 자신을 제외하기 위한 id (신규/삭제 대상 행 모두 자신 제외로 충분 — 순서 무관)
+   * @param {1|-1} params.sign - +1: 등장(confirm·복원) · -1: 소멸(soft delete)
+   * @returns {number} 실제로 반영된 delta bytes (0이면 경계가 아니어서 갱신하지 않음)
+   */
+  async applyStorageDelta(conn, { binderId, storageKey, fileSize, attachmentId, sign }) {
+    const size = Number(fileSize) || 0;
+    if (!size || !storageKey || !binderId) return 0;
+
+    const guard = await conn.query(
+      `SELECT NOT EXISTS (
+         SELECT 1 FROM attachments
+         WHERE binder_id = $1 AND storage_key = $2
+           AND deleted_at IS NULL AND id <> $3
+       ) AS is_boundary`,
+      [binderId, storageKey, attachmentId]
+    );
+    if (!guard.rows[0].is_boundary) return 0;
+
+    const delta = sign * size;
+    await conn.query(
+      `INSERT INTO binder_storage_usage (binder_id, bytes_used, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (binder_id) DO UPDATE
+         SET bytes_used = binder_storage_usage.bytes_used + $2,
+             updated_at = now()`,
+      [binderId, delta]
+    );
+    return delta;
+  }
+
+  async getBytesUsed(conn, binderId) {
+    const result = await conn.query(
+      `SELECT bytes_used FROM binder_storage_usage WHERE binder_id = $1`,
+      [binderId]
+    );
+    return result.rows[0] ? Number(result.rows[0].bytes_used) : 0;
+  }
+
+  /**
+   * binder의 저장 한도(bytes) — binder_boosts.tier(활성 구독만) 기준, 없으면 Free(0).
+   * ⛔ Boost 구매 흐름은 별도 Task(출시 후 오픈) — 여기서는 한도 판정을 위해 tier만 읽는다.
+   */
+  async getStorageLimitBytes(conn, binderId) {
+    const result = await conn.query(
+      `SELECT COALESCE(bb.tier, 0) AS tier
+       FROM binders b
+       LEFT JOIN binder_boosts bb ON bb.binder_id = b.id AND bb.status = 'ACTIVE'
+       WHERE b.id = $1`,
+      [binderId]
+    );
+    const tier = result.rows[0] ? result.rows[0].tier : 0;
+    return TIER_STORAGE_LIMIT_BYTES[tier] ?? TIER_STORAGE_LIMIT_BYTES[0];
   }
 }
 
-module.exports = { AttachmentDAO: new AttachmentDAO() };
+module.exports = { AttachmentDAO: new AttachmentDAO(), TIER_STORAGE_LIMIT_BYTES };

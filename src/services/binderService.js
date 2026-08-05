@@ -430,7 +430,20 @@ class BinderService {
         throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
       }
     }
-    await AttachmentDAO.softDelete(pool, attachmentId, userId);
+    // F-S9 — soft delete와 binder_storage_usage 차감을 같은 트랜잭션에서 원자 갱신한다.
+    // (mediaService.deleteAttachment와 별개 경로 — master·manager가 타인 업로드를 지우는 경로도
+    // 같은 회계 규칙을 따라야 한다.)
+    await withTransaction(async (client) => {
+      const deleted = await AttachmentDAO.softDelete(client, attachmentId);
+      if (!deleted) return;
+      await AttachmentDAO.applyStorageDelta(client, {
+        binderId: deleted.binder_id,
+        storageKey: deleted.storage_key,
+        fileSize: deleted.file_size,
+        attachmentId: deleted.id,
+        sign: -1,
+      });
+    });
   }
 
   async listFiles(binderId, query, userId) {

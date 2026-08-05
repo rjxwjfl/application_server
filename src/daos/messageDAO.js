@@ -1,3 +1,5 @@
+const { ForbiddenError } = require('../core/errors');
+
 class MessageDAO {
   // ============================================
   // Section Messages 테이블
@@ -92,29 +94,48 @@ class MessageDAO {
   // Attachments (attachments 테이블 — context_type='SECTION_MESSAGE')
   // ============================================
 
-  async insertAttachments(conn, messageId, binderId, uploaderId, attachments) {
+  // F-S9b(정정 — Architect 판정 "가") — 섹션 메시지 첨부는 presign/confirm으로 이미
+  // attachments 행이 만들어져 있다(media.md:334 — 클라가 message_id를 미리 생성해 presign의
+  // context_id로 넘긴다). 메시지 생성은 그 행을 "링크"만 한다 — 새 첨부를 만드는 게 아니다.
+  // 과금(402 한도 검사·applyStorageDelta)은 presign/confirm 시점에 이미 끝나 있으므로 여기서
+  // 다시 하면 이중 계상이다 — 이 함수는 UPDATE만 하고 저장 용량 회계에 관여하지 않는다.
+  //
+  // 소유·소속 검증을 WHERE 절에 직접 건다(원자적 — 별도 SELECT 왕복·TOCTOU 없음): 그 binder
+  // 소속이고, 호출자 본인이 업로드했고, status가 'ready' 또는 'processing'인 행만 링크
+  // 대상이다(media.md:306,321 — confirm 직후~Worker 파생물 생성 전인 'processing'도 정상
+  // 중간 상태. 거부 대상은 업로드 자체가 안 끝난 'pending'뿐). 아무 id나 넘겨서 남의 첨부·
+  // 다른 바인더의 첨부·아직 업로드 안 끝난(pending) 첨부를 자기 메시지에 붙이는 것을 막는다.
+  // 요청한 id 수와 실제로 링크된 행 수가 다르면(권한 없음·존재하지 않음·상태 불일치) 전체를
+  // 거부한다 — 일부만 조용히 누락시키지 않는다.
+  //
+  // 멱등: context_id가 이미 이 messageId인 행도 WHERE 조건을 통과해 그대로 재확정된다
+  // (media.md:334 "이미 동일 context_id로 연결된 첨부를 멱등 재확인" — 재전송 안전).
+  // context_id가 NULL인 행(사전 링크 없이 presign된 구형 클라 호환)은 여기서 처음 채워진다.
+  // 이미 "다른" context_id로 확정된 행(다른 메시지에 이미 링크됨)은 대상에서 제외된다.
+  async linkAttachments(conn, messageId, binderId, uploaderId, attachments) {
     if (!attachments || attachments.length === 0) return [];
 
-    const values = [];
-    const params = [];
-    let idx = 1;
+    const ids = [...new Set(attachments.map((a) => (typeof a === 'string' ? a : a.id)).filter(Boolean))];
+    if (ids.length === 0) return [];
 
-    for (const a of attachments) {
-      values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
-      params.push(
-        a.id, binderId, 'SECTION_MESSAGE', messageId,
-        a.storage_key, a.filename || null, a.file_size || null, a.content_type || null,
-        uploaderId, 'standard',
-      );
+    const result = await conn.query(
+      `UPDATE attachments
+       SET context_id = $2, updated_at = now()
+       WHERE id = ANY($1)
+         AND context_type = 'SECTION_MESSAGE'
+         AND binder_id = $3
+         AND uploader_id = $4
+         AND status IN ('ready', 'processing')
+         AND deleted_at IS NULL
+         AND (context_id IS NULL OR context_id = $2)
+       RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status`,
+      [ids, messageId, binderId, uploaderId]
+    );
+
+    if (result.rows.length !== ids.length) {
+      throw new ForbiddenError('첨부 파일에 접근할 권한이 없습니다', 'SECTION_ACCESS_DENIED');
     }
 
-    const query = `
-      INSERT INTO attachments
-        (id, binder_id, context_type, context_id, storage_key, filename, file_size, content_type, uploader_id, storage_class, status)
-      VALUES ${values.join(', ')}
-      RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status
-    `;
-    const result = await conn.query(query, params);
     return result.rows;
   }
 

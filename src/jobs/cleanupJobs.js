@@ -12,10 +12,13 @@
  *   4. event_participants, task_participants
  *   5. event_sections, task_sections
  *   6. event_instances, task_instances
- *   7. attachments (binder 삭제 전에 처리)
+ *   7. attachments (binder 삭제 전에 처리) — binder_storage_usage는 여기서 건드리지 않는다.
+ *      soft delete 시점에 이미 차감했다(F-S9). 하드 삭제에서 또 빼면 이중 차감이다.
  *   8. events, tasks, casts, posts
  *   9. sections, calendar_subscriptions, binder_members
  *  10. calendars
+ *  10-1. binder_storage_usage (binder FK, binder 삭제 전 정리 — F-S9) — 이 표에서 유일하게
+ *        deleted_at 자기 컬럼이 없는 집계 행이라 binders.deleted_at 기준으로 정리한다.
  *  11. binders
  * =========================================
  */
@@ -56,6 +59,9 @@ const STEPS = [
   { table: 'binder_members',         column: 'deleted_at' },
   // 10. 캘린더
   { table: 'calendars', column: 'deleted_at' },
+  // 10-1. 바인더 스토리지 사용량 집계 행 — 자기 deleted_at이 없어 일반 STEPS 패턴에 안 맞는다.
+  //       binders 하드 삭제 직전에 특수 처리한다(F-S9).
+  { custom: 'binder_storage_usage' },
   // 11. 바인더 (최후)
   { table: 'binders', column: 'deleted_at' },
 ];
@@ -64,20 +70,36 @@ async function runCleanup() {
   logger.info('Cleanup job started');
   let totalDeleted = 0;
 
-  for (const { table, column } of STEPS) {
+  for (const step of STEPS) {
+    const label = step.table || step.custom;
     try {
-      const result = await pool.query(
-        `DELETE FROM ${table}
-         WHERE ${column} IS NOT NULL
-           AND ${column} < NOW() - INTERVAL '30 days'`
-      );
-      const count = result.rowCount;
+      let count;
+      if (step.custom === 'binder_storage_usage') {
+        // binder_storage_usage는 soft delete 대상이 아닌 집계 행이다(자기 deleted_at 없음).
+        // 하드 삭제 예정 binder에 딸린 행만 정리한다 — 이중 차감과 무관(F-S9는 값을 만지지 않는다,
+        // 행 자체를 지운다).
+        const result = await pool.query(
+          `DELETE FROM binder_storage_usage
+           WHERE binder_id IN (
+             SELECT id FROM binders
+             WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - INTERVAL '30 days'
+           )`
+        );
+        count = result.rowCount;
+      } else {
+        const result = await pool.query(
+          `DELETE FROM ${step.table}
+           WHERE ${step.column} IS NOT NULL
+             AND ${step.column} < NOW() - INTERVAL '30 days'`
+        );
+        count = result.rowCount;
+      }
       if (count > 0) {
-        logger.info(`Cleanup: hard deleted from ${table}`, { count });
+        logger.info(`Cleanup: hard deleted from ${label}`, { count });
         totalDeleted += count;
       }
     } catch (err) {
-      logger.error(`Cleanup: failed on ${table}`, { error: err.message });
+      logger.error(`Cleanup: failed on ${label}`, { error: err.message });
     }
   }
 

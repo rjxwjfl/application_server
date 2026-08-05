@@ -37,6 +37,12 @@ class ConflictError extends AppError {
   }
 }
 
+class PaymentRequiredError extends AppError {
+  constructor(message = '결제가 필요합니다', errorCode = null) {
+    super(message, 402, errorCode);
+  }
+}
+
 class GoneError extends AppError {
   constructor(message = '더 이상 지원되지 않는 요청입니다', errorCode = null) {
     super(message, 410, errorCode);
@@ -56,6 +62,7 @@ module.exports = {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  PaymentRequiredError,
   GoneError,
   NotImplementedError,
 };

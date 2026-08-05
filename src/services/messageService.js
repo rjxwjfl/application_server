@@ -46,6 +46,9 @@ class MessageService {
 
     const messageId = data.id || generateUUID();
 
+    // F-S9b(정정) — 섹션 메시지 첨부는 presign/confirm으로 이미 만들어진 attachments 행을
+    // messageDAO.linkAttachments가 링크만 한다. 402 한도 검사·applyStorageDelta는
+    // presign/confirm 시점에 이미 끝나 있으므로 여기서 다시 하면 이중 계상이다 — 하지 않는다.
     const result = await withTransaction(async (client) => {
       const message = await MessageDAO.create(client, {
         id: messageId,
@@ -61,7 +64,7 @@ class MessageService {
       let mentions = [];
 
       if (data.attachments && data.attachments.length > 0) {
-        attachments = await MessageDAO.insertAttachments(client, messageId, section.binder_id, context.sender_id, data.attachments);
+        attachments = await MessageDAO.linkAttachments(client, messageId, section.binder_id, context.sender_id, data.attachments);
       }
       if (data.embeds && data.embeds.length > 0) {
         embeds = await MessageDAO.insertEmbeds(client, messageId, data.embeds);
