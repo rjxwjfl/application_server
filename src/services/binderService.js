@@ -383,9 +383,11 @@ class BinderService {
     );
   }
 
-  // verifyBoost는 RLY-20260806-010에서 이미 501 처리됐다 — 팀리드 지시대로 손대지 않는다
-  // (인가 미부착 상태로 남아 있으나 이번 배정 범위 밖).
+  // verifyBoost는 RLY-20260806-010에서 죽은 호출(TypeError)은 이미 501로 막았으나 인가는
+  // 그때도 붙지 않았다 — 형제 넷(getBoost 등)과 순서를 맞춘다(인가 → 501). 비멤버가 501
+  // 자체는 받아도 진입점 존재를 확인할 수 없어야 한다.
   async verifyBoost(binderId, userId, data) {
+    await requireBinderMember(pool, binderId, userId);
     throw new NotImplementedError(
       'Binder Boost 구매 검증 기능은 아직 구현되지 않았습니다',
       'BINDER_BOOST_VERIFY_NOT_IMPLEMENTED'

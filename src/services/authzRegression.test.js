@@ -316,7 +316,8 @@ async function run() {
   await expectStatus('Binder.transferBoost manager+는 인가 통과 후 501', () => BinderService.transferBoost('b1', 'master1', {}), 501);
   await expectStatus('Binder.cancelBoost 비멤버', () => BinderService.cancelBoost('b1', OUT), 403);
   await expectStatus('Binder.cancelBoost manager+는 인가 통과 후 501', () => BinderService.cancelBoost('b1', 'master1'), 501);
-  await expectStatus('Binder.verifyBoost 501(범위 밖 — 인가 미부착 그대로 유지)', () => BinderService.verifyBoost('b1', OUT, {}), 501);
+  await expectStatus('Binder.verifyBoost 비멤버는 501이 아니라 403', () => BinderService.verifyBoost('b1', OUT, {}), 403);
+  await expectStatus('Binder.verifyBoost 멤버는 인가 통과 후 501', () => BinderService.verifyBoost('b1', 'member1', {}), 501);
 
   // ============ 추가 2건 ============
   await expectStatus('Media.presign 비멤버(EVENT 업로드)', () => MediaService.presign({ context_type: 'EVENT', context_id: 'e1', binder_id: 'b1', filename: 'a.png', content_type: 'image/png' }, ctx(OUT)), 403);
