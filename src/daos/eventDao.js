@@ -134,6 +134,20 @@ class EventDAO {
     return result.rows[0] || null;
   }
 
+  // TaskDAO.findInstanceContext(taskDAO.js:226-234)와 동일 패턴 — 인스턴스가 실제로
+  // 해당 event_id에 속하는지 확인하면서 인가에 필요한 calendar_id/binder_id/author_id를 한 번에 확보한다.
+  async findInstanceContext(conn, eventId, instanceId) {
+    const result = await conn.query(`
+      SELECT ei.id, ei.deleted_at, e.calendar_id, e.author_id, c.binder_id
+      FROM event_instances ei
+      JOIN events e ON e.id = ei.event_id
+      JOIN calendars c ON c.id = e.calendar_id
+      WHERE ei.id = $1 AND ei.event_id = $2 AND ei.deleted_at IS NULL
+        AND e.deleted_at IS NULL AND c.deleted_at IS NULL
+    `, [instanceId, eventId]);
+    return result.rows[0] || null;
+  }
+
   async createEventInstance(conn, data) {
     const query = `
       INSERT INTO event_instances (
@@ -201,11 +215,13 @@ class EventDAO {
   }
 
   async addParticipant(conn, instanceId, userId, invitedBy) {
+    // state=1(invite) — 사후 초대(SC-event H22/액션 G)의 초기 상태. state=0(confirm)은
+    // 호스트 전용 상태이며 여기서 부여하지 않는다(createEvent 시 addParticipantRaw로만 명시 지정).
     const query = `
       INSERT INTO event_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
-      VALUES ($1, $2, $3, 0, now(), now())
+      VALUES ($1, $2, $3, 1, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET deleted_at = NULL, state = 0, updated_at = now()
+      SET deleted_at = NULL, state = 1, updated_at = now()
       RETURNING instance_id, user_id, inviter_id, state
     `;
     const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
