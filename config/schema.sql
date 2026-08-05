@@ -269,6 +269,11 @@ CREATE TABLE events (
   description TEXT,
   color       SMALLINT    NOT NULL DEFAULT 0,
   r_rule      TEXT,
+  -- timed 반복의 anchor TZID(IANA). RLY-20260806-019 — spec(docs/database/schema.md:374)의
+  -- anchor 6컬럼 중 이 컬럼만 단독 이식. 나머지 5개(start_kind·dtstart_date·dtstart_local·
+  -- day_span·duration_seconds)는 fork 전환 미착수라, ck_ev_anchor 배타 CHECK는 그 5개가
+  -- 함께 들어올 때 한 번에 건다 — 지금 걸면 "5개 모두 NULL"만 통과하는 무의미한 제약이 된다.
+  recurrence_timezone VARCHAR(64),
   locations   JSONB,
   forked_from UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -340,6 +345,9 @@ CREATE TABLE tasks (
   -- 0=low 1=medium 2=high 3=urgent
   priority    SMALLINT    NOT NULL DEFAULT 0,
   r_rule      TEXT,
+  -- timed 반복의 anchor TZID(IANA). RLY-20260806-019 — events.recurrence_timezone과 동일 사유·
+  -- 동일 단독 이식(위 주석 참조).
+  recurrence_timezone VARCHAR(64),
   locations   JSONB,
   forked_from UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
