@@ -6,17 +6,21 @@ const days = new Map([
   ['active-day', { id: 'active-day', calendar_id: 'active-calendar', name: '생일' }],
   ['outsider-day', { id: 'outsider-day', calendar_id: 'outsider-calendar', name: '기념일' }],
   ['former-member-day', { id: 'former-member-day', calendar_id: 'former-member-calendar', name: '기일' }],
+  ['deleted-binder-day', { id: 'deleted-binder-day', calendar_id: 'deleted-binder-calendar', name: '삭제된 바인더의 기념일' }],
+  ['missing-calendar-day', { id: 'missing-calendar-day', calendar_id: 'missing-calendar', name: '고아 기념일' }],
 ]);
 
 const calendars = new Map([
   ['active-calendar', { id: 'active-calendar', binder_id: 'active-binder' }],
   ['outsider-calendar', { id: 'outsider-calendar', binder_id: 'outsider-binder' }],
   ['former-member-calendar', { id: 'former-member-calendar', binder_id: 'former-member-binder' }],
+  ['deleted-binder-calendar', { id: 'deleted-binder-calendar', binder_id: 'deleted-binder' }],
 ]);
 
 const calls = {
   specialDayIds: [],
   calendarIds: [],
+  binderIds: [],
   memberships: [],
 };
 
@@ -39,6 +43,11 @@ const stubs = {
   },
   '../daos/binderDAO': {
     BinderDAO: {
+      async findById(_conn, binderId) {
+        calls.binderIds.push(binderId);
+        if (binderId === 'deleted-binder') return null;
+        return { id: binderId, deleted_at: null };
+      },
       async getMember(_conn, binderId, userId) {
         calls.memberships.push([binderId, userId]);
         if (binderId === 'active-binder' && userId === 'active-user') {
@@ -93,8 +102,34 @@ test('soft-deleted membership is not active membership', async () => {
   );
 });
 
+test('soft-deleted Binder returns 404 before membership lookup and no data', async () => {
+  const membershipCallCount = calls.memberships.length;
+
+  await assert.rejects(
+    SpecialDayService.getById('deleted-binder-day', 'former-active-member'),
+    (error) => error.statusCode === 404 && error.message === '기념일을 찾을 수 없습니다'
+  );
+
+  assert.equal(calls.memberships.length, membershipCallCount);
+  assert.equal(calls.binderIds.at(-1), 'deleted-binder');
+});
+
+test('missing or deleted Calendar preserves parent 404 before Binder lookup', async () => {
+  const binderCallCount = calls.binderIds.length;
+  const membershipCallCount = calls.memberships.length;
+
+  await assert.rejects(
+    SpecialDayService.getById('missing-calendar-day', 'active-user'),
+    (error) => error.statusCode === 404 && error.message === '기념일을 찾을 수 없습니다'
+  );
+
+  assert.equal(calls.binderIds.length, binderCallCount);
+  assert.equal(calls.memberships.length, membershipCallCount);
+});
+
 test('nonexistent SpecialDay preserves 404 before parent or membership lookup', async () => {
   const calendarCallCount = calls.calendarIds.length;
+  const binderCallCount = calls.binderIds.length;
   const membershipCallCount = calls.memberships.length;
 
   await assert.rejects(
@@ -103,6 +138,7 @@ test('nonexistent SpecialDay preserves 404 before parent or membership lookup', 
   );
 
   assert.equal(calls.calendarIds.length, calendarCallCount);
+  assert.equal(calls.binderIds.length, binderCallCount);
   assert.equal(calls.memberships.length, membershipCallCount);
 });
 
