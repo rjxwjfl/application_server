@@ -163,20 +163,11 @@ class MediaService {
       );
     }
 
-    // 4. F-S9 한도 재검사 — presign은 선언값으로 검사했으나 실제 값이 한도를 넘길 수 있다.
-    //    ⛔ 3안 중 판단 보류 상태 — 가장 보수적인 "거부 + 객체 삭제"로 임시 구현
-    //    (`.outbox/RLY-20260806-015-size-verify-report.md` §2 참조, User 결정 대기).
-    const [bytesUsed, limitBytes] = await Promise.all([
-      AttachmentDAO.getBytesUsed(pool, pending.binder_id),
-      AttachmentDAO.getStorageLimitBytes(pool, pending.binder_id),
-    ]);
-    if (bytesUsed + actualSize > limitBytes) {
-      await this._rejectAndCleanup(attachmentId, pending.storage_key);
-      throw new PaymentRequiredError(
-        '바인더 저장 공간이 부족합니다. Binder Boost로 용량을 늘려보세요.',
-        'BOOST_STORAGE_LIMIT'
-      );
-    }
+    // 4. F-S9 한도 — ±10% tolerance 이내(§2 판정 · Orchestrator 확정)면 한도를 근소 초과해도
+    //    거부하지 않는다. 위조 방어는 위 3단계(±10% 편차 검사)가 이미 담당한다 — 여기 남는 것은
+    //    압축률 차이 등 선의의 오차뿐이므로 이미 업로드된 사용자 데이터를 지우지 않는다.
+    //    실제 값으로 집계는 그대로 반영되며, 한도 초과 상태는 다음 presign이 402로 막아 자연 수렴한다
+    //    (media.md §4-4의 "위험한 파일 → 삭제" 선례는 여기 적용하지 않는다 — 정상 파일이 조금 큰 것뿐).
 
     // 5. 확정 — 실제 크기로 file_size를 고친 뒤 델타를 적용한다(선언값이 아니라 재확인된 값).
     return withTransaction(async (client) => {

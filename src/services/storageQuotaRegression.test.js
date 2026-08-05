@@ -463,24 +463,33 @@ async function run() {
   }
 
   {
+    // §2 Orchestrator 확정(2026-08-06): ±10% tolerance 이내면 한도를 근소 초과해도 거부하지 않는다 —
+    // 위조 방어는 편차 검사가 이미 담당하고, 남는 것은 선의의 오차뿐이므로 사용자 데이터를 지우지 않는다.
+    // 실제 값으로 집계하고 confirm은 통과시키며, 한도 초과 상태는 다음 presign이 402로 막아 자연 수렴한다.
     const key = 'attachments/b1/2026/08/over-limit.png';
     const declared = 100;
     const id = insertAttachment({ binder_id: 'b1', storage_key: key, file_size: declared, uploader_id: 'u1' });
     // presign 시점엔 통과했을 값(선언값 기준 딱 한도)이지만 실제 크기 반영 시 한도를 넘기도록 세팅.
     db.binder_storage_usage.b1.bytes_used = FREE_LIMIT - declared;
     gcsSizeOverrides[key] = declared + 5; // 실제는 5바이트 더 큼(±10% 이내) — 한도 초과로 전환
-    const before = db.binder_storage_usage.b1.bytes_used;
+
+    await check('실제 크기가 tolerance 이내면서 한도를 근소 초과해도 confirm은 통과 + 실제 값으로 집계', async () => {
+      await MediaService.confirm(id, ctx('u1'));
+      assert.strictEqual(db.attachments[id].status, 'ready', '근소 초과로 거부하지 않는다');
+      assert.strictEqual(db.attachments[id].file_size, declared + 5, '실제 값으로 file_size 갱신');
+      assert.strictEqual(db.binder_storage_usage.b1.bytes_used, FREE_LIMIT + 5, '실제 값 그대로 집계(한도 초과 상태 허용)');
+      assert.ok(!gcsDeleteLog.includes(key), '수용 경로이므로 GCS 객체를 삭제하지 않는다');
+    });
+
     await expectStatus(
-      '실제 크기는 tolerance 이내지만 bytesUsed+실제값이 한도를 넘으면 402(BOOST_STORAGE_LIMIT) 거부',
-      () => MediaService.confirm(id, ctx('u1')),
+      '한도 초과 상태가 남으면 다음 presign이 402로 막아 자연 수렴한다',
+      () => MediaService.presign(
+        { context_type: 'EVENT', context_id: 'e1', binder_id: 'b1', filename: 'next.png', content_type: 'image/png', file_size: 1 },
+        ctx('u1')
+      ),
       402,
       'BOOST_STORAGE_LIMIT'
     );
-    await check('위 거부 후 — attachment rejected + GCS 객체 삭제 + bytes_used 불변', async () => {
-      assert.strictEqual(db.attachments[id].status, 'rejected');
-      assert.ok(gcsDeleteLog.includes(key));
-      assert.strictEqual(db.binder_storage_usage.b1.bytes_used, before, '거부된 첨부는 회계에 반영되지 않아야 한다');
-    });
   }
 
   {
