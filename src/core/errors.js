@@ -43,6 +43,12 @@ class GoneError extends AppError {
   }
 }
 
+class NotImplementedError extends AppError {
+  constructor(message = '아직 지원되지 않는 기능입니다', errorCode = null) {
+    super(message, 501, errorCode);
+  }
+}
+
 module.exports = {
   AppError,
   BadRequestError,
@@ -51,4 +57,5 @@ module.exports = {
   NotFoundError,
   ConflictError,
   GoneError,
+  NotImplementedError,
 };

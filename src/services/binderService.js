@@ -4,7 +4,7 @@ const eventBus = require('../events/eventBus');
 const crypto = require('crypto');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { BadRequestError, NotFoundError, ForbiddenError, ConflictError } = require('../core/errors');
+const { BadRequestError, NotFoundError, ForbiddenError, ConflictError, NotImplementedError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class BinderService {
@@ -358,9 +358,14 @@ class BinderService {
   }
 
   async verifyBoost(binderId, userId, data) {
-    const { BillingDAO } = require('../daos/billingDAO');
-    const { BillingService } = require('./billingService');
-    return await BillingService.verifyBinderBoost(binderId, userId, data);
+    // Binder Boost 구매 검증(BillingService.verifyBinderBoost)은 미구현이다.
+    // binder_boosts DAO 계층 자체가 없어(getBinderBoost·transferBinderBoost·
+    // cancelBinderBoost도 동일하게 없는 메서드를 호출한다) 여기서 임의로 구현하지
+    // 않고 501로 명시 거부한다. 재구현은 별도 Task로 배정한다.
+    throw new NotImplementedError(
+      'Binder Boost 구매 검증 기능은 아직 구현되지 않았습니다',
+      'BINDER_BOOST_VERIFY_NOT_IMPLEMENTED'
+    );
   }
 
   async transferBoost(binderId, userId, data) {
