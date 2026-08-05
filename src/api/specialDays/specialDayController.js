@@ -4,7 +4,7 @@ const { BadRequestError } = require('../../core/errors');
 
 const specialDayController = {
   getById: asyncHandler(async (req, res) => {
-    const day = await SpecialDayService.getById(req.params.id);
+    const day = await SpecialDayService.getById(req.params.id, req.user_id);
     res.json({ success: true, data: day });
   }),
 
