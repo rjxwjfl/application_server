@@ -5,6 +5,7 @@ const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
 const pool = require('../../config/db');
 const { NotFoundError, ForbiddenError, BadRequestError } = require('../core/errors');
+const { requireBinderMemberByCalendarId } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class CalendarService {
@@ -93,6 +94,12 @@ class CalendarService {
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
     if (!cal.is_public) throw new ForbiddenError('공개 캘린더만 구독할 수 있습니다');
 
+    // AC-SEC-6(user_workflows.md §5-16): 이미 그 바인더의 멤버는 자기 바인더 캘린더를 구독할 수 없다.
+    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
+    if (member && !member.deleted_at) {
+      throw new BadRequestError('이미 속한 바인더의 캘린더는 구독할 수 없습니다');
+    }
+
     const sub = await CalendarDAO.subscribe(pool, context.sender_id, calId);
 
     eventBus.emit('sync', {
@@ -128,10 +135,12 @@ class CalendarService {
   }
 
   async getById(calId, userId) {
-    return await CalendarDAO.findById(pool, calId);
+    const { calendar } = await requireBinderMemberByCalendarId(pool, calId, userId);
+    return calendar;
   }
 
   async getCalendarSubscriptions(calId, userId) {
+    await requireBinderMemberByCalendarId(pool, calId, userId);
     return await CalendarDAO.getCalendarSubscriptions(pool, calId);
   }
 }

@@ -3,12 +3,12 @@ const asyncHandler = require('../../core/asyncHandler');
 
 const castController = {
   getCasts: asyncHandler(async (req, res) => {
-    const casts = await CastService.getCasts(req.params.calId, req.query);
+    const casts = await CastService.getCasts(req.params.calId, req.query, req.user_id);
     res.json({ success: true, data: casts });
   }),
 
   getCast: asyncHandler(async (req, res) => {
-    const cast = await CastService.getCast(req.params.castId);
+    const cast = await CastService.getCast(req.params.castId, req.user_id);
     res.json({ success: true, data: cast });
   }),
 
@@ -29,7 +29,7 @@ const castController = {
 
   // Comments
   getComments: asyncHandler(async (req, res) => {
-    const comments = await CastService.getComments(req.params.castId, req.query);
+    const comments = await CastService.getComments(req.params.castId, req.query, req.user_id);
     res.json({ success: true, data: comments });
   }),
 

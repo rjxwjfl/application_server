@@ -8,7 +8,7 @@ const postController = {
   }),
 
   getPost: asyncHandler(async (req, res) => {
-    const post = await PostService.getPost(req.params.postId);
+    const post = await PostService.getPost(req.params.postId, req.user_id);
     res.json({ success: true, data: post });
   }),
 
@@ -29,7 +29,7 @@ const postController = {
 
   // Comments
   getComments: asyncHandler(async (req, res) => {
-    const comments = await PostService.getComments(req.params.postId, req.query);
+    const comments = await PostService.getComments(req.params.postId, req.query, req.user_id);
     res.json({ success: true, data: comments });
   }),
 

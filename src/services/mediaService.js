@@ -1,8 +1,10 @@
 const { Storage } = require('@google-cloud/storage');
 const { generateUUID } = require('../utils/uuid');
 const pool = require('../../config/db');
-const { NotFoundError, ForbiddenError } = require('../core/errors');
+const { NotFoundError, ForbiddenError, BadRequestError } = require('../core/errors');
 const { SectionDAO } = require('../daos/sectionDAO');
+const { CastDAO } = require('../daos/castDAO');
+const { requireBinderMember, requireBinderMemberByCalendarId } = require('../core/authz');
 
 const storage = new Storage();
 
@@ -47,6 +49,11 @@ class MediaService {
       if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, context.sender_id))) {
         throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
       }
+    } else if (context_type !== 'avatar' && context_type !== 'cover') {
+      // EVENT · TASK · POST · CAST 등 binder 소속 첨부 업로드 — getSignedUrl과 같은 갭이었다.
+      // 업로드(쓰기)이므로 공개 캘린더라도 비멤버는 허용하지 않는다(공개 읽기 예외는 조회 전용).
+      if (!binder_id) throw new BadRequestError('binder_id required for attachment contexts');
+      await requireBinderMember(pool, binder_id, context.sender_id);
     }
 
     let storage_key;
@@ -54,7 +61,6 @@ class MediaService {
       // Avatar/cover use entity-centric path
       storage_key = `${context_type}s/${context_id}/${id}${filename ? '.' + filename.split('.').pop() : ''}`;
     } else {
-      if (!binder_id) throw new Error('binder_id required for attachment contexts');
       storage_key = buildStorageKey(binder_id, id, filename);
     }
 
@@ -101,17 +107,12 @@ class MediaService {
 
   async getSignedUrl(attachmentId, userId) {
     const result = await pool.query(
-      `SELECT id, storage_key, content_type, status, context_type, context_id FROM attachments WHERE id = $1`,
+      `SELECT id, storage_key, content_type, status, context_type, context_id, binder_id FROM attachments WHERE id = $1`,
       [attachmentId]
     );
     const attachment = result.rows[0];
     if (!attachment) throw new NotFoundError('첨부 파일을 찾을 수 없습니다');
-    if (attachment.context_type === 'SECTION_MESSAGE') {
-      const sectionId = await SectionDAO.findSectionIdByMessage(pool, attachment.context_id);
-      if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, userId))) {
-        throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
-      }
-    }
+    await this.authorizeAttachmentAccess(attachment, userId);
     if (attachment.status === 'hidden') throw new ForbiddenError('잠긴 파일입니다. Boost로 복원하세요.');
     if (attachment.status === 'rejected') throw new ForbiddenError('접근할 수 없는 파일입니다');
 
@@ -126,6 +127,33 @@ class MediaService {
     });
 
     return { url, expires_in: ttl };
+  }
+
+  /**
+   * getSignedUrl의 context_type 다형 분기 — SECTION_MESSAGE만 검증하던 것을 EVENT·TASK·POST·CAST로 확장.
+   * presign의 동일 분기와 짝이다(§4 helper로 함께 닫힘). 새 추상화가 아니라 기존 if/else에 case 추가.
+   */
+  async authorizeAttachmentAccess(attachment, userId) {
+    const { context_type, context_id, binder_id } = attachment;
+
+    if (context_type === 'SECTION_MESSAGE') {
+      const sectionId = await SectionDAO.findSectionIdByMessage(pool, context_id);
+      if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, userId))) {
+        throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
+      }
+      return;
+    }
+
+    if (context_type === 'CAST') {
+      // 결정 5: 바인더 멤버십 OR 캘린더 is_public — castService.getCast와 동일 게이트.
+      const cast = await CastDAO.findById(pool, context_id);
+      if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
+      await requireBinderMemberByCalendarId(pool, cast.calendar_id, userId, { allowPublicRead: true });
+      return;
+    }
+
+    // EVENT · TASK · POST 등 나머지 binder 소속 컨텍스트 — 업로드 시점에 저장된 binder_id로 검증한다.
+    await requireBinderMember(pool, binder_id, userId);
   }
 
   async deleteAttachment(attachmentId, userId) {
