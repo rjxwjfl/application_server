@@ -224,83 +224,73 @@ class EventService {
     return result;
   }
 
+  // 참가자 상태 전이 — 본인 RSVP + 승인 권한자(author 또는 role<=1)의 apply 승인/거부·
+  // rejected 복원을 단일 엔드포인트로 처리 (api.md PATCH .../participants/:userId, SC-event §8-1,
+  // domain.md §3-8 — 2026-07-26 Gate). 구 rejectApply/restoreRejected는 여기로 흡수 후 삭제.
   async updateParticipantState(instance_id, user_id, updateData, context) {
-    if (user_id !== context.sender_id) throw new ForbiddenError('본인 상태만 변경할 수 있습니다');
     const { state } = updateData;
     if (state === undefined) throw new BadRequestError('state가 필요합니다');
-    // confirm(0) is immutable host state; rejected(6) is host-only
-    if (state === 0) throw new ForbiddenError('confirm 상태는 호스트 전용이며 변경할 수 없습니다');
-    if (state === 6) throw new ForbiddenError('rejected 상태는 호스트만 설정할 수 있습니다');
+    if (state === 0) throw new ForbiddenError('confirm 상태는 어떤 주체도 변경할 수 없습니다');
 
-    await withTransaction(async (client) => {
+    const isSelf = user_id === context.sender_id;
+
+    // §3-8 전이표: 본인 경로와 승인 권한자 경로의 허용 전이가 다르다.
+    const SELF_TRANSITIONS = {
+      1: [3, 4, 5], // invite -> accept/tentative/decline
+      3: [4, 5],    // accept -> tentative/decline
+      4: [3, 5],    // tentative -> accept/decline
+      5: [2],       // decline -> apply (재신청)
+    };
+    const APPROVER_TRANSITIONS = {
+      2: [3, 6], // apply -> accept(승인)/rejected(거부)
+      6: [3, 4], // rejected -> accept/tentative (복원)
+    };
+
+    const { binder_id } = await withTransaction(async (client) => {
+      const instance = await EventDAO.findInstanceById(client, instance_id);
+      if (!instance) throw new NotFoundError('이벤트 인스턴스를 찾을 수 없습니다');
+      const event = await EventDAO.findById(client, instance.event_id);
+      if (!event) throw new NotFoundError('이벤트를 찾을 수 없습니다');
+      const calendar = await CalendarDAO.findById(client, event.calendar_id);
+      if (!calendar) throw new NotFoundError('캘린더를 찾을 수 없습니다');
+
       const participant = await EventDAO.findParticipant(client, instance_id, user_id);
       if (!participant) throw new NotFoundError('참가자 정보를 찾을 수 없습니다');
-      if (participant.state === 0) throw new ForbiddenError('호스트 상태는 변경할 수 없습니다');
-      if (participant.state === 6) throw new ForbiddenError('호스트에 의해 거부된 신청은 변경할 수 없습니다');
+      if (participant.state === 0) throw new ForbiddenError('confirm 상태는 어떤 주체도 변경할 수 없습니다');
+
+      if (isSelf) {
+        if (!SELF_TRANSITIONS[participant.state]?.includes(state)) {
+          throw new ForbiddenError('허용되지 않은 상태 전이입니다');
+        }
+      } else {
+        if (!APPROVER_TRANSITIONS[participant.state]?.includes(state)) {
+          throw new ForbiddenError('허용되지 않은 상태 전이입니다');
+        }
+        const isAuthor = event.author_id === context.sender_id;
+        let isApprover = isAuthor;
+        if (!isApprover) {
+          const member = await BinderDAO.getMember(client, calendar.binder_id, context.sender_id);
+          isApprover = !!member && !member.deleted_at && member.role <= 1;
+        }
+        if (!isApprover) {
+          throw new ForbiddenError('신청 승인·거부·복원은 이벤트 작성자 또는 관리자(master·manager)만 가능합니다');
+        }
+      }
+
       await EventDAO.updateParticipantState(client, instance_id, user_id, state);
-    });
-
-    if (updateData.binder_id) {
-      eventBus.emit('sync', {
-        binder_id: updateData.binder_id,
-        sender_id: context.sender_id,
-        device_uuid: context.device_uuid,
-        action: ActionType.RSVP_UPDATE,
-        target_type: TargetType.EVENT_PARTICIPANT,
-        target_id: instance_id,
-      });
-    }
-  }
-
-  async rejectApply(instance_id, targetUserId, binderId, context) {
-    await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, context.sender_id);
-      if (!requester || requester.role > 1) throw new ForbiddenError('권한이 없습니다');
-
-      const participant = await EventDAO.findParticipant(client, instance_id, targetUserId);
-      if (!participant) throw new NotFoundError('참가자를 찾을 수 없습니다');
-      if (participant.state === 0) throw new ForbiddenError('호스트는 거부할 수 없습니다');
-      if (participant.state !== 2) {
-        throw new BadRequestError('신청(apply) 상태의 참가자만 거부할 수 있습니다');
-      }
-
-      await EventDAO.updateParticipantState(client, instance_id, targetUserId, 6);
+      return { binder_id: calendar.binder_id };
     });
 
     eventBus.emit('sync', {
-      binder_id: binderId,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
-      action: ActionType.REJECT,
+      action: state === 6 ? ActionType.REJECT : ActionType.RSVP_UPDATE,
       target_type: TargetType.EVENT_PARTICIPANT,
       target_id: instance_id,
-    });
-  }
-
-  async restoreRejected(instance_id, targetUserId, newState, binderId, context) {
-    if (newState !== 3 && newState !== 4) {
-      throw new BadRequestError('accept(3) 또는 tentative(4)로만 복원할 수 있습니다');
-    }
-
-    await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, context.sender_id);
-      if (!requester || requester.role > 1) throw new ForbiddenError('권한이 없습니다');
-
-      const participant = await EventDAO.findParticipant(client, instance_id, targetUserId);
-      if (!participant || participant.state !== 6) {
-        throw new BadRequestError('rejected 상태의 참가자만 복원할 수 있습니다');
-      }
-
-      await EventDAO.updateParticipantState(client, instance_id, targetUserId, newState);
-    });
-
-    eventBus.emit('sync', {
-      binder_id: binderId,
-      sender_id: context.sender_id,
-      device_uuid: context.device_uuid,
-      action: ActionType.RSVP_UPDATE,
-      target_type: TargetType.EVENT_PARTICIPANT,
-      target_id: instance_id,
+      metadata: state === 6
+        ? { target_user_id: user_id, new_state: 6 }
+        : { new_state: state },
     });
   }
 

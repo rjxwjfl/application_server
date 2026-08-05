@@ -6,6 +6,9 @@ const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 eventBus.on('sync', (data) => {
   if (!data.binder_id || !data.action || !data.target_type || !data.target_id) return;
+  // Task 참여자 상태 변경(STATE_UPDATE)은 audit_log만 기록한다 — activity_feed·알림 생성 X
+  // (스팸 방지, TypeDefinitions.md §6:308 · domain.md §3-5(10):193). auditHandler.js는 통과.
+  if (data.action === ActionType.STATE_UPDATE) return;
 
   ActivityFeedDAO.insert(pool, {
     binder_id: data.binder_id,

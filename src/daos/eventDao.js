@@ -212,6 +212,16 @@ class EventDAO {
     return result.rows[0];
   }
 
+  async findParticipant(conn, instanceId, userId) {
+    const query = `
+      SELECT instance_id, user_id, state, memo, created_at, updated_at, deleted_at
+      FROM event_participants
+      WHERE instance_id = $1 AND user_id = $2 AND deleted_at IS NULL
+    `;
+    const result = await conn.query(query, [instanceId, userId]);
+    return result.rows[0] || null;
+  }
+
   async updateParticipantState(conn, instanceId, userId, state) {
     const query = `
       UPDATE event_participants

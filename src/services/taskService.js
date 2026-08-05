@@ -140,7 +140,10 @@ class TaskService {
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
       return { participant, binder_id: instance.binder_id };
     });
-    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.CREATE);
+    this.emitParticipantSync(
+      result.binder_id, instanceId, context, ActionType.ASSIGN,
+      { target_user_id: data.user_id }
+    );
     return result.participant;
   }
 
@@ -155,7 +158,7 @@ class TaskService {
       const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
       if (userId !== context.sender_id)
-        throw new ForbiddenError('타인 상태 변경 역할 기준이 확정되지 않았습니다');
+        throw new ForbiddenError('본인 상태만 변경할 수 있습니다');
       const participant = await TaskDAO.findParticipant(client, instanceId, userId);
       if (!participant || participant.deleted_at)
         throw new NotFoundError('활성 참여자를 찾을 수 없습니다', 'TASK_PARTICIPANT_NOT_FOUND');
@@ -167,7 +170,10 @@ class TaskService {
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
       return { participant: updated, binder_id: instance.binder_id };
     });
-    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.UPDATE);
+    this.emitParticipantSync(
+      result.binder_id, instanceId, context, ActionType.STATE_UPDATE,
+      { new_state: data.state }
+    );
     return result.participant;
   }
 
@@ -186,11 +192,11 @@ class TaskService {
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
       return { participant: removed, binder_id: instance.binder_id };
     });
-    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.DELETE);
+    this.emitParticipantSync(result.binder_id, instanceId, context, ActionType.UNASSIGN);
     return result.participant;
   }
 
-  emitParticipantSync(binderId, instanceId, context, action) {
+  emitParticipantSync(binderId, instanceId, context, action, metadata) {
     eventBus.emit('sync', {
       binder_id: binderId,
       sender_id: context.sender_id,
@@ -198,6 +204,7 @@ class TaskService {
       action,
       target_type: TargetType.TASK_PARTICIPANT,
       target_id: instanceId,
+      ...(metadata ? { metadata } : {}),
     });
   }
 }
