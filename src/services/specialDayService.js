@@ -9,9 +9,17 @@ const { NotFoundError, ForbiddenError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class SpecialDayService {
-  async getById(id) {
+  async getById(id, userId) {
     const day = await SpecialDayDAO.findById(pool, id);
     if (!day) throw new NotFoundError('기념일을 찾을 수 없습니다');
+
+    const cal = await CalendarDAO.findById(pool, day.calendar_id);
+    if (!cal) throw new NotFoundError('기념일을 찾을 수 없습니다');
+
+    const member = await BinderDAO.getMember(pool, cal.binder_id, userId);
+    if (!member || member.deleted_at) {
+      throw new ForbiddenError('바인더 멤버만 기념일을 조회할 수 있습니다');
+    }
     return day;
   }
 
