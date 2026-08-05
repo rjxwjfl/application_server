@@ -29,7 +29,8 @@ class TaskService {
   }
 
   async createTask(taskData, context) {
-    await requireBinderMemberByCalendarId(pool, taskData.calendar_id, context.sender_id);
+    // 반환된 calendar.binder_id를 emit에 재사용한다(A-NEW-13) — taskData.binder_id는 클라 payload라 신뢰할 수 없다.
+    const { calendar: authzCalendar } = await requireBinderMemberByCalendarId(pool, taskData.calendar_id, context.sender_id);
 
     const taskId = taskData.id || generateUUID();
 
@@ -42,7 +43,7 @@ class TaskService {
     });
 
     eventBus.emit('sync', {
-      binder_id: taskData.binder_id,
+      binder_id: authzCalendar.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE, target_type: TargetType.TASK, target_id: task.id,

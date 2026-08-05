@@ -34,7 +34,8 @@ class EventService {
 
   async createEvent(data, context) {
     // 바인더 멤버십 검증 — data.calendar_id는 events.calendar_id로 그대로 쓰이는 클라이언트 payload다.
-    await requireBinderMemberByCalendarId(pool, data.calendar_id, context.sender_id);
+    // 반환된 calendar.binder_id를 emit에 재사용한다(A-NEW-13) — data.binder_id는 클라 payload라 신뢰할 수 없다.
+    const { calendar: authzCalendar } = await requireBinderMemberByCalendarId(pool, data.calendar_id, context.sender_id);
 
     const event = await withTransaction(async (client) => {
       if (data.calendar) {
@@ -70,7 +71,7 @@ class EventService {
     });
 
     eventBus.emit('sync', {
-      binder_id: data.binder_id,
+      binder_id: authzCalendar.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,
@@ -93,7 +94,7 @@ class EventService {
 
     if (participants.size > 0) {
       eventBus.emit('alert', {
-        binder_id: data.binder_id,
+        binder_id: authzCalendar.binder_id,
         sender_id: context.sender_id,
         type: 'assignment',
         title: data.binder_name || '새로운 일정',

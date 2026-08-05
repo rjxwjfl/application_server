@@ -41,7 +41,7 @@ class PostService {
     });
 
     eventBus.emit('sync', {
-      binder_id: data.binder_id,
+      binder_id: member.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE,

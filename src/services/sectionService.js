@@ -24,7 +24,7 @@ class SectionService {
       if (![0, 1].includes(scope)) throw new BadRequestError('access_scope는 0 또는 1이어야 합니다');
       const created = await SectionDAO.create(client, {
         id: data.id || generateUUID(),
-        binder_id: data.binder_id,
+        binder_id: actor.binder_id,
         title: data.title,
         access_scope: scope,
       });
@@ -33,7 +33,7 @@ class SectionService {
     });
 
     eventBus.emit('sync', {
-      binder_id: data.binder_id,
+      binder_id: section.binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE, target_type: TargetType.SECTION, target_id: section.id,

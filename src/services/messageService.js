@@ -105,16 +105,19 @@ class MessageService {
   }
 
   async updateMessage(messageId, data, context) {
-    const { message, result } = await withTransaction(async (client) => {
+    // message는 section_messages 행이라 binder_id 컬럼이 없다 — section을 거쳐 도출한다
+    // (deleteMessage와 동일 패턴). data.binder_id는 클라 payload라 신뢰할 수 없다.
+    const { binder_id, result } = await withTransaction(async (client) => {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
       if (message.user_id !== context.sender_id) throw new ForbiddenError('본인의 메시지만 수정할 수 있습니다');
       const result = await MessageDAO.update(client, messageId, data);
-      return { message, result };
+      const section = await SectionDAO.findById(client, message.section_id);
+      return { binder_id: section ? section.binder_id : null, result };
     });
 
     eventBus.emit('sync', {
-      binder_id: data.binder_id || message.binder_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.SECTION_MESSAGE, target_id: messageId,
