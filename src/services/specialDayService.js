@@ -6,12 +6,14 @@ const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
 const pool = require('../../config/db');
 const { NotFoundError, ForbiddenError } = require('../core/errors');
+const { requireBinderMemberByCalendarId } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class SpecialDayService {
-  async getById(id) {
+  async getById(id, userId) {
     const day = await SpecialDayDAO.findById(pool, id);
     if (!day) throw new NotFoundError('기념일을 찾을 수 없습니다');
+    await requireBinderMemberByCalendarId(pool, day.calendar_id, userId);
     return day;
   }
 
