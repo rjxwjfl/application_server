@@ -50,6 +50,7 @@ db.binder_settings.b1 = { binder_id: 'b1', is_public: false, is_searchable: fals
 setMember('b1', 'author1', 3);
 setMember('b1', 'editor1', 2);
 setMember('b1', 'member1', 3);
+setMember('b1', 'master1', 0);
 
 db.binders.b2 = { id: 'b2', name: 'PublicBinder', description: null, image_url: null, thumbnail_url: null, member_count: 1, last_activity_at: NOW, created_at: NOW, updated_at: NOW, deleted_at: null };
 db.binder_settings.b2 = { binder_id: 'b2', is_public: true, is_searchable: true, require_approval: false, updated_at: NOW };
@@ -307,7 +308,15 @@ async function run() {
   await expectOk('Binder.getBinder 비멤버(공개 바인더 preview)', () => BinderService.getBinder('b2', OUT));
   await expectStatus('Binder.getBinder 비멤버(비공개 바인더)', () => BinderService.getBinder('b1', OUT), 403);
   await expectStatus('Binder.getBoost 비멤버', () => BinderService.getBoost('b1', OUT), 403);
+  await expectStatus('Binder.getBoost 멤버는 인가 통과 후 501(재구현 범위 밖)', () => BinderService.getBoost('b1', 'member1'), 501);
   await expectStatus('Binder.checkBoost 비멤버', () => BinderService.checkBoost('b1', OUT), 403);
+  await expectStatus('Binder.checkBoost 멤버는 인가 통과 후 501', () => BinderService.checkBoost('b1', 'member1'), 501);
+  await expectStatus('Binder.transferBoost 비멤버', () => BinderService.transferBoost('b1', OUT, {}), 403);
+  await expectStatus('Binder.transferBoost 멤버지만 manager 미만', () => BinderService.transferBoost('b1', 'editor1', {}), 403);
+  await expectStatus('Binder.transferBoost manager+는 인가 통과 후 501', () => BinderService.transferBoost('b1', 'master1', {}), 501);
+  await expectStatus('Binder.cancelBoost 비멤버', () => BinderService.cancelBoost('b1', OUT), 403);
+  await expectStatus('Binder.cancelBoost manager+는 인가 통과 후 501', () => BinderService.cancelBoost('b1', 'master1'), 501);
+  await expectStatus('Binder.verifyBoost 501(범위 밖 — 인가 미부착 그대로 유지)', () => BinderService.verifyBoost('b1', OUT, {}), 501);
 
   // ============ 추가 2건 ============
   await expectStatus('Media.presign 비멤버(EVENT 업로드)', () => MediaService.presign({ context_type: 'EVENT', context_id: 'e1', binder_id: 'b1', filename: 'a.png', content_type: 'image/png' }, ctx(OUT)), 403);
