@@ -101,10 +101,12 @@ class MessageDAO {
   // 다시 하면 이중 계상이다 — 이 함수는 UPDATE만 하고 저장 용량 회계에 관여하지 않는다.
   //
   // 소유·소속 검증을 WHERE 절에 직접 건다(원자적 — 별도 SELECT 왕복·TOCTOU 없음): 그 binder
-  // 소속이고, 호출자 본인이 업로드했고, status='ready'인 행만 링크 대상이다. 아무 id나 넘겨서
-  // 남의 첨부·다른 바인더의 첨부·아직 업로드 안 끝난(pending) 첨부를 자기 메시지에 붙이는
-  // 것을 막는다. 요청한 id 수와 실제로 링크된 행 수가 다르면(권한 없음·존재하지 않음·상태
-  // 불일치) 전체를 거부한다 — 일부만 조용히 누락시키지 않는다.
+  // 소속이고, 호출자 본인이 업로드했고, status가 'ready' 또는 'processing'인 행만 링크
+  // 대상이다(media.md:306,321 — confirm 직후~Worker 파생물 생성 전인 'processing'도 정상
+  // 중간 상태. 거부 대상은 업로드 자체가 안 끝난 'pending'뿐). 아무 id나 넘겨서 남의 첨부·
+  // 다른 바인더의 첨부·아직 업로드 안 끝난(pending) 첨부를 자기 메시지에 붙이는 것을 막는다.
+  // 요청한 id 수와 실제로 링크된 행 수가 다르면(권한 없음·존재하지 않음·상태 불일치) 전체를
+  // 거부한다 — 일부만 조용히 누락시키지 않는다.
   //
   // 멱등: context_id가 이미 이 messageId인 행도 WHERE 조건을 통과해 그대로 재확정된다
   // (media.md:334 "이미 동일 context_id로 연결된 첨부를 멱등 재확인" — 재전송 안전).
@@ -123,7 +125,7 @@ class MessageDAO {
          AND context_type = 'SECTION_MESSAGE'
          AND binder_id = $3
          AND uploader_id = $4
-         AND status = 'ready'
+         AND status IN ('ready', 'processing')
          AND deleted_at IS NULL
          AND (context_id IS NULL OR context_id = $2)
        RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status`,

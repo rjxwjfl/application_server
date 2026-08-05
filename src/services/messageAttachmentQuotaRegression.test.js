@@ -44,6 +44,8 @@ db.attachments['att-other-user'] = { id: 'att-other-user', binder_id: 'b1', cont
 db.attachments['att-other-binder'] = { id: 'att-other-binder', binder_id: 'b2', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'ready', filename: 'f4.png', file_size: 100, content_type: 'image/png', storage_key: 'k4', deleted_at: null };
 db.attachments['att-linked-elsewhere'] = { id: 'att-linked-elsewhere', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: 'm-some-other-message', uploader_id: 'u1', status: 'ready', filename: 'f5.png', file_size: 100, content_type: 'image/png', storage_key: 'k5', deleted_at: null };
 db.attachments['att-retry'] = { id: 'att-retry', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'ready', filename: 'f6.png', file_size: 100, content_type: 'image/png', storage_key: 'k6', deleted_at: null };
+// media.md:306,321 — confirm 직후~Worker 파생물 생성 전인 'processing'도 정상 중간 상태(거부 대상 아님).
+db.attachments['att-processing'] = { id: 'att-processing', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'processing', filename: 'f8.mp4', file_size: 100, content_type: 'video/mp4', storage_key: 'k8', deleted_at: null };
 
 const queryLog = [];
 
@@ -101,7 +103,7 @@ async function mockQuery(sql, params = []) {
       if (att.context_type !== 'SECTION_MESSAGE') continue;
       if (att.binder_id !== binderId) continue;
       if (att.uploader_id !== uploaderId) continue;
-      if (att.status !== 'ready') continue;
+      if (att.status !== 'ready' && att.status !== 'processing') continue;
       if (!(att.context_id === null || att.context_id === messageId)) continue;
       att.context_id = messageId;
       matched.push({ id: att.id, message_id: att.context_id, filename: att.filename, file_size: att.file_size, content_type: att.content_type, storage_key: att.storage_key, status: att.status });
@@ -227,6 +229,16 @@ async function run() {
     403,
     'SECTION_ACCESS_DENIED'
   );
+
+  // ═══════════════════════════════════════════════════════════════
+  // AC-6b(rework) — status='processing'(confirm 직후~Worker 파생물 생성 전) 첨부는 정상 링크된다
+  // media.md:306,321 — 거부 대상은 업로드 자체가 안 끝난 'pending'뿐, 'processing'은 정상 경로.
+  // ═══════════════════════════════════════════════════════════════
+  await check("AC-6b — status='processing' 첨부는 정상 링크(거부 아님)", async () => {
+    const rows = await MessageDAO.linkAttachments(mockDb, 'm-processing', 'b1', 'u1', [{ id: 'att-processing' }]);
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(db.attachments['att-processing'].context_id, 'm-processing');
+  });
 
   // ═══════════════════════════════════════════════════════════════
   // AC-8 — 배열 중 하나라도 권한 없으면 전체 거부(일부만 조용히 누락 X) + partial write 없음
