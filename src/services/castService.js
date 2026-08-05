@@ -25,11 +25,21 @@ class CastService {
     const castsData = data.casts;
     if (!castsData || !castsData.length) throw new ForbiddenError('casts 배열이 필요합니다');
 
-    const cal = await CalendarDAO.findById(pool, castsData[0].calendar_id);
-    if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
+    const binderIdByCalendarId = new Map();
+    const calendarIds = [...new Set(castsData.map((castData) => castData.calendar_id))];
 
-    const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
-    if (!member || member.deleted_at) throw new ForbiddenError('권한이 없습니다');
+    for (const calendarId of calendarIds) {
+      const cal = await CalendarDAO.findById(pool, calendarId);
+      if (!cal || cal.deleted_at) throw new NotFoundError('캘린더를 찾을 수 없습니다');
+
+      const binder = await BinderDAO.findById(pool, cal.binder_id);
+      if (!binder || binder.deleted_at) throw new NotFoundError('바인더를 찾을 수 없습니다');
+
+      const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
+      if (!member || member.deleted_at) throw new ForbiddenError('권한이 없습니다');
+
+      binderIdByCalendarId.set(calendarId, cal.binder_id);
+    }
 
     const created = await withTransaction(async (client) => {
       const results = [];
@@ -46,7 +56,7 @@ class CastService {
 
     for (const cast of created) {
       eventBus.emit('sync', {
-        binder_id: cal.binder_id,
+        binder_id: binderIdByCalendarId.get(cast.calendar_id),
         sender_id: context.sender_id,
         device_uuid: context.device_uuid,
         action: ActionType.CREATE,
