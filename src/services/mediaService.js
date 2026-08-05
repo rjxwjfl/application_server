@@ -266,8 +266,13 @@ class MediaService {
 
   async deleteAttachment(attachmentId, userId) {
     // F-S9 — 첨부 행 soft delete와 binder_storage_usage 차감을 같은 트랜잭션에서 원자 갱신한다.
-    // 네트워크 I/O(GCS 삭제)는 트랜잭션 밖에서 한다(DB 트랜잭션 안에서 외부 호출을 기다리지 않는다).
-    const attachment = await withTransaction(async (client) => {
+    // 결정 61(F-S6 §3) — GCS 객체 삭제는 여기서 하지 않는다. DB만 만진다.
+    // 이유 둘: (1) 30일 복원 유예는 실물 파일이 남아 있어야 의미가 있다 — soft delete 직후 즉시
+    // 하드 삭제하면 DB 행만 유예 기간을 흉내내고 파일은 이미 없다. (2) storage_key를 다른 활성
+    // 행이 공유할 수 있어(첨부 복제, F-S6 §2) 이 시점의 단일 행 판단만으로는 물리 객체를 안전하게
+    // 지워도 되는지 알 수 없다 — 판정은 cleanupJobs가 하드 삭제 시점에 가드(같은 storage_key를
+    // 가리키는 다른 활성 행이 없음)를 걸고 수행한다.
+    await withTransaction(async (client) => {
       const result = await client.query(
         `UPDATE attachments
          SET deleted_at = now(), updated_at = now()
@@ -289,17 +294,6 @@ class MediaService {
 
       return att;
     });
-
-    // ⚠️ storage_key를 다른 활성 행이 공유하고 있으면 여기서 물리 객체를 지우는 순간 그 행의
-    // 파일도 함께 사라진다(F-S6 결정 61이 이 호출 자체를 하드 삭제 시점으로 옮길 때까지 미해결).
-    // F-S6이 아직 착수되지 않아 현재는 복제 자체가 없으므로 이 경합은 아직 발생하지 않는다 —
-    // F-S6 착수 시 AC-S6-3(이 네트워크 호출 제거)이 먼저 반영되어야 안전하다.
-    try {
-      const bucket = storage.bucket(getMediaBucket());
-      await bucket.file(attachment.storage_key).delete({ ignoreNotFound: true });
-    } catch {
-      // GCS 삭제 실패는 로그만 남기고 200 반환 (DB 레코드는 이미 soft-delete)
-    }
   }
 
   /**

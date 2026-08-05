@@ -136,11 +136,20 @@ async function mockQuery(sql, params = []) {
     return { rows: [{ id: att.id, binder_id: att.binder_id, storage_key: att.storage_key, file_size: att.file_size }] };
   }
 
-  // AttachmentDAO.applyStorageDelta — 경계 판정
-  if (s.includes('AS is_boundary')) {
+  // AttachmentDAO.applyStorageDelta — 경계 판정(단일 행, binder_id 스코프)
+  if (s.includes('AS is_boundary') && s.includes('binder_id = $1')) {
     const [binderId, storageKey, excludeId] = params;
     const isOther = Object.values(db.attachments).some(
       (a) => a.binder_id === binderId && a.storage_key === storageKey && !a.deleted_at && a.id !== excludeId
+    );
+    return { rows: [{ is_boundary: !isOther }] };
+  }
+
+  // cleanupJobs.cleanupAttachments — storage_key 그룹 가드(F-S6 §3 결정 61, RLY-20260806-017)
+  if (s.includes('AS is_boundary') && s.includes('id <> ALL(')) {
+    const [storageKey, ids] = params;
+    const isOther = Object.values(db.attachments).some(
+      (a) => a.storage_key === storageKey && !a.deleted_at && !ids.includes(a.id)
     );
     return { rows: [{ is_boundary: !isOther }] };
   }
@@ -169,11 +178,23 @@ async function mockQuery(sql, params = []) {
     return { rows: [{ tier }] };
   }
 
-  // cleanupJobs — attachments 하드 삭제 (F-S9 관점: bytes_used를 절대 건드리지 않아야 한다)
-  if (s.startsWith('DELETE FROM attachments WHERE deleted_at IS NOT NULL')) {
+  // cleanupJobs.cleanupAttachments — 30일 경과 후보 SELECT (F-S6 §3 결정 61, RLY-20260806-017:
+  // GCS 삭제 시점이 여기로 옮겨왔다 — 이 스위트 관점에서는 여전히 bytes_used를 절대 건드리지
+  // 않아야 한다는 것만 확인하면 되고, GCS 호출 자체의 세부 검증은 attachmentHardDeleteRegression이 한다)
+  if (s.startsWith('SELECT id, storage_key FROM attachments WHERE deleted_at IS NOT NULL')) {
+    const rows = Object.values(db.attachments)
+      .filter((att) => att.deleted_at && new Date(att.deleted_at).getTime() < NOW.getTime() - 30 * DAY)
+      .map((att) => ({ id: att.id, storage_key: att.storage_key }))
+      .sort((a, b) => (a.storage_key || '').localeCompare(b.storage_key || ''));
+    return { rows };
+  }
+
+  // cleanupJobs.cleanupAttachments — 그룹 단위 하드 삭제
+  if (s.startsWith('DELETE FROM attachments WHERE id = ANY($1)')) {
+    const [ids] = params;
     let count = 0;
-    for (const [id, att] of Object.entries(db.attachments)) {
-      if (att.deleted_at && new Date(att.deleted_at).getTime() < NOW.getTime() - 30 * DAY) {
+    for (const id of ids) {
+      if (db.attachments[id]) {
         delete db.attachments[id];
         count += 1;
       }
