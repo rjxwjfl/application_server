@@ -25,8 +25,10 @@ class SectionDAO {
            SELECT 1 FROM section_members sm
            WHERE sm.section_id = s.id AND sm.user_id = $2 AND sm.deleted_at IS NULL
          ) OR EXISTS (
+           -- role BETWEEN 0 AND 1(master·manager) — role=-1(RLY-20260806-018 join-request pending
+           -- sentinel)이 "<= 1" 비교를 통과해 대기 신청자가 전 섹션을 보게 되는 것을 막는다.
            SELECT 1 FROM binder_members bm WHERE bm.binder_id = s.binder_id AND bm.user_id = $2
-             AND bm.role <= 1 AND bm.deleted_at IS NULL
+             AND bm.role BETWEEN 0 AND 1 AND bm.deleted_at IS NULL
          )) ORDER BY s.is_default DESC, s.created_at`, [binderId, userId]
     );
     return rows;
@@ -54,8 +56,12 @@ class SectionDAO {
 
   async hasAccess(conn, sectionId, userId) {
     const { rowCount } = await conn.query(
+      // role >= 0 — join-request pending(role=-1) 행은 binder_members에 존재해도 이 JOIN에서
+      // 제외한다(RLY-20260806-018). 그렇지 않으면 access_scope=0(전체공개) 섹션은 대기 신청자도
+      // "바인더 멤버"로 오인되어 접근이 열린다.
       `SELECT 1 FROM sections s
-       JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.user_id = $2 AND bm.deleted_at IS NULL
+       JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.user_id = $2
+         AND bm.deleted_at IS NULL AND bm.role >= 0
        WHERE s.id = $1 AND s.deleted_at IS NULL AND (s.access_scope = 0 OR EXISTS (
          SELECT 1 FROM section_members sm
          WHERE sm.section_id = s.id AND sm.user_id = $2 AND sm.deleted_at IS NULL))`,

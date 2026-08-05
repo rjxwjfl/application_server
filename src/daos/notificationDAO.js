@@ -29,11 +29,14 @@ class NotificationDAO {
   /**
    * 유저가 속한 바인더 ID 목록 조회
    */
+  // role >= 0 — join-request pending(role=-1, RLY-20260806-018) 신청자의 디바이스를 해당
+  // 바인더의 FCM 토픽(subscribeUserToAllBinders)에 구독시키지 않는다. 구독되면 승인 전인데도
+  // 바인더 활동(SYNC/ALERT) 푸시를 받게 된다.
   async getBinderIdsByUserId(conn, userId) {
     const query = `
       SELECT binder_id
       FROM binder_members
-      WHERE user_id = $1 AND deleted_at IS NULL
+      WHERE user_id = $1 AND deleted_at IS NULL AND role >= 0
     `;
     const result = await conn.query(query, [userId]);
     return result.rows.map((r) => r.binder_id);
@@ -56,12 +59,15 @@ class NotificationDAO {
    * notification_level 기준으로 바인더 멤버 필터링
    * notification_level: 0=모두, 1=관련만, 2=멘션만, 3=수신거부
    */
+  // role >= 0 — pending(role=-1) 신청자는 ALERT 대상에서 제외한다(RLY-20260806-018). 대상에
+  // 들면 승인 전에 binder 활동 알림(메시지 미리보기 등 title/body 포함)을 받게 된다.
   async getMembersForAlert(conn, binderId, maxLevel) {
     const query = `
       SELECT dm.user_id, dm.notification_level, dm.role
       FROM binder_members dm
       WHERE dm.binder_id = $1
         AND dm.deleted_at IS NULL
+        AND dm.role >= 0
         AND dm.notification_level <= $2
     `;
     const result = await conn.query(query, [binderId, maxLevel]);

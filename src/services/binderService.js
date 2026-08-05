@@ -112,22 +112,44 @@ class BinderService {
     eventBus.emit('member:joined', { user_id: userId, binder_id, device_uuid });
   }
 
+  // require_approval=true 인 바인더는 즉시 정식 멤버(role=3)를 주지 않는다 — role=-1 sentinel로
+  // 대기 상태만 기록하고, 관리자의 approveJoinRequest가 승격시킬 때까지 정식 role을 주지 않는다.
+  // (RLY-20260806-018 — 이전에는 require_approval을 분기 없이 무시하고 즉시 addMember(role=3)했다.)
+  //
+  // 대기 sentinel은 BinderDAO.getMember에서 필터되므로(role >= 0) 이 함수가 심는 pending 행은
+  // getBinderMembers·search·getBinder 등 기존 멤버십 게이트 어디에서도 "멤버"로 읽히지 않는다.
   async requestBinderJoin(binderId, userId, device_uuid) {
+    let joinedImmediately = false;
+
     await withTransaction(async (client) => {
       const settings = await BinderDAO.getSettings(client, binderId);
       if (!settings) throw new NotFoundError('바인더를 찾을 수 없습니다');
       if (!settings.is_public && !settings.require_approval) throw new ForbiddenError('비공개 바인더입니다');
 
-      const existingMember = await BinderDAO.getMember(client, binderId, userId);
-      if (existingMember && !existingMember.deleted_at) {
-        throw new ConflictError('이미 이 바인더의 멤버입니다');
+      // pending(role=-1) 재신청·거절 후 재신청·이미 정식 멤버인 경우를 구분해야 하므로,
+      // 필터 없는 조회(getMemberIncludingPending)를 쓴다 — getMember는 pending 행을 숨긴다.
+      const existing = await BinderDAO.getMemberIncludingPending(client, binderId, userId);
+      if (existing && !existing.deleted_at) {
+        if (existing.role === -1) throw new ConflictError('이미 승인 대기 중인 신청이 있습니다', 'JOIN_REQUEST_PENDING');
+        throw new ConflictError('이미 이 바인더의 멤버입니다', 'ALREADY_MEMBER');
       }
 
-      await BinderDAO.addMember(client, binderId, userId, 3);
-      await BinderDAO.incrementMemberCount(client, binderId);
+      // existing이 soft-delete된 행(거절 이력·과거 탈퇴 등)이면 addMember의 ON CONFLICT UPSERT가
+      // deleted_at을 지우고 role을 아래 값으로 갱신한다 — 재신청 시 새 행을 만들 필요가 없다.
+      if (settings.require_approval) {
+        await BinderDAO.addMember(client, binderId, userId, -1);
+      } else {
+        await BinderDAO.addMember(client, binderId, userId, 3);
+        await BinderDAO.incrementMemberCount(client, binderId);
+        joinedImmediately = true;
+      }
     });
 
-    eventBus.emit('member:joined', { user_id: userId, binder_id: binderId, device_uuid });
+    // pending 행은 아직 멤버가 아니므로 member:joined를 emit하지 않는다 — FCM 바인더 토픽 구독
+    // (subscribeUserToAllBinders)·활동 피드 등 "정식 멤버"를 전제로 하는 부수효과를 막기 위함이다.
+    if (joinedImmediately) {
+      eventBus.emit('member:joined', { user_id: userId, binder_id: binderId, device_uuid });
+    }
   }
 
   async getBinderMembers(binderId, userId) {

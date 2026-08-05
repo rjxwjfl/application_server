@@ -140,7 +140,24 @@ class BinderDAO {
   // BinderMembers 테이블
   // ============================================
 
+  // role >= 0 필터 — role = -1 은 requestBinderJoin이 심는 승인 대기 sentinel이다(RLY-20260806-018).
+  // 대기 행은 "멤버"가 아니다: 이 메서드 하나로 여기 결과를 소비하는 모든 서비스 레이어의
+  // `!member || member.deleted_at` / `member.role > N` 인가 분기가 자동으로 pending을 배제한다
+  // (음수 role은 `role > N` 비교에서 항상 false가 되어 최상위 권한처럼 통과하므로, 애초에 결과에
+  // 나타나지 않게 막는 것이 개별 호출부 수십 곳을 각각 고치는 것보다 안전하다).
   async getMember(conn, binderId, userId) {
+    const query = `
+      SELECT binder_id, user_id, role, notification_level, nickname_in_binder, joined_at, deleted_at
+      FROM binder_members
+      WHERE binder_id = $1 AND user_id = $2 AND role >= 0
+    `;
+    const result = await conn.query(query, [binderId, userId]);
+    return result.rows[0] || null;
+  }
+
+  // requestBinderJoin의 중복 신청 판별 전용 — pending(role=-1) 행도 보이는 getMember의 비필터 버전.
+  // 다른 곳에서 쓰지 마라: 대기 행을 "멤버"로 취급하는 모든 인가 판단은 getMember를 써야 한다.
+  async getMemberIncludingPending(conn, binderId, userId) {
     const query = `
       SELECT binder_id, user_id, role, notification_level, nickname_in_binder, joined_at, deleted_at
       FROM binder_members
@@ -154,7 +171,7 @@ class BinderDAO {
     const query = `
       SELECT binder_id, user_id, role, deleted_at
       FROM binder_members
-      WHERE binder_id = $1 AND user_id = ANY($2::uuid[])
+      WHERE binder_id = $1 AND user_id = ANY($2::uuid[]) AND role >= 0
       ORDER BY user_id
       FOR UPDATE
     `;
@@ -170,7 +187,7 @@ class BinderDAO {
       FROM binder_members dm
       JOIN users u ON dm.user_id = u.id
       LEFT JOIN user_infos ui ON dm.user_id = ui.user_id
-      WHERE dm.binder_id = $1 AND dm.deleted_at IS NULL
+      WHERE dm.binder_id = $1 AND dm.deleted_at IS NULL AND dm.role >= 0
       ORDER BY dm.joined_at ASC
     `;
     const result = await conn.query(query, [binderId]);
@@ -184,7 +201,7 @@ class BinderDAO {
              dm.role, dm.notification_level, dm.joined_at
       FROM binder_members dm
       JOIN binders d ON dm.binder_id = d.id
-      WHERE dm.user_id = $1 AND dm.deleted_at IS NULL AND d.deleted_at IS NULL
+      WHERE dm.user_id = $1 AND dm.deleted_at IS NULL AND dm.role >= 0 AND d.deleted_at IS NULL
       ORDER BY d.last_activity_at DESC
     `;
     const result = await conn.query(query, [userId]);
