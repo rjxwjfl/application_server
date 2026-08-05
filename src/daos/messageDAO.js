@@ -1,4 +1,4 @@
-const { AttachmentDAO } = require('./attachmentDAO');
+const { ForbiddenError } = require('../core/errors');
 
 class MessageDAO {
   // ============================================
@@ -94,38 +94,47 @@ class MessageDAO {
   // Attachments (attachments 테이블 — context_type='SECTION_MESSAGE')
   // ============================================
 
-  // F-S9b — 이 경로는 presign/confirm을 거치지 않고 attachments에 직접 INSERT하는 유일한
-  // 우회 지점이었다(mediaService.presign의 402 한도 검사·confirm의 applyStorageDelta 둘 다
-  // 건너뜀 — 한도 검사는 messageService.createMessage가 트랜잭션 진입 전에 한다).
-  // 여기서는 attachmentDAO.applyStorageDelta 배선만 담당한다. 벌크 다중행 INSERT 대신 한 행씩
-  // 삽입 직후 델타를 반영하는 이유: 배열 안에서 같은 storage_key를 공유하는 첨부가 있을 때,
-  // 벌크로 먼저 다 넣으면 배치 내 형제 행들이 서로를 "이미 존재하는 다른 활성 행"으로 보고
-  // applyStorageDelta의 경계 판정(attachmentDAO.js:199-239)이 전원 스킵된다 — 즉 회계가
-  // 통째로 빠진다. 한 행씩 넣고 그 행만 델타를 반영하면, 배치 내 최초 등장만 과금되고
-  // 이후 같은 키의 형제는 정확히 0으로 스킵된다(같은 물리 파일을 두 번 과금하지 않음).
-  async insertAttachments(conn, messageId, binderId, uploaderId, attachments) {
+  // F-S9b(정정 — Architect 판정 "가") — 섹션 메시지 첨부는 presign/confirm으로 이미
+  // attachments 행이 만들어져 있다(media.md:334 — 클라가 message_id를 미리 생성해 presign의
+  // context_id로 넘긴다). 메시지 생성은 그 행을 "링크"만 한다 — 새 첨부를 만드는 게 아니다.
+  // 과금(402 한도 검사·applyStorageDelta)은 presign/confirm 시점에 이미 끝나 있으므로 여기서
+  // 다시 하면 이중 계상이다 — 이 함수는 UPDATE만 하고 저장 용량 회계에 관여하지 않는다.
+  //
+  // 소유·소속 검증을 WHERE 절에 직접 건다(원자적 — 별도 SELECT 왕복·TOCTOU 없음): 그 binder
+  // 소속이고, 호출자 본인이 업로드했고, status='ready'인 행만 링크 대상이다. 아무 id나 넘겨서
+  // 남의 첨부·다른 바인더의 첨부·아직 업로드 안 끝난(pending) 첨부를 자기 메시지에 붙이는
+  // 것을 막는다. 요청한 id 수와 실제로 링크된 행 수가 다르면(권한 없음·존재하지 않음·상태
+  // 불일치) 전체를 거부한다 — 일부만 조용히 누락시키지 않는다.
+  //
+  // 멱등: context_id가 이미 이 messageId인 행도 WHERE 조건을 통과해 그대로 재확정된다
+  // (media.md:334 "이미 동일 context_id로 연결된 첨부를 멱등 재확인" — 재전송 안전).
+  // context_id가 NULL인 행(사전 링크 없이 presign된 구형 클라 호환)은 여기서 처음 채워진다.
+  // 이미 "다른" context_id로 확정된 행(다른 메시지에 이미 링크됨)은 대상에서 제외된다.
+  async linkAttachments(conn, messageId, binderId, uploaderId, attachments) {
     if (!attachments || attachments.length === 0) return [];
 
-    const inserted = [];
-    for (const a of attachments) {
-      const result = await conn.query(
-        `INSERT INTO attachments
-           (id, binder_id, context_type, context_id, storage_key, filename, file_size, content_type, uploader_id, status, storage_class)
-         VALUES ($1, $2, 'SECTION_MESSAGE', $3, $4, $5, $6, $7, $8, 'ready', 'standard')
-         RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status`,
-        [a.id, binderId, messageId, a.storage_key, a.filename || null, a.file_size || null, a.content_type || null, uploaderId]
-      );
-      inserted.push(result.rows[0]);
+    const ids = [...new Set(attachments.map((a) => (typeof a === 'string' ? a : a.id)).filter(Boolean))];
+    if (ids.length === 0) return [];
 
-      await AttachmentDAO.applyStorageDelta(conn, {
-        binderId,
-        storageKey: a.storage_key,
-        fileSize: a.file_size,
-        attachmentId: a.id,
-        sign: 1,
-      });
+    const result = await conn.query(
+      `UPDATE attachments
+       SET context_id = $2, updated_at = now()
+       WHERE id = ANY($1)
+         AND context_type = 'SECTION_MESSAGE'
+         AND binder_id = $3
+         AND uploader_id = $4
+         AND status = 'ready'
+         AND deleted_at IS NULL
+         AND (context_id IS NULL OR context_id = $2)
+       RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status`,
+      [ids, messageId, binderId, uploaderId]
+    );
+
+    if (result.rows.length !== ids.length) {
+      throw new ForbiddenError('첨부 파일에 접근할 권한이 없습니다', 'SECTION_ACCESS_DENIED');
     }
-    return inserted;
+
+    return result.rows;
   }
 
   async getAttachmentsByMessageId(conn, messageId) {

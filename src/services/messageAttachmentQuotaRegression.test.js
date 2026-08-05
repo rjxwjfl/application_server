@@ -1,11 +1,16 @@
 /**
  * src/services/messageAttachmentQuotaRegression.test.js
  * =========================================
- * RLY-20260806-014 (F-S9b) 섹션 메시지 첨부 — 네 번째 용량 한도 우회 경로 회귀 스위트.
+ * RLY-20260806-014 (F-S9b, 정정판) 섹션 메시지 첨부 — "링크" 경로 회귀 스위트.
  *
- * 배경: POST /sections/:sectionId/messages → messageService.createMessage →
- * messageDAO.insertAttachments가 attachments에 직접 INSERT한다. mediaService.presign/confirm을
- * 전혀 거치지 않으므로 402 한도 검사와 applyStorageDelta 집계 둘 다 실행되지 않던 경로였다.
+ * 배경(정정 이력): 최초 구현은 messageDAO가 attachments에 직접 INSERT하는 것을 전제로
+ * 402 한도 검사·applyStorageDelta를 이 경로에 추가했었다. 그러나 mediaService.presign이
+ * 클라가 보낸 id로 이미 attachments를 INSERT하므로(status='pending'), 같은 id로 다시
+ * INSERT하면 PK 중복으로 애초에 성립 불가능한 설계였다 — 즉 이 경로는 처음부터 "INSERT"가
+ * 아니라 media.md:299-334(Phase 5)가 규정한 "링크"(UPDATE attachments SET context_id)여야
+ * 했다. Architect 판정(가)에 따라 messageDAO.insertAttachments → linkAttachments로 교체하고,
+ * 402 검사·applyStorageDelta는 이 경로에서 철회했다(presign/confirm 시점에 이미 끝나 있어
+ * 여기서 또 하면 이중 계상이 된다). 이 스위트는 그 새 계약을 검증한다.
  *
  * storageQuotaRegression.test.js와 동일한 관행 — plain assert + `node <file>.js` 직접 실행,
  * 가짜 DB connection(require.cache 주입)으로 실제 서비스·DAO 코드를 구동한다. 이 저장소에는
@@ -25,41 +30,53 @@ process.env.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'test';
 // ── 가짜 relational state ────────────────────────────────────────────────
 const db = {
   sections: {},
-  binder_boosts: {},
   binder_storage_usage: {},
   attachments: {},
   section_messages: {},
 };
 
 db.sections.s1 = { id: 's1', binder_id: 'b1', title: 't', access_scope: 0, is_default: false, deleted_at: null };
-db.sections.s2 = { id: 's2', binder_id: 'b2', title: 't', access_scope: 0, is_default: false, deleted_at: null }; // Boost Lite
-db.binder_boosts.b2 = { binder_id: 'b2', tier: 1, status: 'ACTIVE' };
+
+// 링크 대상 후보들 — 전부 presign/confirm으로 이미 만들어져 있다고 가정(멀티 시나리오용).
+db.attachments['att-ready'] = { id: 'att-ready', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'ready', filename: 'f.png', file_size: 100, content_type: 'image/png', storage_key: 'k1', deleted_at: null };
+db.attachments['att-pending'] = { id: 'att-pending', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'pending', filename: 'f2.png', file_size: 100, content_type: 'image/png', storage_key: 'k2', deleted_at: null };
+db.attachments['att-other-user'] = { id: 'att-other-user', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u2', status: 'ready', filename: 'f3.png', file_size: 100, content_type: 'image/png', storage_key: 'k3', deleted_at: null };
+db.attachments['att-other-binder'] = { id: 'att-other-binder', binder_id: 'b2', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'ready', filename: 'f4.png', file_size: 100, content_type: 'image/png', storage_key: 'k4', deleted_at: null };
+db.attachments['att-linked-elsewhere'] = { id: 'att-linked-elsewhere', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: 'm-some-other-message', uploader_id: 'u1', status: 'ready', filename: 'f5.png', file_size: 100, content_type: 'image/png', storage_key: 'k5', deleted_at: null };
+db.attachments['att-retry'] = { id: 'att-retry', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'ready', filename: 'f6.png', file_size: 100, content_type: 'image/png', storage_key: 'k6', deleted_at: null };
 
 const queryLog = [];
+
+// BEGIN에서 스냅샷을 뜨고 ROLLBACK에서 복원한다 — AC-8(부분 실패 시 트랜잭션 전체 롤백)을
+// 실제로 검증하려면 단순 no-op으로는 부족하다(withTransaction이 던진 에러를 ROLLBACK으로
+// 처리하는 실제 Postgres 동작을 흉내내야 "일부만 조용히 남지 않는다"를 상태로 확인할 수 있다).
+let txSnapshot = null;
 
 async function mockQuery(sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   queryLog.push({ sql: s, params });
 
-  if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] };
+  if (s === 'BEGIN') {
+    txSnapshot = JSON.parse(JSON.stringify({ attachments: db.attachments, section_messages: db.section_messages }));
+    return { rows: [] };
+  }
+  if (s === 'COMMIT') {
+    txSnapshot = null;
+    return { rows: [] };
+  }
+  if (s === 'ROLLBACK') {
+    if (txSnapshot) {
+      db.attachments = txSnapshot.attachments;
+      db.section_messages = txSnapshot.section_messages;
+      txSnapshot = null;
+    }
+    return { rows: [] };
+  }
 
   // SectionDAO.findById
   if (s.startsWith('SELECT id, binder_id, title, access_scope, is_default, created_at, updated_at, deleted_at FROM sections')) {
     const row = db.sections[params[0]];
     return { rows: row && !row.deleted_at ? [row] : [] };
-  }
-
-  // AttachmentDAO.getBytesUsed
-  if (s.startsWith('SELECT bytes_used FROM binder_storage_usage')) {
-    const row = db.binder_storage_usage[params[0]];
-    return { rows: row ? [row] : [] };
-  }
-
-  // AttachmentDAO.getStorageLimitBytes
-  if (s.includes('FROM binders b') && s.includes('binder_boosts bb')) {
-    const boost = db.binder_boosts[params[0]];
-    const tier = boost && boost.status === 'ACTIVE' ? boost.tier : 0;
-    return { rows: [{ tier }] };
   }
 
   // MessageDAO.create
@@ -73,37 +90,26 @@ async function mockQuery(sql, params = []) {
     return { rows: [row] };
   }
 
-  // MessageDAO.insertAttachments — 한 행씩 INSERT (F-S9b)
-  if (s.startsWith('INSERT INTO attachments')) {
-    const [id, binder_id, context_id, storage_key, filename, file_size, content_type, uploader_id] = params;
-    db.attachments[id] = {
-      id, binder_id, context_type: 'SECTION_MESSAGE', context_id, storage_key,
-      filename, file_size, content_type, uploader_id, status: 'ready', deleted_at: null,
-    };
-    return { rows: [{ id, message_id: context_id, filename, file_size, content_type, storage_key, status: 'ready' }] };
-  }
-
-  // AttachmentDAO.applyStorageDelta — 경계 판정
-  if (s.includes('AS is_boundary')) {
-    const [binderId, storageKey, excludeId] = params;
-    const isOther = Object.values(db.attachments).some(
-      (a) => a.binder_id === binderId && a.storage_key === storageKey && !a.deleted_at && a.id !== excludeId
-    );
-    return { rows: [{ is_boundary: !isOther }] };
-  }
-
-  // AttachmentDAO.applyStorageDelta — 원자 upsert
-  if (s.startsWith('INSERT INTO binder_storage_usage')) {
-    const [binderId, delta] = params;
-    if (!db.binder_storage_usage[binderId]) {
-      db.binder_storage_usage[binderId] = { binder_id: binderId, bytes_used: delta };
-    } else {
-      db.binder_storage_usage[binderId].bytes_used += delta;
+  // MessageDAO.linkAttachments — F-S9b(정정): INSERT가 아니라 UPDATE ... SET context_id
+  if (s.startsWith('UPDATE attachments SET context_id')) {
+    const [ids, messageId, binderId, uploaderId] = params;
+    const matched = [];
+    for (const id of ids) {
+      const att = db.attachments[id];
+      if (!att) continue;
+      if (att.deleted_at) continue;
+      if (att.context_type !== 'SECTION_MESSAGE') continue;
+      if (att.binder_id !== binderId) continue;
+      if (att.uploader_id !== uploaderId) continue;
+      if (att.status !== 'ready') continue;
+      if (!(att.context_id === null || att.context_id === messageId)) continue;
+      att.context_id = messageId;
+      matched.push({ id: att.id, message_id: att.context_id, filename: att.filename, file_size: att.file_size, content_type: att.content_type, storage_key: att.storage_key, status: att.status });
     }
-    return { rows: [] };
+    return { rows: matched };
   }
 
-  throw new Error(`[mock] Unhandled query: ${s.slice(0, 160)} params=${JSON.stringify(params)}`);
+  throw new Error(`[mock] Unhandled query(회계 쿼리가 이 경로에서 실행되면 안 된다 — 이중 계상 가드): ${s.slice(0, 160)} params=${JSON.stringify(params)}`);
 }
 
 const mockDb = {
@@ -114,6 +120,7 @@ const mockDb = {
 const dbPath = require.resolve('../../config/db');
 require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: mockDb };
 
+const { MessageDAO } = require('../daos/messageDAO');
 const { MessageService } = require('./messageService');
 
 const ctx = (userId) => ({ sender_id: userId, device_uuid: 'dev-1' });
@@ -144,120 +151,102 @@ async function expectStatus(name, fn, statusCode, errorCode) {
   });
 }
 
-const attachment = (overrides) => ({
-  id: overrides.id,
-  filename: overrides.filename || 'f.png',
-  file_size: overrides.file_size,
-  content_type: 'image/png',
-  storage_key: overrides.storage_key || `attachments/b1/2026/08/${overrides.id}.png`,
-});
-
 async function run() {
-  const FREE_LIMIT = 5 * 1024 ** 3;
-
   // ═══════════════════════════════════════════════════════════════
-  // AC-1 — 첨부 없는 메시지는 한도 검사를 건너뛰고 정상 생성된다
+  // AC-1 — 본인 소유·ready 상태 첨부는 정상 링크된다(end-to-end)
   // ═══════════════════════════════════════════════════════════════
-  await check('AC-1 — 첨부 없는 메시지는 정상 생성', async () => {
-    const result = await MessageService.createMessage('s1', { id: 'm-noattach', content: 'hi' }, ctx('u1'));
-    assert.strictEqual(result.id, 'm-noattach');
-    assert.strictEqual(db.section_messages['m-noattach'].content, 'hi');
+  await check('AC-1 — 정상 첨부 링크(end-to-end createMessage)', async () => {
+    const result = await MessageService.createMessage('s1', {
+      id: 'm1', content: 'hi', attachments: [{ id: 'att-ready' }],
+    }, ctx('u1'));
+    assert.strictEqual(result.attachments.length, 1);
+    assert.strictEqual(result.attachments[0].id, 'att-ready');
+    assert.strictEqual(db.attachments['att-ready'].context_id, 'm1');
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // AC-2 — 단건 첨부가 한도를 넘으면 402 BOOST_STORAGE_LIMIT
+  // AC-2 — 이 경로는 회계 쿼리를 전혀 실행하지 않는다(이중 계상 방지)
+  // ═══════════════════════════════════════════════════════════════
+  await check('AC-2 — 링크 경로는 binder_storage_usage/is_boundary 쿼리를 실행하지 않음', async () => {
+    const accountingQueries = queryLog.filter(
+      (q) => q.sql.includes('binder_storage_usage') || q.sql.includes('is_boundary')
+    );
+    assert.strictEqual(accountingQueries.length, 0, 'AC-1 실행 이후에도 회계 쿼리가 하나도 없어야 한다');
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // AC-3 — 멱등: 같은 메시지·같은 첨부로 링크를 다시 호출해도 부작용 없이 통과
+  // (message INSERT 자체의 재전송 처리는 이 함수의 관심사가 아니므로 linkAttachments를 직접 호출)
+  // ═══════════════════════════════════════════════════════════════
+  await check('AC-3 — 멱등 재확인(같은 messageId로 재호출해도 성공·부작용 없음)', async () => {
+    const first = await MessageDAO.linkAttachments(mockDb, 'm-retry', 'b1', 'u1', [{ id: 'att-retry' }]);
+    assert.strictEqual(first.length, 1);
+    assert.strictEqual(db.attachments['att-retry'].context_id, 'm-retry');
+
+    const second = await MessageDAO.linkAttachments(mockDb, 'm-retry', 'b1', 'u1', [{ id: 'att-retry' }]);
+    assert.strictEqual(second.length, 1, '재호출도 동일하게 1건 반환(no-op성 재확정)');
+    assert.strictEqual(db.attachments['att-retry'].context_id, 'm-retry', 'context_id 불변');
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // AC-4 — 남의 첨부는 링크할 수 없다(uploader_id 불일치) → 403
   // ═══════════════════════════════════════════════════════════════
   await expectStatus(
-    'AC-2 — 단건 첨부 한도 초과 402(BOOST_STORAGE_LIMIT)',
-    () => MessageService.createMessage('s1', {
-      id: 'm-over-1',
-      content: 'big',
-      attachments: [attachment({ id: 'a-over-1', file_size: FREE_LIMIT + 1 })],
-    }, ctx('u1')),
-    402,
-    'BOOST_STORAGE_LIMIT'
+    'AC-4 — 다른 사용자가 업로드한 첨부 링크 시도 → 403',
+    () => MessageDAO.linkAttachments(mockDb, 'm-hostile-1', 'b1', 'u1', [{ id: 'att-other-user' }]),
+    403,
+    'SECTION_ACCESS_DENIED'
   );
 
   // ═══════════════════════════════════════════════════════════════
-  // AC-3 — 개별로는 한도 이내지만 배열 합계로는 초과 → 402 (배열 우회 방지)
+  // AC-5 — 다른 바인더 소속 첨부는 링크할 수 없다 → 403
   // ═══════════════════════════════════════════════════════════════
   await expectStatus(
-    'AC-3 — 배열 합계 초과 시 402(개별 항목은 한도 이내)',
-    () => MessageService.createMessage('s1', {
-      id: 'm-over-sum',
-      content: 'sum',
-      attachments: [
-        attachment({ id: 'a-sum-1', file_size: Math.floor(FREE_LIMIT * 0.6) }),
-        attachment({ id: 'a-sum-2', file_size: Math.floor(FREE_LIMIT * 0.6) }),
-      ],
-    }, ctx('u1')),
-    402,
-    'BOOST_STORAGE_LIMIT'
+    'AC-5 — 다른 바인더 소속 첨부 링크 시도 → 403',
+    () => MessageDAO.linkAttachments(mockDb, 'm-hostile-2', 'b1', 'u1', [{ id: 'att-other-binder' }]),
+    403,
+    'SECTION_ACCESS_DENIED'
   );
 
   // ═══════════════════════════════════════════════════════════════
-  // AC-4 — 402일 때 partial write 0건 — 메시지도 첨부도 남지 않는다
+  // AC-6 — 업로드 미완료(pending) 첨부는 링크할 수 없다 → 403
   // ═══════════════════════════════════════════════════════════════
-  await check('AC-4 — 402 이후 메시지·첨부 어느 쪽도 저장되지 않음', async () => {
-    assert.strictEqual(db.section_messages['m-over-1'], undefined);
-    assert.strictEqual(db.section_messages['m-over-sum'], undefined);
-    assert.strictEqual(db.attachments['a-over-1'], undefined);
-    assert.strictEqual(db.attachments['a-sum-1'], undefined);
-    assert.strictEqual(db.attachments['a-sum-2'], undefined);
-    // 트랜잭션 진입 전에 거부되므로 BEGIN 자체가 없어야 한다.
-    const beginCount = queryLog.filter((q) => q.sql === 'BEGIN').length;
-    const insertMsgCount = queryLog.filter((q) => q.sql.startsWith('INSERT INTO section_messages')).length;
-    assert.strictEqual(beginCount, insertMsgCount, 'BEGIN 횟수와 실제 메시지 INSERT 횟수가 같아야 한다(402 케이스는 BEGIN 자체가 없음)');
-  });
+  await expectStatus(
+    'AC-6 — status=pending 첨부 링크 시도 → 403',
+    () => MessageDAO.linkAttachments(mockDb, 'm-hostile-3', 'b1', 'u1', [{ id: 'att-pending' }]),
+    403,
+    'SECTION_ACCESS_DENIED'
+  );
 
   // ═══════════════════════════════════════════════════════════════
-  // AC-5 — 한도 이내 첨부 생성 시 bytes_used 가 정확히 반영된다
+  // AC-7 — 이미 다른 메시지에 링크된 첨부는 재링크할 수 없다 → 403
   // ═══════════════════════════════════════════════════════════════
-  await check('AC-5 — 한도 이내 첨부 생성 → binder_storage_usage 반영', async () => {
-    const before = db.binder_storage_usage.b1 ? db.binder_storage_usage.b1.bytes_used : 0;
-    const result = await MessageService.createMessage('s1', {
-      id: 'm-ok-1',
-      content: 'ok',
-      attachments: [
-        attachment({ id: 'a-ok-1', file_size: 100 }),
-        attachment({ id: 'a-ok-2', file_size: 200 }),
-      ],
-    }, ctx('u1'));
-    assert.strictEqual(result.attachments.length, 2);
-    assert.strictEqual(db.binder_storage_usage.b1.bytes_used - before, 300);
-    assert.ok(db.attachments['a-ok-1'] && db.attachments['a-ok-2']);
-  });
+  await expectStatus(
+    'AC-7 — 이미 다른 메시지에 링크된 첨부 재링크 시도 → 403',
+    () => MessageDAO.linkAttachments(mockDb, 'm-hostile-4', 'b1', 'u1', [{ id: 'att-linked-elsewhere' }]),
+    403,
+    'SECTION_ACCESS_DENIED'
+  );
 
   // ═══════════════════════════════════════════════════════════════
-  // AC-6 — 같은 storage_key 를 배열 안에서 공유하는 첨부는 한 번만 집계된다
+  // AC-8 — 배열 중 하나라도 권한 없으면 전체 거부(일부만 조용히 누락 X) + partial write 없음
+  // MessageService.createMessage(withTransaction 경유)로 실행해 실제 ROLLBACK 경로를 태운다 —
+  // linkAttachments를 트랜잭션 밖에서 단독 호출하면 부분 UPDATE가 롤백되지 않아 이 불변식을
+  // 검증할 수 없다.
   // ═══════════════════════════════════════════════════════════════
-  await check('AC-6 — 배치 내 storage_key 공유 시 한 번만 집계(중복 과금 없음)', async () => {
-    const before = db.binder_storage_usage.b1.bytes_used;
-    const SHARED_KEY = 'attachments/b1/2026/08/shared-in-batch.png';
-    const result = await MessageService.createMessage('s1', {
-      id: 'm-dup-key',
-      content: 'dup',
-      attachments: [
-        attachment({ id: 'a-dup-1', file_size: 500, storage_key: SHARED_KEY }),
-        attachment({ id: 'a-dup-2', file_size: 500, storage_key: SHARED_KEY }),
-      ],
-    }, ctx('u1'));
-    assert.strictEqual(result.attachments.length, 2, '행은 둘 다 생성된다(복제 승계) — 회계만 한 번');
-    assert.strictEqual(db.binder_storage_usage.b1.bytes_used - before, 500, '같은 storage_key 형제는 최초 등장만 과금');
-  });
-
-  // ═══════════════════════════════════════════════════════════════
-  // AC-7 — Boost Lite(tier=1) 바인더는 50GB 한도로 통과(Free라면 402였을 크기)
-  // ═══════════════════════════════════════════════════════════════
-  await check('AC-7 — Boost Lite 바인더는 Free 한도를 넘는 크기도 통과', async () => {
-    const overFreeUnderLite = 10 * 1024 ** 3; // Free는 거부, Lite(50GB)는 통과
-    const result = await MessageService.createMessage('s2', {
-      id: 'm-lite-1',
-      content: 'lite',
-      attachments: [attachment({ id: 'a-lite-1', file_size: overFreeUnderLite, storage_key: 'attachments/b2/2026/08/a-lite-1.mp4' })],
-    }, ctx('u1'));
-    assert.strictEqual(result.id, 'm-lite-1');
-    assert.strictEqual(db.binder_storage_usage.b2.bytes_used, overFreeUnderLite);
+  await check('AC-8 — 배열 일부만 유효해도 전부 거부, 메시지도 유효했던 첨부도 남지 않음', async () => {
+    // att-fresh는 정상 대상이지만 att-other-user가 섞여 있으면 전체가 거부되어야 한다.
+    db.attachments['att-fresh'] = { id: 'att-fresh', binder_id: 'b1', context_type: 'SECTION_MESSAGE', context_id: null, uploader_id: 'u1', status: 'ready', filename: 'f7.png', file_size: 100, content_type: 'image/png', storage_key: 'k7', deleted_at: null };
+    try {
+      await MessageService.createMessage('s1', {
+        id: 'm-mixed', content: 'mixed', attachments: [{ id: 'att-fresh' }, { id: 'att-other-user' }],
+      }, ctx('u1'));
+      throw new Error('expected to throw but did not');
+    } catch (error) {
+      assert.strictEqual(error.statusCode, 403);
+    }
+    assert.strictEqual(db.attachments['att-fresh'].context_id, null, '유효했던 att-fresh도 링크되지 않아야 한다(전부 아니면 전무 — 트랜잭션 롤백)');
+    assert.strictEqual(db.section_messages['m-mixed'], undefined, '메시지 행도 함께 롤백되어야 한다');
   });
 
   // ═══════════════════════════════════════════════════════════════
