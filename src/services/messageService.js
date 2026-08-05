@@ -1,10 +1,11 @@
 const { MessageDAO } = require('../daos/messageDAO');
 const { SectionDAO } = require('../daos/sectionDAO');
+const { AttachmentDAO } = require('../daos/attachmentDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { NotFoundError, ForbiddenError, BadRequestError, ConflictError } = require('../core/errors');
+const { NotFoundError, ForbiddenError, BadRequestError, ConflictError, PaymentRequiredError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class MessageService {
@@ -45,6 +46,25 @@ class MessageService {
     if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
 
     const messageId = data.id || generateUUID();
+
+    // F-S9b — 섹션 메시지 첨부는 presign/confirm을 거치지 않고 messageDAO.insertAttachments가
+    // attachments에 직접 INSERT하므로, mediaService.presign과 같은 402 한도 검사를 여기서 한다
+    // (§4 mediaService.presign 판정과 동일 산식·동일 메시지·동일 코드). 배열 전체 합계로
+    // 판정한다 — 개별 항목마다 판정하면 배열로 한도를 우회할 수 있다. 트랜잭션 진입 전(메시지
+    // 행조차 아직 생성되지 않은 시점)에 판정하므로 402일 때 partial write가 원천적으로 없다.
+    if (data.attachments && data.attachments.length > 0) {
+      const totalSize = data.attachments.reduce((sum, a) => sum + (Number(a.file_size) || 0), 0);
+      const [bytesUsed, limitBytes] = await Promise.all([
+        AttachmentDAO.getBytesUsed(pool, section.binder_id),
+        AttachmentDAO.getStorageLimitBytes(pool, section.binder_id),
+      ]);
+      if (bytesUsed + totalSize > limitBytes) {
+        throw new PaymentRequiredError(
+          '바인더 저장 공간이 부족합니다. Binder Boost로 용량을 늘려보세요.',
+          'BOOST_STORAGE_LIMIT'
+        );
+      }
+    }
 
     const result = await withTransaction(async (client) => {
       const message = await MessageDAO.create(client, {

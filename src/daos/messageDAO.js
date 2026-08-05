@@ -1,3 +1,5 @@
+const { AttachmentDAO } = require('./attachmentDAO');
+
 class MessageDAO {
   // ============================================
   // Section Messages 테이블
@@ -92,30 +94,38 @@ class MessageDAO {
   // Attachments (attachments 테이블 — context_type='SECTION_MESSAGE')
   // ============================================
 
+  // F-S9b — 이 경로는 presign/confirm을 거치지 않고 attachments에 직접 INSERT하는 유일한
+  // 우회 지점이었다(mediaService.presign의 402 한도 검사·confirm의 applyStorageDelta 둘 다
+  // 건너뜀 — 한도 검사는 messageService.createMessage가 트랜잭션 진입 전에 한다).
+  // 여기서는 attachmentDAO.applyStorageDelta 배선만 담당한다. 벌크 다중행 INSERT 대신 한 행씩
+  // 삽입 직후 델타를 반영하는 이유: 배열 안에서 같은 storage_key를 공유하는 첨부가 있을 때,
+  // 벌크로 먼저 다 넣으면 배치 내 형제 행들이 서로를 "이미 존재하는 다른 활성 행"으로 보고
+  // applyStorageDelta의 경계 판정(attachmentDAO.js:199-239)이 전원 스킵된다 — 즉 회계가
+  // 통째로 빠진다. 한 행씩 넣고 그 행만 델타를 반영하면, 배치 내 최초 등장만 과금되고
+  // 이후 같은 키의 형제는 정확히 0으로 스킵된다(같은 물리 파일을 두 번 과금하지 않음).
   async insertAttachments(conn, messageId, binderId, uploaderId, attachments) {
     if (!attachments || attachments.length === 0) return [];
 
-    const values = [];
-    const params = [];
-    let idx = 1;
-
+    const inserted = [];
     for (const a of attachments) {
-      values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
-      params.push(
-        a.id, binderId, 'SECTION_MESSAGE', messageId,
-        a.storage_key, a.filename || null, a.file_size || null, a.content_type || null,
-        uploaderId, 'standard',
+      const result = await conn.query(
+        `INSERT INTO attachments
+           (id, binder_id, context_type, context_id, storage_key, filename, file_size, content_type, uploader_id, status, storage_class)
+         VALUES ($1, $2, 'SECTION_MESSAGE', $3, $4, $5, $6, $7, $8, 'ready', 'standard')
+         RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status`,
+        [a.id, binderId, messageId, a.storage_key, a.filename || null, a.file_size || null, a.content_type || null, uploaderId]
       );
-    }
+      inserted.push(result.rows[0]);
 
-    const query = `
-      INSERT INTO attachments
-        (id, binder_id, context_type, context_id, storage_key, filename, file_size, content_type, uploader_id, storage_class, status)
-      VALUES ${values.join(', ')}
-      RETURNING id, context_id AS message_id, filename, file_size, content_type, storage_key, status
-    `;
-    const result = await conn.query(query, params);
-    return result.rows;
+      await AttachmentDAO.applyStorageDelta(conn, {
+        binderId,
+        storageKey: a.storage_key,
+        fileSize: a.file_size,
+        attachmentId: a.id,
+        sign: 1,
+      });
+    }
+    return inserted;
   }
 
   async getAttachmentsByMessageId(conn, messageId) {
