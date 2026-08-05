@@ -2,7 +2,10 @@ const { Storage } = require('@google-cloud/storage');
 const { generateUUID } = require('../utils/uuid');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { NotFoundError, ForbiddenError, BadRequestError, PaymentRequiredError } = require('../core/errors');
+const {
+  NotFoundError, ForbiddenError, BadRequestError, PaymentRequiredError,
+  UnprocessableEntityError, ServiceUnavailableError,
+} = require('../core/errors');
 const { SectionDAO } = require('../daos/sectionDAO');
 const { CastDAO } = require('../daos/castDAO');
 const { AttachmentDAO } = require('../daos/attachmentDAO');
@@ -27,6 +30,10 @@ function getTTL(contentType) {
 function getMediaBucket() {
   return process.env.GCS_BUCKET_MEDIA || 'rally-media';
 }
+
+// RLY-20260806-015 — confirm 실제 크기 재확인. media.md §4-3: "실제 size vs presign 신고 size
+// 비교 (±10% 초과 시 422)". 클라 선언값(presign.file_size)은 신뢰하지 않는다(api.md:2396).
+const SIZE_MISMATCH_TOLERANCE_RATIO = 0.1;
 
 function buildStorageKey(binderId, attachmentId, filename) {
   const now = new Date();
@@ -110,13 +117,75 @@ class MediaService {
   }
 
   async confirm(attachmentId, context) {
+    // 1. 대상 확인(트랜잭션 밖 — 아래 GCS 네트워크 호출 동안 DB 락을 잡지 않는다).
+    //    최종 확정은 아래 UPDATE가 status='pending' 조건으로 다시 원자 검증한다(TOCTOU 무해).
+    const pre = await pool.query(
+      `SELECT id, binder_id, storage_key, file_size
+       FROM attachments WHERE id = $1 AND uploader_id = $2 AND status = 'pending'`,
+      [attachmentId, context.sender_id]
+    );
+    const pending = pre.rows[0];
+    if (!pending) throw new NotFoundError('첨부 파일을 찾을 수 없거나 이미 처리되었습니다');
+
+    // 2. GCS 실제 크기 재확인 — 클라 선언값(presign.file_size)을 신뢰하지 않는다.
+    //    조회 실패(네트워크·권한 등 일시적 장애)는 선언값으로 조용히 넘어가지 않고 재시도 가능하도록
+    //    전파한다(attachment는 'pending'에 그대로 남는다 — 상태·회계 변경 없음).
+    const bucket = storage.bucket(getMediaBucket());
+    const file = bucket.file(pending.storage_key);
+    let actualSize;
+    try {
+      const [metadata] = await file.getMetadata();
+      actualSize = Number(metadata.size);
+    } catch (error) {
+      if (error && (error.code === 404 || error.code === '404')) {
+        await this._rejectAndCleanup(attachmentId, pending.storage_key);
+        throw new NotFoundError(
+          '업로드된 파일을 찾을 수 없습니다. 다시 업로드해주세요',
+          'ATTACHMENT_OBJECT_NOT_FOUND'
+        );
+      }
+      throw new ServiceUnavailableError(
+        '파일 확인에 실패했습니다. 잠시 후 다시 시도해주세요',
+        'ATTACHMENT_VERIFY_UNAVAILABLE'
+      );
+    }
+
+    // 3. 선언값 대비 편차 검사(media.md §4-3): ±10% 초과 시 422 + 거부.
+    const declared = Number(pending.file_size) || 0;
+    const withinTolerance = declared === 0
+      ? actualSize === 0
+      : Math.abs(actualSize - declared) <= declared * SIZE_MISMATCH_TOLERANCE_RATIO;
+    if (!withinTolerance) {
+      await this._rejectAndCleanup(attachmentId, pending.storage_key);
+      throw new UnprocessableEntityError(
+        '업로드된 파일 크기가 신고된 크기와 일치하지 않습니다',
+        'ATTACHMENT_SIZE_MISMATCH'
+      );
+    }
+
+    // 4. F-S9 한도 재검사 — presign은 선언값으로 검사했으나 실제 값이 한도를 넘길 수 있다.
+    //    ⛔ 3안 중 판단 보류 상태 — 가장 보수적인 "거부 + 객체 삭제"로 임시 구현
+    //    (`.outbox/RLY-20260806-015-size-verify-report.md` §2 참조, User 결정 대기).
+    const [bytesUsed, limitBytes] = await Promise.all([
+      AttachmentDAO.getBytesUsed(pool, pending.binder_id),
+      AttachmentDAO.getStorageLimitBytes(pool, pending.binder_id),
+    ]);
+    if (bytesUsed + actualSize > limitBytes) {
+      await this._rejectAndCleanup(attachmentId, pending.storage_key);
+      throw new PaymentRequiredError(
+        '바인더 저장 공간이 부족합니다. Binder Boost로 용량을 늘려보세요.',
+        'BOOST_STORAGE_LIMIT'
+      );
+    }
+
+    // 5. 확정 — 실제 크기로 file_size를 고친 뒤 델타를 적용한다(선언값이 아니라 재확인된 값).
     return withTransaction(async (client) => {
       const result = await client.query(
         `UPDATE attachments
-         SET status = 'ready', updated_at = now()
+         SET status = 'ready', file_size = $3, updated_at = now()
          WHERE id = $1 AND uploader_id = $2 AND status = 'pending'
          RETURNING *`,
-        [attachmentId, context.sender_id]
+        [attachmentId, context.sender_id, actualSize]
       );
 
       const attachment = result.rows[0];
@@ -134,6 +203,23 @@ class MediaService {
 
       return attachment;
     });
+  }
+
+  /**
+   * §2·§3 실패 경로 공용 — attachment를 'rejected'로 표시하고 GCS 객체를 정리한다.
+   * Worker MIME/악성코드 검증 실패와 동일 패턴(media.md §4-4 Step 1·2: status='rejected' + 객체 삭제).
+   */
+  async _rejectAndCleanup(attachmentId, storageKey) {
+    await pool.query(
+      `UPDATE attachments SET status = 'rejected', updated_at = now()
+       WHERE id = $1 AND status = 'pending'`,
+      [attachmentId]
+    );
+    try {
+      await storage.bucket(getMediaBucket()).file(storageKey).delete({ ignoreNotFound: true });
+    } catch {
+      // GCS 삭제 실패는 로그만 남기고 계속 진행 — deleteAttachment(§8-1)와 동일 정책.
+    }
   }
 
   async getSignedUrl(attachmentId, userId) {
