@@ -16,8 +16,9 @@ router.post('/:calId/subscribe', calendarController.subscribe);
 router.delete('/:calId/subscribe', calendarController.unsubscribe);
 router.get('/:calId/subscriptions', calendarController.getSubscriptions);
 
-// 시프트 통계
-router.get('/:calId/shift-stats', calendarController.getShiftStats);
+// 시프트 통계 — 폐기 (2026-08-01 User 결정, api.md §4). 구 클라이언트 호환을 위해
+// 라우트는 유지하되 SHIFT_NOT_SUPPORTED(410)로 명시 거부한다.
+router.get('/:calId/shift-stats', calendarController.shiftNotSupported);
 
 // 캐스트 목록
 router.get('/:calId/casts', castController.getCasts);

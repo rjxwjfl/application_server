@@ -134,10 +134,6 @@ class CalendarService {
   async getCalendarSubscriptions(calId, userId) {
     return await CalendarDAO.getCalendarSubscriptions(pool, calId);
   }
-
-  async getShiftStats(calId, period, userId) {
-    return await CalendarDAO.getShiftStats(pool, calId, period);
-  }
 }
 
 module.exports = { CalendarService: new CalendarService() };

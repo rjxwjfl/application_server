@@ -11,7 +11,7 @@ const binderController = {
   }),
 
   createBinder: asyncHandler(async (req, res) => {
-    const binder = await BinderService.createBinder(req.body, req.device_uuid);
+    const binder = await BinderService.createBinder(req.body, req.user_id, req.device_uuid);
     res.status(201).json({ success: true, data: binder, message: '바인더가 생성되었습니다' });
   }),
 

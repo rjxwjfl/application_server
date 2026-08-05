@@ -126,28 +126,6 @@ class CalendarDAO {
   async getCalendarSubscriptions(conn, calId) {
     return this.getSubscribersByCalId(conn, calId);
   }
-
-  async getShiftStats(conn, calId, period) {
-    // period: 'YYYY-MM'
-    const [year, month] = period.split('-').map(Number);
-    const { rows } = await conn.query(
-      `SELECT ep.user_id, ui.display_name,
-              COUNT(ei.id) FILTER (WHERE ep.state = 3) AS confirmed_count,
-              COUNT(ei.id) AS total_count
-       FROM event_instances ei
-       JOIN events e ON e.id = ei.event_id
-       JOIN event_participants ep ON ep.instance_id = ei.id
-       LEFT JOIN user_infos ui ON ep.user_id = ui.user_id
-       WHERE e.calendar_id = $1
-         AND EXTRACT(YEAR FROM ei.start_date) = $2
-         AND EXTRACT(MONTH FROM ei.start_date) = $3
-         AND ei.deleted_at IS NULL AND e.deleted_at IS NULL
-       GROUP BY ep.user_id, ui.display_name
-       ORDER BY confirmed_count DESC`,
-      [calId, year, month]
-    );
-    return rows;
-  }
 }
 
 module.exports = { CalendarDAO: new CalendarDAO() };

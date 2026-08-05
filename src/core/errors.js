@@ -37,6 +37,18 @@ class ConflictError extends AppError {
   }
 }
 
+class GoneError extends AppError {
+  constructor(message = '더 이상 지원되지 않는 요청입니다', errorCode = null) {
+    super(message, 410, errorCode);
+  }
+}
+
+class NotImplementedError extends AppError {
+  constructor(message = '아직 지원되지 않는 기능입니다', errorCode = null) {
+    super(message, 501, errorCode);
+  }
+}
+
 module.exports = {
   AppError,
   BadRequestError,
@@ -44,4 +56,6 @@ module.exports = {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  GoneError,
+  NotImplementedError,
 };

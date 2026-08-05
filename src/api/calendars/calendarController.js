@@ -1,6 +1,6 @@
 const { CalendarService } = require('../../services/calendarService');
 const asyncHandler = require('../../core/asyncHandler');
-const { BadRequestError } = require('../../core/errors');
+const { BadRequestError, GoneError } = require('../../core/errors');
 
 const calendarController = {
   getBinderCalendars: asyncHandler(async (req, res) => {
@@ -67,11 +67,11 @@ const calendarController = {
     res.json({ success: true, data: subs });
   }),
 
-  getShiftStats: asyncHandler(async (req, res) => {
-    const { period } = req.query;
-    if (!period) throw new BadRequestError('period 파라미터가 필요합니다 (YYYY-MM)');
-    const stats = await CalendarService.getShiftStats(req.params.calId, period, req.user_id);
-    res.json({ success: true, data: stats });
+  // Shift는 active 기능에서 제거됐다 (2026-08-01 User 결정, api.md §4).
+  // 호환 기간 구 클라이언트가 이 경로로 보내는 요청은 조용히 404 처리하지 않고
+  // SHIFT_NOT_SUPPORTED(410)로 명시 거부한다.
+  shiftNotSupported: asyncHandler(async (req, res) => {
+    throw new GoneError('Shift 기능은 더 이상 지원되지 않습니다', 'SHIFT_NOT_SUPPORTED');
   }),
 };
 
