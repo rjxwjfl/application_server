@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
 const { BadRequestError, NotFoundError, ForbiddenError, ConflictError, NotImplementedError } = require('../core/errors');
+const { requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class BinderService {
@@ -129,7 +130,8 @@ class BinderService {
     eventBus.emit('member:joined', { user_id: userId, binder_id: binderId, device_uuid });
   }
 
-  async getBinderMembers(binderId) {
+  async getBinderMembers(binderId, userId) {
+    await requireBinderMember(pool, binderId, userId);
     return await BinderDAO.getMembers(pool, binderId);
   }
 
@@ -309,10 +311,21 @@ class BinderService {
     return result;
   }
 
-  async getBinder(binderId) {
+  async getBinder(binderId, userId) {
     const binder = await BinderDAO.findById(pool, binderId);
     if (!binder) throw new NotFoundError('바인더를 찾을 수 없습니다');
-    return binder;
+
+    const member = await BinderDAO.getMember(pool, binderId, userId);
+    if (member && !member.deleted_at) return binder;
+
+    // 비멤버는 공개 바인더에 한해 preview 필드만 받는다 — searchByName(searchBinders)과 동일 필드셋,
+    // deleted_at 등 내부 필드는 제외한다.
+    const settings = await BinderDAO.getSettings(pool, binderId);
+    if (!settings || !settings.is_public) {
+      throw new ForbiddenError('바인더 멤버만 조회할 수 있습니다');
+    }
+    const { id, name, description, image_url, thumbnail_url, member_count, last_activity_at, created_at, updated_at } = binder;
+    return { id, name, description, image_url, thumbnail_url, member_count, last_activity_at, created_at, updated_at };
   }
 
   async getJoinRequests(binderId, userId) {
@@ -347,12 +360,14 @@ class BinderService {
     await BinderDAO.updateMemberPreferences(pool, binderId, userId, data);
   }
 
-  async getBoost(binderId) {
+  async getBoost(binderId, userId) {
+    await requireBinderMember(pool, binderId, userId);
     const { BillingDAO } = require('../daos/billingDAO');
     return await BillingDAO.getBinderBoost(pool, binderId);
   }
 
-  async checkBoost(binderId) {
+  async checkBoost(binderId, userId) {
+    await requireBinderMember(pool, binderId, userId);
     const { BillingDAO } = require('../daos/billingDAO');
     return await BillingDAO.getBinderBoost(pool, binderId);
   }
