@@ -4,17 +4,33 @@ const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
 const { BadRequestError, NotFoundError, ForbiddenError } = require('../core/errors');
+const { requireBinderMemberByCalendarId, requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 const pool = require('../../config/db');
 
+// 캘린더 항목(Task) 편집·삭제 권한 (domain.md §(12) [확정], api.md DELETE /tasks/:taskId와 동일 축):
+// 작성자는 항상 가능, 그 외는 Binder 편집자(editor, role<=2) 이상. Event 쪽 assertCanEditItem과
+// 동일 상수·구조 — 이 저장소에서 Event/Task 구조 불일치가 반복돼 여기서도 값을 고정한다.
+const ITEM_EDIT_ROLE_DEFAULT = 2;
+
+function assertCanEditItem(authorId, userId, member) {
+  if (authorId === userId) return;
+  if (member.role > ITEM_EDIT_ROLE_DEFAULT) {
+    throw new ForbiddenError('작성자 또는 편집자 이상만 수정·삭제할 수 있습니다');
+  }
+}
+
 class TaskService {
-  async getTask(taskId) {
+  async getTask(taskId, userId) {
     const task = await TaskDAO.findById(pool, taskId);
     if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
+    await requireBinderMemberByCalendarId(pool, task.calendar_id, userId);
     return task;
   }
 
   async createTask(taskData, context) {
+    await requireBinderMemberByCalendarId(pool, taskData.calendar_id, context.sender_id);
+
     const taskId = taskData.id || generateUUID();
 
     const task = await withTransaction(async (client) => {
@@ -36,15 +52,17 @@ class TaskService {
   }
 
   async updateTask(taskId, updateData, context) {
-    const { task, result } = await withTransaction(async (client) => {
+    const { result, binder_id } = await withTransaction(async (client) => {
       const task = await TaskDAO.findById(client, taskId);
       if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
+      const { calendar, member } = await requireBinderMemberByCalendarId(client, task.calendar_id, context.sender_id);
+      assertCanEditItem(task.author_id, context.sender_id, member);
       const result = await TaskDAO.updateTask(client, taskId, updateData);
-      return { task, result };
+      return { result, binder_id: calendar.binder_id };
     });
 
     eventBus.emit('sync', {
-      binder_id: task.binder_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.TASK, target_id: taskId,
@@ -53,16 +71,18 @@ class TaskService {
     return result;
   }
 
-  async updateTaskInstance(instanceId, updateData, context) {
-    const { instance, result } = await withTransaction(async (client) => {
-      const instance = await TaskDAO.findInstanceById(client, instanceId);
+  async updateTaskInstance(taskId, instanceId, updateData, context) {
+    const { result, binder_id } = await withTransaction(async (client) => {
+      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
+      const member = await requireBinderMember(client, instance.binder_id, context.sender_id);
+      assertCanEditItem(instance.author_id, context.sender_id, member);
       const result = await TaskDAO.updateTaskInstance(client, instanceId, updateData);
-      return { instance, result };
+      return { result, binder_id: instance.binder_id };
     });
 
     eventBus.emit('sync', {
-      binder_id: instance.binder_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.TASK_INSTANCE, target_id: instanceId,
@@ -72,19 +92,31 @@ class TaskService {
   }
 
   async splitTask(splitData, context) {
-    const { taskId, instanceId } = splitData;
+    // controller가 { task_id, instance_id, ...req.body }로 넘긴다(taskController.splitTask) —
+    // 기존에 camelCase(taskId/instanceId)로 구조분해해 항상 undefined였던 버그를 함께 고친다
+    // (Event 쪽 splitEvent는 이미 snake_case로 일치했다 — "구조가 같은데 한쪽만 고쳐졌다" 반복 방지).
+    const { task_id: taskId, instance_id: instanceId } = splitData;
     if (!taskId || !instanceId) {
       throw new BadRequestError('taskId와 instanceId가 필요합니다');
     }
 
     const newTaskId = generateUUID();
 
-    const result = await withTransaction(async (client) => {
-      return await TaskDAO.splitTask(client, taskId, instanceId, newTaskId);
+    const { result, binder_id } = await withTransaction(async (client) => {
+      const task = await TaskDAO.findById(client, taskId);
+      if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
+      const { calendar, member } = await requireBinderMemberByCalendarId(client, task.calendar_id, context.sender_id);
+      assertCanEditItem(task.author_id, context.sender_id, member);
+
+      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
+      if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
+
+      const result = await TaskDAO.splitTask(client, taskId, instanceId, newTaskId);
+      return { result, binder_id: calendar.binder_id };
     });
 
     eventBus.emit('sync', {
-      binder_id: splitData.binder_id,
+      binder_id,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.CREATE, target_type: TargetType.TASK, target_id: newTaskId,
@@ -97,8 +129,10 @@ class TaskService {
     const { binder_id } = await withTransaction(async (client) => {
       const task = await TaskDAO.findById(client, taskId);
       if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
+      const { calendar, member } = await requireBinderMemberByCalendarId(client, task.calendar_id, context.sender_id);
+      assertCanEditItem(task.author_id, context.sender_id, member);
       await TaskDAO.softDeleteTask(client, taskId);
-      return { binder_id: task.binder_id };
+      return { binder_id: calendar.binder_id };
     });
 
     eventBus.emit('sync', {
@@ -109,10 +143,12 @@ class TaskService {
     });
   }
 
-  async deleteTaskInstance(instanceId, context) {
+  async deleteTaskInstance(taskId, instanceId, context) {
     const { binder_id } = await withTransaction(async (client) => {
-      const instance = await TaskDAO.findInstanceById(client, instanceId);
+      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
       if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
+      const member = await requireBinderMember(client, instance.binder_id, context.sender_id);
+      assertCanEditItem(instance.author_id, context.sender_id, member);
       await TaskDAO.softDeleteTaskInstance(client, instanceId);
       return { binder_id: instance.binder_id };
     });

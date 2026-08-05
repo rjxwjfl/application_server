@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
 const { BadRequestError, NotFoundError, ForbiddenError, ConflictError, NotImplementedError } = require('../core/errors');
+const { requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class BinderService {
@@ -129,7 +130,8 @@ class BinderService {
     eventBus.emit('member:joined', { user_id: userId, binder_id: binderId, device_uuid });
   }
 
-  async getBinderMembers(binderId) {
+  async getBinderMembers(binderId, userId) {
+    await requireBinderMember(pool, binderId, userId);
     return await BinderDAO.getMembers(pool, binderId);
   }
 
@@ -309,10 +311,21 @@ class BinderService {
     return result;
   }
 
-  async getBinder(binderId) {
+  async getBinder(binderId, userId) {
     const binder = await BinderDAO.findById(pool, binderId);
     if (!binder) throw new NotFoundError('바인더를 찾을 수 없습니다');
-    return binder;
+
+    const member = await BinderDAO.getMember(pool, binderId, userId);
+    if (member && !member.deleted_at) return binder;
+
+    // 비멤버는 공개 바인더에 한해 preview 필드만 받는다 — searchByName(searchBinders)과 동일 필드셋,
+    // deleted_at 등 내부 필드는 제외한다.
+    const settings = await BinderDAO.getSettings(pool, binderId);
+    if (!settings || !settings.is_public) {
+      throw new ForbiddenError('바인더 멤버만 조회할 수 있습니다');
+    }
+    const { id, name, description, image_url, thumbnail_url, member_count, last_activity_at, created_at, updated_at } = binder;
+    return { id, name, description, image_url, thumbnail_url, member_count, last_activity_at, created_at, updated_at };
   }
 
   async getJoinRequests(binderId, userId) {
@@ -347,21 +360,34 @@ class BinderService {
     await BinderDAO.updateMemberPreferences(pool, binderId, userId, data);
   }
 
-  async getBoost(binderId) {
-    const { BillingDAO } = require('../daos/billingDAO');
-    return await BillingDAO.getBinderBoost(pool, binderId);
+  // Binder Boost는 출시 후 오픈으로 결정됐고, binder_boosts DAO 계층 자체가 없다
+  // (getBinderBoost·transferBinderBoost·cancelBinderBoost 전부 billingDAO.js에 없는
+  // 메서드 — grep 0건). 여기서 임의로 구현하지 않고 501로 명시 거부한다(verifyBoost 선례와
+  // 동일 형태). 재구현은 별도 Task로 배정한다.
+  //
+  // ⚠️ 인가는 501 이전에 통과시킨다 — 비멤버가 호출 가능하면 진입점 존재 자체가 새어 나간다.
+
+  async getBoost(binderId, userId) {
+    await requireBinderMember(pool, binderId, userId);
+    throw new NotImplementedError(
+      'Binder Boost 조회 기능은 아직 구현되지 않았습니다',
+      'BINDER_BOOST_GET_NOT_IMPLEMENTED'
+    );
   }
 
-  async checkBoost(binderId) {
-    const { BillingDAO } = require('../daos/billingDAO');
-    return await BillingDAO.getBinderBoost(pool, binderId);
+  async checkBoost(binderId, userId) {
+    await requireBinderMember(pool, binderId, userId);
+    throw new NotImplementedError(
+      'Binder Boost 조회 기능은 아직 구현되지 않았습니다',
+      'BINDER_BOOST_CHECK_NOT_IMPLEMENTED'
+    );
   }
 
+  // verifyBoost는 RLY-20260806-010에서 죽은 호출(TypeError)은 이미 501로 막았으나 인가는
+  // 그때도 붙지 않았다 — 형제 넷(getBoost 등)과 순서를 맞춘다(인가 → 501). 비멤버가 501
+  // 자체는 받아도 진입점 존재를 확인할 수 없어야 한다.
   async verifyBoost(binderId, userId, data) {
-    // Binder Boost 구매 검증(BillingService.verifyBinderBoost)은 미구현이다.
-    // binder_boosts DAO 계층 자체가 없어(getBinderBoost·transferBinderBoost·
-    // cancelBinderBoost도 동일하게 없는 메서드를 호출한다) 여기서 임의로 구현하지
-    // 않고 501로 명시 거부한다. 재구현은 별도 Task로 배정한다.
+    await requireBinderMember(pool, binderId, userId);
     throw new NotImplementedError(
       'Binder Boost 구매 검증 기능은 아직 구현되지 않았습니다',
       'BINDER_BOOST_VERIFY_NOT_IMPLEMENTED'
@@ -369,22 +395,20 @@ class BinderService {
   }
 
   async transferBoost(binderId, userId, data) {
-    const { BillingDAO } = require('../daos/billingDAO');
-    await withTransaction(async (client) => {
-      const member = await BinderDAO.getMember(client, binderId, userId);
-      if (!member || member.deleted_at || member.role > 1) throw new ForbiddenError('권한이 없습니다');
-      await BillingDAO.transferBinderBoost(client, binderId, data.new_payer_id);
-    });
-    return await this.getBoost(binderId);
+    // 기존 role 게이트(manager 이상)는 유지 — 501로 응답을 바꾸는 것이지 인가 기준을 바꾸는 게 아니다.
+    await requireBinderMember(pool, binderId, userId, { minRole: 1 });
+    throw new NotImplementedError(
+      'Binder Boost 이전 기능은 아직 구현되지 않았습니다',
+      'BINDER_BOOST_TRANSFER_NOT_IMPLEMENTED'
+    );
   }
 
   async cancelBoost(binderId, userId) {
-    const { BillingDAO } = require('../daos/billingDAO');
-    await withTransaction(async (client) => {
-      const member = await BinderDAO.getMember(client, binderId, userId);
-      if (!member || member.deleted_at || member.role > 1) throw new ForbiddenError('권한이 없습니다');
-      await BillingDAO.cancelBinderBoost(client, binderId);
-    });
+    await requireBinderMember(pool, binderId, userId, { minRole: 1 });
+    throw new NotImplementedError(
+      'Binder Boost 취소 기능은 아직 구현되지 않았습니다',
+      'BINDER_BOOST_CANCEL_NOT_IMPLEMENTED'
+    );
   }
 
   async listAttachments(binderId, query, userId) {

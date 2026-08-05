@@ -8,7 +8,7 @@ const eventController = {
   }),
 
   getEvent: asyncHandler(async (req, res) => {
-    const event = await EventService.getEvent(req.params.eventId);
+    const event = await EventService.getEvent(req.params.eventId, req.user_id);
     res.json({ success: true, data: event });
   }),
 
@@ -19,8 +19,8 @@ const eventController = {
   }),
 
   updateEventInstance: asyncHandler(async (req, res) => {
-    const { instanceId } = req.params;
-    const instance = await EventService.updateEventInstance(instanceId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    const { eventId, instanceId } = req.params;
+    const instance = await EventService.updateEventInstance(eventId, instanceId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, data: instance, message: '이벤트 인스턴스가 수정되었습니다' });
   }),
 
@@ -40,14 +40,14 @@ const eventController = {
   }),
 
   deleteEventInstance: asyncHandler(async (req, res) => {
-    const { instanceId } = req.params;
-    await EventService.deleteEventInstance(instanceId, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    const { eventId, instanceId } = req.params;
+    await EventService.deleteEventInstance(eventId, instanceId, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, message: '이벤트 인스턴스가 삭제되었습니다' });
   }),
 
   addParticipant: asyncHandler(async (req, res) => {
-    const { instanceId } = req.params;
-    const participant = await EventService.addParticipant(instanceId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    const { eventId, instanceId } = req.params;
+    const participant = await EventService.addParticipant(eventId, instanceId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.status(201).json({ success: true, data: participant, message: '참가자가 추가되었습니다' });
   }),
 
@@ -58,9 +58,9 @@ const eventController = {
   }),
 
   removeParticipant: asyncHandler(async (req, res) => {
-    const { instanceId, userId } = req.params;
+    const { eventId, instanceId, userId } = req.params;
     const target_id = userId || req.body.target_id;
-    await EventService.removeParticipant(instanceId, target_id, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    await EventService.removeParticipant(eventId, instanceId, target_id, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, message: '참가자가 삭제되었습니다' });
   }),
 };

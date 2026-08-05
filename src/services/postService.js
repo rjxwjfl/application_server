@@ -5,6 +5,7 @@ const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const pool = require('../../config/db');
 const { NotFoundError, ForbiddenError } = require('../core/errors');
+const { requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class PostService {
@@ -22,9 +23,10 @@ class PostService {
     return await Promise.all(posts.map((post) => this.withAttachments(post)));
   }
 
-  async getPost(postId) {
+  async getPost(postId, userId) {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+    await requireBinderMember(pool, post.binder_id, userId);
     return await this.withAttachments(post);
   }
 
@@ -98,9 +100,10 @@ class PostService {
 
   // Comments
 
-  async getComments(postId, query) {
+  async getComments(postId, query, userId) {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+    await requireBinderMember(pool, post.binder_id, userId);
     return await PostDAO.findCommentsByPostId(pool, postId, query);
   }
 
@@ -186,6 +189,9 @@ class PostService {
   async unlikePost(postId, context) {
     const post = await PostDAO.findById(pool, postId);
     if (!post) throw new NotFoundError('게시물을 찾을 수 없습니다');
+
+    const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 좋아요를 취소할 수 있습니다');
 
     await PostDAO.softDeleteLike(pool, postId, context.sender_id);
 

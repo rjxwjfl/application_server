@@ -6,18 +6,20 @@ const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
 const pool = require('../../config/db');
 const { NotFoundError, ForbiddenError } = require('../core/errors');
+const { requireBinderMemberByCalendarId } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
 class CastService {
-  async getCasts(calId, query) {
-    const cal = await CalendarDAO.findById(pool, calId);
-    if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
+  async getCasts(calId, query, userId) {
+    // 결정 5: 바인더 멤버십 OR 캘린더 is_public — 비공개 캘린더의 비멤버는 접근 불가.
+    await requireBinderMemberByCalendarId(pool, calId, userId, { allowPublicRead: true });
     return await CastDAO.findByCalId(pool, calId, query);
   }
 
-  async getCast(castId) {
+  async getCast(castId, userId) {
     const cast = await CastDAO.findById(pool, castId);
     if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
+    await requireBinderMemberByCalendarId(pool, cast.calendar_id, userId, { allowPublicRead: true });
     return cast;
   }
 
@@ -114,9 +116,10 @@ class CastService {
 
   // Comments
 
-  async getComments(castId, query) {
+  async getComments(castId, query, userId) {
     const cast = await CastDAO.findById(pool, castId);
     if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
+    await requireBinderMemberByCalendarId(pool, cast.calendar_id, userId, { allowPublicRead: true });
     return await CastDAO.findCommentsByCastId(pool, castId, query);
   }
 

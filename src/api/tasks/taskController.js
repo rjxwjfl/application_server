@@ -8,7 +8,7 @@ const taskController = {
   }),
 
   getTask: asyncHandler(async (req, res) => {
-    const task = await TaskService.getTask(req.params.taskId);
+    const task = await TaskService.getTask(req.params.taskId, req.user_id);
     res.json({ success: true, data: task });
   }),
 
@@ -19,8 +19,8 @@ const taskController = {
   }),
 
   updateTaskInstance: asyncHandler(async (req, res) => {
-    const { instanceId } = req.params;
-    const instance = await TaskService.updateTaskInstance(instanceId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    const { taskId, instanceId } = req.params;
+    const instance = await TaskService.updateTaskInstance(taskId, instanceId, req.body, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, data: instance, message: '할 일 인스턴스가 수정되었습니다' });
   }),
 
@@ -40,8 +40,8 @@ const taskController = {
   }),
 
   deleteTaskInstance: asyncHandler(async (req, res) => {
-    const { instanceId } = req.params;
-    await TaskService.deleteTaskInstance(instanceId, { sender_id: req.user_id, device_uuid: req.device_uuid });
+    const { taskId, instanceId } = req.params;
+    await TaskService.deleteTaskInstance(taskId, instanceId, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, message: '할 일 인스턴스가 삭제되었습니다' });
   }),
 

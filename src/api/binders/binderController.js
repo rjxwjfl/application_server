@@ -69,7 +69,7 @@ const binderController = {
   }),
 
   getBinderMembers: asyncHandler(async (req, res) => {
-    const members = await BinderService.getBinderMembers(req.params.binderId);
+    const members = await BinderService.getBinderMembers(req.params.binderId, req.user_id);
     res.json({ success: true, data: members });
   }),
 

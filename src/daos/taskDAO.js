@@ -225,7 +225,7 @@ class TaskDAO {
 
   async findInstanceContext(conn, taskId, instanceId) {
     const result = await conn.query(`
-      SELECT ti.id, ti.completion_rule, ti.deleted_at, c.binder_id
+      SELECT ti.id, ti.completion_rule, ti.deleted_at, t.calendar_id, t.author_id, c.binder_id
       FROM task_instances ti
       JOIN tasks t ON t.id = ti.task_id
       JOIN calendars c ON c.id = t.calendar_id
