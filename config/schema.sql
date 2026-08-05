@@ -469,6 +469,45 @@ CREATE TABLE task_sections (
 
 
 -- ============================================================
+-- SECTION 5.6: GROUPS (멤버 추가 프리셋)
+-- ============================================================
+
+DROP TABLE IF EXISTS group_members  CASCADE;
+DROP TABLE IF EXISTS groups         CASCADE;
+
+CREATE TABLE groups (
+  id          UUID        NOT NULL,
+  binder_id   UUID        NOT NULL,
+  name        TEXT        NOT NULL,
+  color       TEXT,
+  created_by  UUID,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at  TIMESTAMPTZ,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_grp_binder  FOREIGN KEY (binder_id)  REFERENCES binders(id),
+  CONSTRAINT fk_grp_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_groups_sync ON groups (binder_id, updated_at);
+
+CREATE TABLE group_members (
+  id          UUID        NOT NULL,
+  group_id    UUID        NOT NULL,
+  user_id     UUID        NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at  TIMESTAMPTZ,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_gm_group FOREIGN KEY (group_id) REFERENCES groups(id),
+  CONSTRAINT fk_gm_user  FOREIGN KEY (user_id)  REFERENCES users(id)
+);
+CREATE UNIQUE INDEX uq_group_members_active ON group_members (group_id, user_id)
+  WHERE deleted_at IS NULL;
+CREATE INDEX idx_gm_user_sync ON group_members (user_id, updated_at);
+CREATE INDEX idx_gm_group ON group_members (group_id) WHERE deleted_at IS NULL;
+
+
+-- ============================================================
 -- SECTION 6: SPECIAL DAYS
 -- ============================================================
 
@@ -476,22 +515,33 @@ DROP TABLE IF EXISTS holidays     CASCADE;
 DROP TABLE IF EXISTS special_days CASCADE;
 
 CREATE TABLE special_days (
-  id             UUID        NOT NULL,
-  calendar_id    UUID        NOT NULL,
-  name           TEXT        NOT NULL,
-  base_date      DATE        NOT NULL,
-  is_yearly      BOOLEAN     NOT NULL DEFAULT TRUE,
-  is_lunar       BOOLEAN     NOT NULL DEFAULT FALSE,
-  show_dday      BOOLEAN     NOT NULL DEFAULT TRUE,
-  count_from_one BOOLEAN     NOT NULL DEFAULT TRUE,
-  show_every_day BOOLEAN     NOT NULL DEFAULT FALSE,
-  sticker        TEXT,
-  color          SMALLINT,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted_at     TIMESTAMPTZ,
+  id                   UUID        NOT NULL,
+  calendar_id          UUID        NOT NULL,
+  author_id            UUID        NOT NULL,
+  name                 TEXT        NOT NULL,
+  base_date            DATE        NOT NULL,
+  r_rule               TEXT,
+  recurrence_policy_version SMALLINT NOT NULL DEFAULT 1,
+  is_lunar             BOOLEAN     NOT NULL DEFAULT FALSE,
+  lunar_month          SMALLINT,
+  lunar_day            SMALLINT,
+  lunar_is_leap_month  BOOLEAN,
+  show_dday            BOOLEAN     NOT NULL DEFAULT TRUE,
+  count_from_one       BOOLEAN     NOT NULL DEFAULT TRUE,
+  show_every_day       BOOLEAN     NOT NULL DEFAULT FALSE,
+  sticker              TEXT,
+  color                SMALLINT,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at           TIMESTAMPTZ,
+  reminder_offsets     INTEGER[],
   PRIMARY KEY (id),
-  CONSTRAINT fk_sd_cal FOREIGN KEY (calendar_id) REFERENCES calendars(id)
+  CONSTRAINT fk_sd_cal    FOREIGN KEY (calendar_id) REFERENCES calendars(id),
+  CONSTRAINT fk_sd_author FOREIGN KEY (author_id)   REFERENCES users(id),
+  CONSTRAINT ck_sd_lunar_fields CHECK (
+    (NOT is_lunar AND lunar_month IS NULL AND lunar_day IS NULL AND lunar_is_leap_month IS NULL)
+    OR (is_lunar AND lunar_month IS NOT NULL AND lunar_day IS NOT NULL AND lunar_is_leap_month IS NOT NULL)
+  )
 );
 CREATE INDEX idx_special_days_sync ON special_days (calendar_id, updated_at);
 
@@ -568,6 +618,7 @@ CREATE TABLE attachments (
 );
 CREATE INDEX idx_att_context   ON attachments (context_type, context_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_binder    ON attachments (binder_id, created_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_att_storage_key ON attachments (storage_key) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_uploader  ON attachments (uploader_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_sync      ON attachments (binder_id, updated_at);
 CREATE INDEX idx_att_lifecycle ON attachments (status, storage_class, hidden_at);
@@ -824,6 +875,7 @@ CREATE TABLE audit_logs_2026 PARTITION OF audit_logs
   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 CREATE TABLE audit_logs_2027 PARTITION OF audit_logs
   FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+CREATE TABLE audit_logs_2028      PARTITION OF audit_logs      FOR VALUES FROM ('2028-01-01') TO ('2029-01-01');
 
 CREATE INDEX idx_al_binder ON audit_logs (binder_id);
 CREATE INDEX idx_al_actor  ON audit_logs (actor_id);
@@ -848,6 +900,7 @@ CREATE TABLE activity_feeds_2026 PARTITION OF activity_feeds
   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 CREATE TABLE activity_feeds_2027 PARTITION OF activity_feeds
   FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+CREATE TABLE activity_feeds_2028  PARTITION OF activity_feeds  FOR VALUES FROM ('2028-01-01') TO ('2029-01-01');
 
 CREATE INDEX idx_feed_binder_cursor ON activity_feeds (binder_id, created_at DESC, id DESC);
 
@@ -864,22 +917,25 @@ CREATE TABLE activity_feed_cursors (
 CREATE INDEX idx_feed_cursors_sync ON activity_feed_cursors (user_id, updated_at);
 
 CREATE TABLE reminders (
-  id             UUID        NOT NULL,
-  user_id        UUID        NOT NULL,
-  -- 0=event_instance 1=task_instance
-  target_type    SMALLINT    NOT NULL,
-  target_id      UUID        NOT NULL,
-  base_time      TIMESTAMPTZ NOT NULL,
-  trigger_at     TIMESTAMPTZ NOT NULL,
-  trigger_offset INTERVAL,
-  is_sent        BOOLEAN     NOT NULL DEFAULT FALSE,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  id              UUID        NOT NULL,
+  -- 0=event_instance 1=task_instance 2=special_day
+  target_type     SMALLINT    NOT NULL,
+  target_id       UUID        NOT NULL,
+  trigger_offset  INTEGER     NOT NULL,
+  trigger_at      TIMESTAMPTZ NOT NULL,
+  timezone        TEXT,
+  claim_token     UUID,
+  claimed_at      TIMESTAMPTZ,
+  attempt_count   INTEGER     NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ,
+  sent_at         TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (id),
-  CONSTRAINT fk_rem_user FOREIGN KEY (user_id) REFERENCES users(id)
+  CONSTRAINT ck_rem_tz CHECK (target_type <> 2 OR timezone IS NOT NULL)
 );
-CREATE INDEX idx_rem_trigger_pending ON reminders (trigger_at)
-  WHERE is_sent = FALSE;
+CREATE UNIQUE INDEX uq_reminders_target ON reminders (target_type, target_id, trigger_offset);
+CREATE INDEX idx_rem_dispatch ON reminders (trigger_at, next_attempt_at) WHERE sent_at IS NULL;
 
 CREATE TABLE notifications (
   id                UUID        NOT NULL,
@@ -907,6 +963,7 @@ CREATE TABLE notifications_2026 PARTITION OF notifications
   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 CREATE TABLE notifications_2027 PARTITION OF notifications
   FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+CREATE TABLE notifications_2028   PARTITION OF notifications   FOR VALUES FROM ('2028-01-01') TO ('2029-01-01');
 
 CREATE INDEX idx_noti_sync             ON notifications (recipient_id, updated_at);
 CREATE INDEX idx_noti_recipient_cursor ON notifications (recipient_id, is_read, created_at DESC);
