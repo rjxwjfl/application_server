@@ -1,3 +1,5 @@
+const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
+
 class EventDAO {
   // ============================================
   // Event 마스터 테이블
@@ -93,6 +95,8 @@ class EventDAO {
     return result.rows[0];
   }
 
+  // 항목 삭제 → 인스턴스·참가자·리마인더 전파 (RLY-20260806-027). TaskDAO.softDeleteTask와
+  // 대칭 — 한쪽만 고치면 반복 일정(최대 365회차)에서 고아 행이 쌓인다.
   async softDeleteEvent(conn, eventId) {
     const query = `
       UPDATE events
@@ -100,6 +104,21 @@ class EventDAO {
       WHERE id = $1 AND deleted_at IS NULL
     `;
     await conn.query(query, [eventId]);
+
+    const instancesResult = await conn.query(
+      `UPDATE event_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE event_id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [eventId]
+    );
+    const instanceIds = instancesResult.rows.map((row) => row.id);
+
+    await cascadeDeleteInstanceChildren(conn, {
+      participantTable: 'event_participants',
+      reminderTargetType: REMINDER_TARGET_TYPE.EVENT_INSTANCE,
+      instanceIds,
+    });
   }
 
   async splitEvent(conn, originalEventId, instanceId, newEventId) {
@@ -215,6 +234,26 @@ class EventDAO {
     `;
     const result = await conn.query(query, [summary, description, color, locations ? JSON.stringify(locations) : null, is_all_day, start_date, end_date, instanceId]);
     return result.rows[0];
+  }
+
+  // 회차 삭제 → 그 회차의 참가자·리마인더로 전파 (RLY-20260806-027 결함 1 — 이 메서드가
+  // 없어 eventService.deleteEventInstance 호출 즉시 TypeError였다). TaskDAO.softDeleteTaskInstance와
+  // 대칭 구현 — 새 패턴을 만들지 않고 그 선례를 그대로 따른다.
+  async softDeleteEventInstance(conn, instanceId) {
+    const result = await conn.query(
+      `UPDATE event_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [instanceId]
+    );
+    const instanceIds = result.rows.map((row) => row.id);
+
+    await cascadeDeleteInstanceChildren(conn, {
+      participantTable: 'event_participants',
+      reminderTargetType: REMINDER_TARGET_TYPE.EVENT_INSTANCE,
+      instanceIds,
+    });
   }
 
   // ============================================
