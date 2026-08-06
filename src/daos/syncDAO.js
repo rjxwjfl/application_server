@@ -6,9 +6,16 @@ class SyncDAO {
   // role >= 0 — join-request pending(role=-1, RLY-20260806-018) 바인더는 이 유저의 동기화
   // 스코프(currDIds)에 넣지 않는다. 이 함수가 sync 파이프라인 전체의 접근 스코프 뿌리이므로,
   // 여기서 빠지면 getSection·getEventsDeltaFull 등 하위 모든 델타 쿼리가 자동으로 차단된다.
+  //
+  // b.deleted_at IS NULL — RLY-20260806-025 방어선. binder 삭제 cascade(BinderDAO.cascadeSoftDelete)가
+  // binder_members도 함께 soft delete하므로 정상 경로에서는 이 join 없이도 막힌다. 그래도 건다 —
+  // cascade가 부분 실패했거나 과거(cascade 도입 전) 데이터가 남아 binder_members만 살아있는 경우의
+  // 방어선이다.
   static async getBinderIdsByUserId(pool, userId) {
     const { rows } = await pool.query(
-      `SELECT binder_id FROM binder_members WHERE user_id = $1 AND deleted_at IS NULL AND role >= 0`,
+      `SELECT bm.binder_id FROM binder_members bm
+       JOIN binders b ON b.id = bm.binder_id
+       WHERE bm.user_id = $1 AND bm.deleted_at IS NULL AND bm.role >= 0 AND b.deleted_at IS NULL`,
       [userId]
     );
     return rows.map(r => r.binder_id);
@@ -198,9 +205,22 @@ class SyncDAO {
   // Track B: Calendar Data 쿼리 (Delta + Full + Tombstone)
   // =========================================================================
   static async getEventsDeltaFull(pool, ctx) {
+    // c.deleted_at IS NULL은 "새로 접근 가능해진 캘린더의 현재 스냅샷" 브랜치(두 번째 SELECT)에만
+    // 건다(RLY-20260806-025 방어선) — 델타/tombstone 브랜치(첫 SELECT, oldDIds 스코프)에 걸면 캘린더
+    // cascade로 e.deleted_at이 막 세팅된 이벤트 자체가 tombstone으로 못 나간다(다른 멤버가 삭제를
+    // 통보받지 못함). 캘린더가 삭제됐다는 사실은 이벤트 자신의 deleted_at 필드로 이미 실린다.
+    //
+    // es.deleted_at IS NULL(LEFT JOIN의 ON절)은 반대로 두 브랜치 모두에 건다 — 이건 "행을 숨기는"
+    // 필터가 아니라 "이 이벤트에 어떤 section_id를 붙일지" 결정하는 필터라 델타/스냅샷 구분이 없다.
+    // WHERE가 아니라 ON에 두는 이유: WHERE에 두면 LEFT JOIN이 사실상 INNER JOIN이 되어 섹션에 안
+    // 붙은 이벤트(es 매칭 자체가 없는 행)가 결과에서 통째로 사라진다 — ON에 두면 event_sections에
+    // 삭제된 링크만 있어도(또는 아예 없어도) 이벤트 행 자체는 살아있고 section_id만 NULL이 된다
+    // (RLY-20260806-025 후속 — RLY-20260806-029가 EventDAO.removeSection을 hard DELETE에서 soft
+    // UPDATE로 바꾸면서 이 경로에 실제로 삭제된 event_sections 행이 생기기 시작한다. 지금은
+    // removeSection 호출부가 0건이라 무해했다).
     const query = `
       SELECT e.*, es.section_id FROM events e
-      LEFT JOIN event_sections es ON es.event_id = e.id
+      LEFT JOIN event_sections es ON es.event_id = e.id AND es.deleted_at IS NULL
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.updated_at > $3
@@ -208,10 +228,11 @@ class SyncDAO {
       UNION ALL
 
       SELECT e.*, es.section_id FROM events e
-      LEFT JOIN event_sections es ON es.event_id = e.id
+      LEFT JOIN event_sections es ON es.event_id = e.id AND es.deleted_at IS NULL
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[]))
         AND e.deleted_at IS NULL
+        AND c.deleted_at IS NULL
         AND (e.created_at >= $6 OR e.updated_at >= $6)
     `;
     const { rows } = await pool.query(query, [
@@ -229,7 +250,7 @@ class SyncDAO {
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND i.updated_at > $3)
         OR
-        ((c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND i.start_date >= $6)
+        ((c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND i.deleted_at IS NULL AND c.deleted_at IS NULL AND i.start_date >= $6)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -248,7 +269,7 @@ class SyncDAO {
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[])) AND ep.updated_at > $3)
         OR
-        ((c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL)
+        ((c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[])) AND ep.deleted_at IS NULL AND c.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -265,7 +286,7 @@ class SyncDAO {
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND t.updated_at > $3)
         OR
-        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
+        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND t.deleted_at IS NULL AND c.deleted_at IS NULL AND (t.created_at >= $6 OR t.updated_at >= $6))
       )
     `;
     const { rows } = await pool.query(query, [
@@ -283,7 +304,7 @@ class SyncDAO {
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND ti.updated_at > $3)
         OR
-        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND ti.due_date >= $6)
+        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND ti.deleted_at IS NULL AND c.deleted_at IS NULL AND ti.due_date >= $6)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -302,7 +323,7 @@ class SyncDAO {
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND tp.updated_at > $3)
         OR
-        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL)
+        ((c.binder_id = ANY($4::uuid[]) OR t.calendar_id = ANY($5::uuid[])) AND tp.deleted_at IS NULL AND c.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -319,7 +340,7 @@ class SyncDAO {
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR sd.calendar_id = ANY($2::uuid[])) AND sd.updated_at > $3)
         OR
-        ((c.binder_id = ANY($4::uuid[]) OR sd.calendar_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL)
+        ((c.binder_id = ANY($4::uuid[]) OR sd.calendar_id = ANY($5::uuid[])) AND sd.deleted_at IS NULL AND c.deleted_at IS NULL)
       )
     `;
     const { rows } = await pool.query(query, [
@@ -526,11 +547,14 @@ class SyncDAO {
   // Contextual Fetch 전용 쿼리 (위젯 스크롤 시)
   // =========================================================================
   static async getCalendarDataOnlyByWindow(pool, ctx) {
+    // 순수 스냅샷 쿼리(델타/tombstone 분기 없음) — c.deleted_at IS NULL 추가는 방어선일 뿐 tombstone
+    // 경로를 건드리지 않는다(RLY-20260806-025).
     const query = `
       SELECT e.* FROM events e
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.deleted_at IS NULL
+        AND c.deleted_at IS NULL
     `;
     const { rows } = await pool.query(query, [ctx.currDIds, ctx.currCIds]);
     return { events: rows };

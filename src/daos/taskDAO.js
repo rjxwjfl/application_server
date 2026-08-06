@@ -1,3 +1,5 @@
+const { cascadeDeleteInstanceChildren, cascadeDeleteItemSections, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
+
 class TaskDAO {
   // ============================================
   // Task 마스터 테이블
@@ -87,6 +89,8 @@ class TaskDAO {
     return result.rows[0];
   }
 
+  // 항목 삭제 → 인스턴스·참가자·리마인더 전파 (RLY-20260806-027). EventDAO.softDeleteEvent와
+  // 대칭 — 한쪽만 고치면 반복 일정(최대 365회차)에서 고아 행이 쌓인다.
   async softDeleteTask(conn, taskId) {
     const query = `
       UPDATE tasks
@@ -94,6 +98,29 @@ class TaskDAO {
       WHERE id = $1 AND deleted_at IS NULL
     `;
     await conn.query(query, [taskId]);
+
+    const instancesResult = await conn.query(
+      `UPDATE task_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE task_id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [taskId]
+    );
+    const instanceIds = instancesResult.rows.map((row) => row.id);
+
+    await cascadeDeleteInstanceChildren(conn, {
+      participantTable: 'task_participants',
+      reminderTargetType: REMINDER_TARGET_TYPE.TASK_INSTANCE,
+      instanceIds,
+    });
+
+    // task_sections는 owner-키 자원 — 항목 삭제에서만 전파한다(EventDAO.softDeleteEvent와
+    // 대칭, RLY-20260806-029). softDeleteTaskInstance에서는 부르지 않는다.
+    await cascadeDeleteItemSections(conn, {
+      sectionTable: 'task_sections',
+      itemColumn: 'task_id',
+      itemId: taskId,
+    });
   }
 
   async splitTask(conn, originalTaskId, instanceId, newTaskId) {
@@ -218,13 +245,23 @@ class TaskDAO {
     return result.rows[0];
   }
 
+  // 회차 삭제 → 그 회차의 참가자·리마인더로 전파 (RLY-20260806-027 결함 2).
+  // EventDAO.softDeleteEventInstance와 대칭.
   async softDeleteTaskInstance(conn, instanceId) {
-    const query = `
-      UPDATE task_instances
-      SET deleted_at = now(), updated_at = now()
-      WHERE id = $1 AND deleted_at IS NULL
-    `;
-    await conn.query(query, [instanceId]);
+    const result = await conn.query(
+      `UPDATE task_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [instanceId]
+    );
+    const instanceIds = result.rows.map((row) => row.id);
+
+    await cascadeDeleteInstanceChildren(conn, {
+      participantTable: 'task_participants',
+      reminderTargetType: REMINDER_TARGET_TYPE.TASK_INSTANCE,
+      instanceIds,
+    });
   }
 
   // ============================================

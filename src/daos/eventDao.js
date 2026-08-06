@@ -1,3 +1,5 @@
+const { cascadeDeleteInstanceChildren, cascadeDeleteItemSections, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
+
 class EventDAO {
   // ============================================
   // Event 마스터 테이블
@@ -93,6 +95,8 @@ class EventDAO {
     return result.rows[0];
   }
 
+  // 항목 삭제 → 인스턴스·참가자·리마인더 전파 (RLY-20260806-027). TaskDAO.softDeleteTask와
+  // 대칭 — 한쪽만 고치면 반복 일정(최대 365회차)에서 고아 행이 쌓인다.
   async softDeleteEvent(conn, eventId) {
     const query = `
       UPDATE events
@@ -100,6 +104,30 @@ class EventDAO {
       WHERE id = $1 AND deleted_at IS NULL
     `;
     await conn.query(query, [eventId]);
+
+    const instancesResult = await conn.query(
+      `UPDATE event_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE event_id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [eventId]
+    );
+    const instanceIds = instancesResult.rows.map((row) => row.id);
+
+    await cascadeDeleteInstanceChildren(conn, {
+      participantTable: 'event_participants',
+      reminderTargetType: REMINDER_TARGET_TYPE.EVENT_INSTANCE,
+      instanceIds,
+    });
+
+    // event_sections는 owner-키 자원(항목에 붙지 회차에 붙지 않는다) — 항목 삭제에서만
+    // 전파한다(RLY-20260806-029, SC-event.md H15 vs H16). softDeleteEventInstance에서는
+    // 부르지 않는다.
+    await cascadeDeleteItemSections(conn, {
+      sectionTable: 'event_sections',
+      itemColumn: 'event_id',
+      itemId: eventId,
+    });
   }
 
   async splitEvent(conn, originalEventId, instanceId, newEventId) {
@@ -217,6 +245,26 @@ class EventDAO {
     return result.rows[0];
   }
 
+  // 회차 삭제 → 그 회차의 참가자·리마인더로 전파 (RLY-20260806-027 결함 1 — 이 메서드가
+  // 없어 eventService.deleteEventInstance 호출 즉시 TypeError였다). TaskDAO.softDeleteTaskInstance와
+  // 대칭 구현 — 새 패턴을 만들지 않고 그 선례를 그대로 따른다.
+  async softDeleteEventInstance(conn, instanceId) {
+    const result = await conn.query(
+      `UPDATE event_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [instanceId]
+    );
+    const instanceIds = result.rows.map((row) => row.id);
+
+    await cascadeDeleteInstanceChildren(conn, {
+      participantTable: 'event_participants',
+      reminderTargetType: REMINDER_TARGET_TYPE.EVENT_INSTANCE,
+      instanceIds,
+    });
+  }
+
   // ============================================
   // Event Participant 테이블
   // ============================================
@@ -277,30 +325,40 @@ class EventDAO {
   // Event Section 릴레이션 테이블
   // ============================================
 
+  // TaskDAO.addSection과 대칭(RLY-20260806-029) — ON CONFLICT DO UPDATE로 soft-delete된
+  // 연결의 부활을 지원한다. removeSection이 soft delete인 이상 이 부활 경로가 없으면
+  // 한 번 해제한 event-section 쌍은 재연결이 영원히 막힌다(같은 PK라 새 행을 못 만든다).
   async addSection(conn, eventId, sectionId) {
     const query = `
-      INSERT INTO event_sections (event_id, section_id)
-      VALUES ($1, $2)
-      ON CONFLICT (event_id, section_id) DO NOTHING
+      INSERT INTO event_sections (event_id, section_id, created_at, updated_at)
+      VALUES ($1, $2, now(), now())
+      ON CONFLICT (event_id, section_id) DO UPDATE
+      SET deleted_at = NULL, updated_at = now()
     `;
     await conn.query(query, [eventId, sectionId]);
   }
 
+  // TaskDAO.removeSection과 대칭(RLY-20260806-029) — 구 hard DELETE는 설계 의도(soft
+  // delete로 연결 해제 이력 유지, design_intent.md §event_sections)와 어긋난 버그였다.
   async removeSection(conn, eventId, sectionId) {
     const query = `
-      DELETE FROM event_sections
-      WHERE event_id = $1 AND section_id = $2
+      UPDATE event_sections
+      SET deleted_at = now(), updated_at = now()
+      WHERE event_id = $1 AND section_id = $2 AND deleted_at IS NULL
     `;
     await conn.query(query, [eventId, sectionId]);
   }
 
+  // TaskDAO.getSectionByTaskId와 대칭(RLY-20260806-029) — 구 쿼리는 es.deleted_at을
+  // 걸지 않았다. removeSection이 하드 삭제였을 때는 해제된 연결 행 자체가 없어 무해했지만,
+  // soft delete로 바뀐 지금 이 필터가 없으면 해제된 연결이 계속 조회된다.
   async getSectionByEventId(conn, eventId) {
     const query = `
       SELECT s.id, s.binder_id, s.title, s.access_scope, s.is_default,
              s.created_at, s.updated_at
       FROM event_sections es
       JOIN sections s ON es.section_id = s.id
-      WHERE es.event_id = $1 AND s.deleted_at IS NULL
+      WHERE es.event_id = $1 AND es.deleted_at IS NULL AND s.deleted_at IS NULL
     `;
     const result = await conn.query(query, [eventId]);
     return result.rows;

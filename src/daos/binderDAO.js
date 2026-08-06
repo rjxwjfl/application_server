@@ -1,5 +1,6 @@
 const { SectionDAO } = require('./sectionDAO');
 const { ConflictError } = require('../core/errors');
+const { CalendarDAO } = require('./calendarDAO');
 
 class BinderDAO {
   /**
@@ -91,6 +92,41 @@ class BinderDAO {
       WHERE id = $1 AND deleted_at IS NULL
     `;
     await conn.query(query, [binderId]);
+  }
+
+  // 삭제 전파(cascade soft delete) — RLY-20260806-025. H15(docs/binder/SC-binder-manage.md:181-194)
+  // 순서대로: binder_members → 하위 캘린더(각각 CalendarDAO.cascadeSoftDelete 재사용 — "같은 로직
+  // 두 벌" 금지) → sections → binders 자신. 바인더당 캘린더 수는 보통 한 자리 수라 개별 캘린더에
+  // 대한 순차 호출은 "행 단위 루프"(수만 건 인스턴스를 한 행씩 처리하는 것)와 다른 범주다 — 각
+  // 반복이 그 자체로 집합 단위 cascade 한 벌을 수행한다.
+  //
+  // sections 하위(section_messages 등)는 이번 범위가 아니다(부가 축) — sections.deleted_at까지만.
+  async cascadeSoftDelete(conn, binderId) {
+    await conn.query(
+      `UPDATE binder_members SET deleted_at = now(), updated_at = now()
+       WHERE binder_id = $1 AND deleted_at IS NULL`,
+      [binderId]
+    );
+
+    const { rows: calendars } = await conn.query(
+      `SELECT id FROM calendars WHERE binder_id = $1 AND deleted_at IS NULL`,
+      [binderId]
+    );
+    for (const { id: calendarId } of calendars) {
+      await CalendarDAO.cascadeSoftDelete(conn, calendarId);
+    }
+
+    await conn.query(
+      `UPDATE sections SET deleted_at = now(), updated_at = now()
+       WHERE binder_id = $1 AND deleted_at IS NULL`,
+      [binderId]
+    );
+
+    await conn.query(
+      `UPDATE binders SET deleted_at = now(), updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [binderId]
+    );
   }
 
   // ============================================

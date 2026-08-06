@@ -71,13 +71,23 @@ class CalendarService {
   async delete(calId, context) {
     const cal = await CalendarDAO.findById(pool, calId);
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');
-    if (cal.is_default) throw new BadRequestError('기본 캘린더는 삭제할 수 없습니다');
 
     const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at || member.role !== 0)
       throw new ForbiddenError('마스터만 캘린더를 삭제할 수 있습니다');
 
-    await CalendarDAO.softDelete(pool, calId);
+    // H14(SC-calendar-manage.md:187-194) §16-5 — is_default 컬럼이 스키마에 없어(Option A는 스키마
+    // 변경 필요) Option B(바인더당 최소 1개 캘린더 보장)로 판정한다: 이 캘린더가 바인더의 마지막
+    // 활성 캘린더면 차단한다. RLY-20260806-025 이전에는 없는 컬럼(cal.is_default)을 참조해 이 차단이
+    // 항상 무동작이었다(findById의 SELECT 목록에도 없어 undefined) — 실제로 작동하는 검사로 교체.
+    const activeCalendarCount = await CalendarDAO.countActiveByBinderId(pool, cal.binder_id);
+    if (activeCalendarCount <= 1) {
+      throw new BadRequestError('바인더에는 최소 1개의 캘린더가 있어야 합니다');
+    }
+
+    // 자식 전 테이블(events·tasks·special_days·인스턴스·참가자·reminders·구독) cascade —
+    // 다건 UPDATE라 반드시 트랜잭션(H13). 이전에는 pool에 단일 UPDATE만 날려 cascade가 전혀 없었다.
+    await withTransaction((client) => CalendarDAO.cascadeSoftDelete(client, calId));
 
     eventBus.emit('sync', {
       binder_id: cal.binder_id,
