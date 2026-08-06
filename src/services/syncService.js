@@ -208,12 +208,17 @@ class SyncService {
     // getMessageAttachments에 독자 updated_at 조건을 추가해 이를 닫았다(인가는 messageIds가
     // 아니라 ctx.currDIds·userId 기반 섹션 접근 검증으로 대체 — DAO 내부 주석 참조).
     //
-    // message_embeds·reactions·mentions도 같은 부류의 결손이 있다(구현 보고서 §3 — 목록만
-    // 보고, 이번 Task 범위는 첨부뿐이라 기존 동작(messages 없으면 조회 안 함)을 그대로 둔다).
+    // RLY-20260806-079 — 같은 부류 조사(구현 보고서 §1): message_reactions는 정확히 같은
+    // 성질(react/unreact가 메시지 생성과 독립된 시점에 일어난다, 취소는 소프트 delete라
+    // updated_at으로 잡힌다) — attachments와 동일하게 messages.length와 무관하게 조회하고
+    // ctx.userId·ctx.currDIds를 넘긴다. message_embeds·message_mentions는 조사 결과 다른
+    // 성질이다 — createMessage 트랜잭션 안에서만 생성되고 그 뒤 독립적으로 바뀌는 경로가
+    // 없어(코드 전수 확인) "부모 불변+자식만 변경" 상황 자체가 지금 발생할 수 없다. 그래서
+    // 둘은 기존 동작(messages 없으면 조회 안 함, messageIds 스코프만)을 그대로 뒀다.
     const [attachments, embeds, reactions, mentions] = await Promise.all([
       SyncDAO.getMessageAttachments(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
       messages.length ? SyncDAO.getMessageEmbeds(pool, messageIds, relatedOldTs) : [],
-      messages.length ? SyncDAO.getMessageReactions(pool, messageIds, relatedOldTs) : [],
+      SyncDAO.getMessageReactions(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
       messages.length ? SyncDAO.getMessageMentions(pool, messageIds, relatedOldTs) : [],
     ]);
 
