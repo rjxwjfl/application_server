@@ -5,7 +5,7 @@ const { MediaService } = require('./mediaService');
 const { generateUUID, generateUserCode } = require('../utils/uuid');
 const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
-const { BadRequestError, NotFoundError, ConflictError } = require('../core/errors');
+const { BadRequestError, NotFoundError, ConflictError, ForbiddenError } = require('../core/errors');
 
 class UserService {
   async createUser(userData, client) {
@@ -90,7 +90,13 @@ class UserService {
     });
   }
 
-  async updateUserById(userId, updateData) {
+  // RLY-20260806-054 — req.params.id를 요청자 신원과 대조하지 않아 로그인한 아무나 타인의
+  // display_name·bio를 바꿀 수 있던 IDOR의 수리. requesterId는 인증된 신원(req.user_id)만
+  // 받는다 — 관리자 우회는 이 저장소에 그런 개념이 없어 만들지 않는다.
+  async updateUserById(userId, updateData, requesterId) {
+    if (userId !== requesterId) {
+      throw new ForbiddenError('본인 프로필만 수정할 수 있습니다', 'USER_UPDATE_FORBIDDEN');
+    }
     return await withTransaction(async (client) => {
       // RLY-20260806-052 — 위 updateUser와 동일한 소유권 검증.
       if (updateData.image_url !== undefined) {
