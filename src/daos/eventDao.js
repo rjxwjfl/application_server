@@ -68,7 +68,9 @@ class EventDAO {
 
         if (instance.participants && instance.participants.length > 0) {
           for (const participant of instance.participants) {
-            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.inviter_id, participant.state, participant.memo);
+            // RLY-20260806-031 — inviter_id는 event_participants에 없다(2026-07-20 결정,
+            // schema.md changelog). 참가자 테이블의 "초대자 추적"은 원 설계에 없던 오염이었다.
+            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.state, participant.memo);
           }
         }
       }
@@ -393,27 +395,32 @@ class EventDAO {
   // Event Participant 테이블
   // ============================================
 
-  async addParticipantRaw(conn, instanceId, userId, invitedBy, state, memo) {
+  // RLY-20260806-031 — event_participants에 inviter_id 컬럼이 없다(2026-07-20 결정,
+  // schema.md changelog: "참가자 테이블의 초대자 추적은 원 설계에 없던 오염 — 2026-06-10
+  // 리네임으로 유입"). 구 INSERT/UPDATE/RETURNING이 없는 컬럼을 참조해 참가자를 포함한
+  // 생성이 전부 SQL 에러였다. binder_invitations.inviter_id(초대 링크 생성자)는 별개
+  // 엔티티라 정상 유지 대상이고 이 결정과 무관하다 — 혼동하지 말 것.
+  async addParticipantRaw(conn, instanceId, userId, state, memo) {
     const query = `
-      INSERT INTO event_participants (instance_id, user_id, inviter_id, state, memo, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, now(), now())
+      INSERT INTO event_participants (instance_id, user_id, state, memo, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET state = $4, memo = $5, inviter_id = COALESCE($3, event_participants.inviter_id), updated_at = now(), deleted_at = NULL
+      SET state = $3, memo = $4, updated_at = now(), deleted_at = NULL
     `;
-    await conn.query(query, [instanceId, userId, invitedBy || null, state, memo ? JSON.stringify(memo) : null]);
+    await conn.query(query, [instanceId, userId, state, memo ? JSON.stringify(memo) : null]);
   }
 
-  async addParticipant(conn, instanceId, userId, invitedBy) {
+  async addParticipant(conn, instanceId, userId) {
     // state=1(invite) — 사후 초대(SC-event H22/액션 G)의 초기 상태. state=0(confirm)은
     // 호스트 전용 상태이며 여기서 부여하지 않는다(createEvent 시 addParticipantRaw로만 명시 지정).
     const query = `
-      INSERT INTO event_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
-      VALUES ($1, $2, $3, 1, now(), now())
+      INSERT INTO event_participants (instance_id, user_id, state, created_at, updated_at)
+      VALUES ($1, $2, 1, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
       SET deleted_at = NULL, state = 1, updated_at = now()
-      RETURNING instance_id, user_id, inviter_id, state
+      RETURNING instance_id, user_id, state
     `;
-    const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
+    const result = await conn.query(query, [instanceId, userId]);
     return result.rows[0];
   }
 

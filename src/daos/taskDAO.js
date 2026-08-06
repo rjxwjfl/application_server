@@ -64,7 +64,9 @@ class TaskDAO {
 
         if (instance.participants && instance.participants.length > 0) {
           for (const participant of instance.participants) {
-            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.inviter_id, participant.state);
+            // RLY-20260806-031 — inviter_id는 task_participants에 없다(eventDAO.js와
+            // 동일 사유·동일 2026-07-20 결정, schema.md changelog 참조).
+            await this.addParticipantRaw(conn, instance.id, participant.user_id, participant.state);
           }
         }
       }
@@ -379,20 +381,22 @@ class TaskDAO {
     return result.rows[0] || null;
   }
 
-  async addParticipantRaw(conn, instanceId, userId, invitedBy, state) {
+  // RLY-20260806-031 — task_participants에 inviter_id 컬럼이 없다(eventDAO.js와 동일 사유·
+  // 동일 2026-07-20 결정).
+  async addParticipantRaw(conn, instanceId, userId, state) {
     const query = `
-      INSERT INTO task_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, now(), now())
+      INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
+      VALUES ($1, $2, $3, now(), now())
       ON CONFLICT (instance_id, user_id) DO UPDATE
-      SET state = $4, inviter_id = COALESCE($3, task_participants.inviter_id), updated_at = now(), deleted_at = NULL
+      SET state = $3, updated_at = now(), deleted_at = NULL
     `;
-    await conn.query(query, [instanceId, userId, invitedBy || null, state || 0]);
+    await conn.query(query, [instanceId, userId, state || 0]);
   }
 
-  async addParticipant(conn, instanceId, userId, invitedBy) {
+  async addParticipant(conn, instanceId, userId) {
     const query = `
-    INSERT INTO task_participants (instance_id, user_id, inviter_id, state, created_at, updated_at)
-    VALUES ($1, $2, $3, 0, now(), now())
+    INSERT INTO task_participants (instance_id, user_id, state, created_at, updated_at)
+    VALUES ($1, $2, 0, now(), now())
     ON CONFLICT (instance_id, user_id) DO UPDATE
     SET
       deleted_at = NULL,
@@ -400,9 +404,9 @@ class TaskDAO {
       memo = NULL,
       completed_at = NULL,
       updated_at = now()
-    RETURNING instance_id, user_id, inviter_id, state, memo, completed_at, deleted_at
+    RETURNING instance_id, user_id, state, memo, completed_at, deleted_at
   `;
-    const result = await conn.query(query, [instanceId, userId, invitedBy || null]);
+    const result = await conn.query(query, [instanceId, userId]);
     return result.rows[0];
   }
 
