@@ -71,7 +71,25 @@ class SyncDAO {
     return rows;
   }
 
-  static async getUsersForSync(pool, currDIds, oldTs) {
+  // RLY-20260806-050 — getBinderMembers와 정확히 같은 대상 인구(대응하는 user_id 집합)를
+  // 다루면서도 예전엔 `ui.updated_at > oldTs`로 델타 필터를 걸었다: 기존 멤버가 자기 프로필을
+  // 안 건드린 채 (내가 이미 속한) 다른 바인더에 새로 들어오면, binder_members 행은(아래
+  // getBinderMembers처럼 무조건 100% 재전송이라) 실리는데 users 행은 프로필이 안 바뀌었다는
+  // 이유로 빠졌다 — 클라 로컬 DB의 binder_members→users FK가 깨지는 결함(클라 조사가 직접
+  // 재현). 이 함수를 감싸는 상위 주석("뼈대 데이터는 ts... 따지지 않고 무조건 현재 소속
+  // 기준으로 100% 덮어씌움")이 애초에 요구하던 게 이거였다 — getBinderMembers·
+  // getBindersForSync·getBinderSettings와 같은 패턴(oldTs 파라미터 자체를 없앰)으로 맞춘다.
+  //
+  // 판정(가) vs (나): 이 함수의 대상 인구는 getBinderMembers가 이미 매 pull마다 무조건
+  // 전량 재전송하는 바로 그 user_id 집합과 동일하다(같은 WHERE 조건— binder_members
+  // WHERE binder_id = ANY(currDIds) AND deleted_at IS NULL AND role >= 0). 즉 이 컬럼들을
+  // 전량 재전송해도 "이미 매 pull마다 전량 재전송되는 인구"에 필드 몇 개를 얹는 것뿐이라
+  // 새로운 규모의 비용이 아니다 — binder_members 대비 비교 가능한 크기의 행(문자열 필드
+  // 몇 개, user_code·display_name·bio·image_url·thumbnail_url)이 이미 감내하고 있는 것과
+  // 같은 인구·같은 빈도로 늘어날 뿐이다. (나)(누락분만 보강 전송)는 "이번 델타에 없는
+  // user_id"를 판정하는 별도 로직이 필요해 더 복잡한데, 이미 무조건 100%인 형제
+  // 함수들(getBinderMembers 등) 옆에서 굳이 다른 전략을 쓸 이유가 없다.
+  static async getUsersForSync(pool, currDIds) {
     if (!currDIds.length) return [];
     const query = `
       SELECT u.id, ui.user_code, ui.display_name, ui.bio,
@@ -85,10 +103,8 @@ class SyncDAO {
         SELECT DISTINCT dm.user_id FROM binder_members dm
         WHERE dm.binder_id = ANY($1::uuid[]) AND dm.deleted_at IS NULL AND dm.role >= 0
       )
-      ${oldTs ? 'AND ui.updated_at > $2' : ''}
     `;
-    const params = oldTs ? [currDIds, oldTs] : [currDIds];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(query, [currDIds]);
     return rows;
   }
 
@@ -165,15 +181,28 @@ class SyncDAO {
     return rows;
   }
 
-  static async getGroups(pool, currDIds, oldTs) {
+  // RLY-20260806-050 — getUsersForSync와 같은 결함. groups는 binder_id ∈ currDIds로만
+  // 스코프되고(멤버십 여부와 무관 — 그 바인더의 모든 멤버가 그룹 "정의"를 본다) old/new 바인더
+  // 구분 없이 단일 oldTs를 걸었다: 오래돼 안 바뀐 groups 행이 있는 바인더에 (누구든) 새로
+  // 들어오면 그 groups 행이 델타에서 빠진다 — group_members가 참조하는 부모가 통째로
+  // 누락되는 같은 유형의 결함. getUsersForSync와 동일 판정으로 oldTs를 없앤다(getBinderMembers·
+  // getBindersForSync·getBinderSettings와 동일 패턴).
+  static async getGroups(pool, currDIds) {
     if (!currDIds.length) return [];
     const { rows } = await pool.query(
-      `SELECT * FROM groups WHERE binder_id = ANY($1::uuid[]) ${oldTs ? 'AND updated_at > $2' : ''}`,
-      oldTs ? [currDIds, oldTs] : [currDIds]
+      `SELECT * FROM groups WHERE binder_id = ANY($1::uuid[])`,
+      [currDIds]
     );
     return rows;
   }
 
+  // RLY-20260806-050 — 조사 결과 getGroups·getUsersForSync와 다른 부류로 판정해 안 고쳤다.
+  // 이 함수는(users·groups와 달리) "정의/메타 테이블"이 아니라 내 자신의 멤버십 행 자체를
+  // 반환한다 — 내가 그룹에 새로 들어가는 사건 자체가 이 행의 updated_at을 갱신하므로, 이미
+  // ts 필터가 정확히 그 사건을 잡는다(binder_members 행이 자기 자신의 join으로 최신값을
+  // 갖는 것과 동일 이유). "오래된, 안 바뀐 내 그룹 멤버십이 새 바인더 접근으로 뒤늦게
+  // 드러나는" 시나리오는 그룹 가입이 바인더 가입보다 먼저 있을 수 없어 구조적으로 발생하지
+  // 않는다(047 보고서에 조사 근거 명시).
   static async getOwnGroupMembers(pool, userId, oldTs) {
     const { rows } = await pool.query(
       `SELECT * FROM group_members WHERE user_id = $1 ${oldTs ? 'AND updated_at > $2' : ''}`,
