@@ -56,4 +56,39 @@ async function cascadeDeleteInstanceChildren(conn, { participantTable, reminderT
   );
 }
 
-module.exports = { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE };
+/**
+ * 항목(event/task) 삭제 → 그 항목에 연결된 section 링크 전파. (RLY-20260806-029)
+ *
+ * **항목 단위에서만 부른다 — 회차(instance) 삭제에서는 부르지 않는다.** `event_sections`/
+ * `task_sections`는 owner-키 자원이라 회차가 아니라 항목에 붙는다(domain.md §426
+ * "owner-키 자원(섹션 연결·첨부)", docs/calendar/SC-event.md H16 — 인스턴스만 삭제할 때는
+ * participants·reminders만 전파되고 event_sections는 언급되지 않는다). H15(전체 삭제)만
+ * "events.deleted_at + CASCADE (event_instances·event_participants·event_sections)"로
+ * event_sections를 포함한다.
+ *
+ * soft delete인 이유(hard DELETE가 아닌): config/schema.sql에 두 테이블 다 `deleted_at`
+ * 컬럼이 있고, cleanupJobs.js STEPS(30일 하드삭제 배치)에 둘 다 등재돼 있으며,
+ * SectionDAO.softDelete()(반대 방향 캐스케이드)가 이미 둘 다 soft UPDATE로 처리하는
+ * 선례이고, design_intent.md §event_sections가 "soft delete로 연결 해제 이력 유지"라고
+ * 명시한다 — 네 근거 전부가 soft를 가리킨다. `EventDAO.removeSection`의 구 hard DELETE가
+ * 이 근거들과 어긋나는 쪽이었다(이번에 함께 수정).
+ *
+ * `AND deleted_at IS NULL` 가드로 이미 해제된 연결의 시각을 덮지 않는다(참가자·리마인더
+ * 전파와 동일 원칙).
+ *
+ * @param {object} conn
+ * @param {object} opts
+ * @param {'event_sections'|'task_sections'} opts.sectionTable
+ * @param {'event_id'|'task_id'} opts.itemColumn
+ * @param {string} opts.itemId
+ */
+async function cascadeDeleteItemSections(conn, { sectionTable, itemColumn, itemId }) {
+  await conn.query(
+    `UPDATE ${sectionTable}
+     SET deleted_at = now(), updated_at = now()
+     WHERE ${itemColumn} = $1 AND deleted_at IS NULL`,
+    [itemId]
+  );
+}
+
+module.exports = { cascadeDeleteInstanceChildren, cascadeDeleteItemSections, REMINDER_TARGET_TYPE };

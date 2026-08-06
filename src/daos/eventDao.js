@@ -1,4 +1,4 @@
-const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
+const { cascadeDeleteInstanceChildren, cascadeDeleteItemSections, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
 
 class EventDAO {
   // ============================================
@@ -118,6 +118,15 @@ class EventDAO {
       participantTable: 'event_participants',
       reminderTargetType: REMINDER_TARGET_TYPE.EVENT_INSTANCE,
       instanceIds,
+    });
+
+    // event_sections는 owner-키 자원(항목에 붙지 회차에 붙지 않는다) — 항목 삭제에서만
+    // 전파한다(RLY-20260806-029, SC-event.md H15 vs H16). softDeleteEventInstance에서는
+    // 부르지 않는다.
+    await cascadeDeleteItemSections(conn, {
+      sectionTable: 'event_sections',
+      itemColumn: 'event_id',
+      itemId: eventId,
     });
   }
 
@@ -316,30 +325,40 @@ class EventDAO {
   // Event Section 릴레이션 테이블
   // ============================================
 
+  // TaskDAO.addSection과 대칭(RLY-20260806-029) — ON CONFLICT DO UPDATE로 soft-delete된
+  // 연결의 부활을 지원한다. removeSection이 soft delete인 이상 이 부활 경로가 없으면
+  // 한 번 해제한 event-section 쌍은 재연결이 영원히 막힌다(같은 PK라 새 행을 못 만든다).
   async addSection(conn, eventId, sectionId) {
     const query = `
-      INSERT INTO event_sections (event_id, section_id)
-      VALUES ($1, $2)
-      ON CONFLICT (event_id, section_id) DO NOTHING
+      INSERT INTO event_sections (event_id, section_id, created_at, updated_at)
+      VALUES ($1, $2, now(), now())
+      ON CONFLICT (event_id, section_id) DO UPDATE
+      SET deleted_at = NULL, updated_at = now()
     `;
     await conn.query(query, [eventId, sectionId]);
   }
 
+  // TaskDAO.removeSection과 대칭(RLY-20260806-029) — 구 hard DELETE는 설계 의도(soft
+  // delete로 연결 해제 이력 유지, design_intent.md §event_sections)와 어긋난 버그였다.
   async removeSection(conn, eventId, sectionId) {
     const query = `
-      DELETE FROM event_sections
-      WHERE event_id = $1 AND section_id = $2
+      UPDATE event_sections
+      SET deleted_at = now(), updated_at = now()
+      WHERE event_id = $1 AND section_id = $2 AND deleted_at IS NULL
     `;
     await conn.query(query, [eventId, sectionId]);
   }
 
+  // TaskDAO.getSectionByTaskId와 대칭(RLY-20260806-029) — 구 쿼리는 es.deleted_at을
+  // 걸지 않았다. removeSection이 하드 삭제였을 때는 해제된 연결 행 자체가 없어 무해했지만,
+  // soft delete로 바뀐 지금 이 필터가 없으면 해제된 연결이 계속 조회된다.
   async getSectionByEventId(conn, eventId) {
     const query = `
       SELECT s.id, s.binder_id, s.title, s.access_scope, s.is_default,
              s.created_at, s.updated_at
       FROM event_sections es
       JOIN sections s ON es.section_id = s.id
-      WHERE es.event_id = $1 AND s.deleted_at IS NULL
+      WHERE es.event_id = $1 AND es.deleted_at IS NULL AND s.deleted_at IS NULL
     `;
     const result = await conn.query(query, [eventId]);
     return result.rows;
