@@ -24,6 +24,11 @@
  * 전진은 반드시 끝나야 한다(무한 루프 금지) — `MAX_ROLL_YEARS` 하나로 막는다. 라이브러리 지원
  * 범위(1000~2050) 밖으로 나가면 `setLunarDate`가 그냥 false를 반환하므로(직접 확인) "그 해에
  * 없음"과 같은 취급으로 계속 전진하다 이 상한에 걸려 끝난다 — 별도 분류가 필요 없다.
+ *
+ * 이 모듈이 던지는 에러는 전부 `err.permanent = true`를 달고 있다 — 순수 계산(DB·네트워크 미접촉)
+ * 이라 같은 입력이면 재시도해도 항상 같은 결과이므로, 호출부(reminderJobs.js)가 지수 백오프
+ * 재시도 없이 바로 종결하도록 판단할 수 있는 신호다(User: "클래스·reason 분류 체계는 만들지
+ * 마라, 한 줄로 되살릴 수 있으면 되살려라" — 그래서 클래스가 아니라 속성 하나만 붙인다).
  */
 
 const KoreanLunarCalendar = require('korean-lunar-calendar');
@@ -47,7 +52,7 @@ function nextSolarAnniversary(year, month, day) {
     }
     candidateYear += 1;
   }
-  throw new Error(`solar rolling: ${MAX_ROLL_YEARS}년 안에 다음 윤년을 찾지 못함 — year=${year}`);
+  throw Object.assign(new Error(`solar rolling: ${MAX_ROLL_YEARS}년 안에 다음 윤년을 찾지 못함 — year=${year}`), { permanent: true });
 }
 
 // 음력 다음 해 같은 lunar 월·일(윤달 플래그 포함) → 그 solar 날짜. 그 해에 없으면 있는 다음
@@ -57,7 +62,7 @@ function nextLunarAnniversary(solarYear, solarMonth, solarDay, lunarMonth, lunar
 
   const solarOk = cal.setSolarDate(solarYear, solarMonth, solarDay);
   if (!solarOk) {
-    throw new Error(`lunar rolling: setSolarDate 실패 (${solarYear}-${solarMonth}-${solarDay})`);
+    throw Object.assign(new Error(`lunar rolling: setSolarDate 실패 (${solarYear}-${solarMonth}-${solarDay})`), { permanent: true });
   }
   const lunarNow = cal.getLunarCalendar();
 
@@ -68,10 +73,10 @@ function nextLunarAnniversary(solarYear, solarMonth, solarDay, lunarMonth, lunar
     }
     candidateLunarYear += 1;
   }
-  throw new Error(
+  throw Object.assign(new Error(
     `lunar rolling: ${MAX_ROLL_YEARS}년 안에 다음 있는 해를 찾지 못함 — ` +
     `lunar_month=${lunarMonth} lunar_day=${lunarDay} leap=${!!lunarIsLeapMonth}`
-  );
+  ), { permanent: true });
 }
 
 /**
@@ -89,8 +94,8 @@ function nextLunarAnniversary(solarYear, solarMonth, solarDay, lunarMonth, lunar
  * @param {number|null} params.lunarDay
  * @param {boolean|null} params.lunarIsLeapMonth
  * @returns {Date} 다음 해 trigger_at(UTC)
- * @throws {Error} MAX_ROLL_YEARS 안에 다음 유효한 해를 못 찾음 — 정상 데이터로는 도달하지 않는
- *   방어적 상한.
+ * @throws {Error} `err.permanent = true`가 붙은 에러 — 순수 계산 실패라 재시도해도 항상 같은
+ *   결과다(정상 데이터로는 도달하지 않는 방어적 상한 포함).
  */
 function computeNextTriggerAt({
   currentTriggerAt, triggerOffsetSeconds, timezone,
