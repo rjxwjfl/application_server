@@ -279,9 +279,14 @@ class SyncDAO {
     return rows;
   }
 
+  // RLY-20260806-041 — event_sections와 대칭(getEventsDeltaFull 위 주석 참조). es.deleted_at
+  // IS NULL과 동일하게 ts.deleted_at IS NULL도 WHERE가 아니라 LEFT JOIN의 ON에 건다 — WHERE에
+  // 두면 LEFT JOIN이 사실상 INNER JOIN이 되어 섹션에 안 붙은 태스크(ts 매칭 자체가 없는 행)가
+  // 결과에서 통째로 사라진다.
   static async getTasksDeltaFull(pool, ctx) {
     const query = `
-      SELECT t.* FROM tasks t
+      SELECT t.*, ts.section_id FROM tasks t
+      LEFT JOIN task_sections ts ON ts.task_id = t.id AND ts.deleted_at IS NULL
       JOIN calendars c ON t.calendar_id = c.id
       WHERE (
         ((c.binder_id = ANY($1::uuid[]) OR t.calendar_id = ANY($2::uuid[])) AND t.updated_at > $3)
@@ -491,6 +496,13 @@ class SyncDAO {
             SELECT 1 FROM section_messages sm
             JOIN sections s ON s.id = sm.section_id
             WHERE sm.id = activity_feeds.target_id
+              -- RLY-20260806-041 — 바로 위 SECTION 분기와의 비대칭(025 담당자 의심 제기)을
+              -- 오탈자로 판정해 정정한다: 섹션이 soft delete되면 그 섹션에 속한 메시지 활동도
+              -- 더 이상 아무도 볼 수 없어야 한다는 게 SECTION 분기와 같은 원칙이다. 근거 문서는
+              -- 없지만(api.md §10 AC4는 "⑤활동피드"의 접근 판정만 규정하고 삭제 처리는 언급 없음),
+              -- 두 분기의 access_scope/section_members 절이 완전히 동일한 구조인데 이 한 줄만
+              -- 빠져 있었다 — 의도된 차이라면 있어야 할 설명이 어디에도 없다.
+              AND s.deleted_at IS NULL
               AND (s.access_scope = 0 OR EXISTS (
                 SELECT 1 FROM section_members secm
                 WHERE secm.section_id = s.id AND secm.user_id = $1 AND secm.deleted_at IS NULL

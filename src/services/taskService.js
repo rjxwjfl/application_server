@@ -50,6 +50,15 @@ class TaskService {
         author_id: context.sender_id,
       });
 
+      // RLY-20260806-041 — eventService.createEvent와 대칭(선례 그대로 따름). design_intent.md:536-538
+      // "task_sections는 event_sections와 동일한 설계 의도"인데 이 호출이 빠져 있어(호출부 0건)
+      // 섹션에서 태스크를 만들어도 연결되지 않았다. Task는 api.md POST /tasks에 `section_id`만
+      // 있고(Event의 `data.section` 신규 생성 nested object는 SC-task.md에 없다) — 있는 계약만
+      // 배선한다.
+      if (taskData.section_id) {
+        await TaskDAO.addSection(client, taskId, taskData.section_id);
+      }
+
       // RLY-20260806-026 — Task 축은 ReminderDAO를 아예 호출하지 않아 리마인더가 조용히
       // 버려지고 있었다(회귀 없이 그냥 무시). SC-reminder §7-1 계약대로 `reminder_offsets`
       // (초 배열)을 owner row(tasks.reminder_offsets)에 저장하고, 그 저장된 값
@@ -207,8 +216,9 @@ class TaskService {
           locations: patch.locations !== undefined ? patch.locations : origin.locations,
           recurrence_timezone: Object.prototype.hasOwnProperty.call(patch, 'recurrence_timezone')
             ? patch.recurrence_timezone : origin.recurrence_timezone,
-          // 알림 오프셋은 owner 행에 안 남는다(findByIdForUpdate 주석 참조) — 아래 리마인더
-          // 파생은 patch.reminder_offsets를 직접 읽는다(origin 폴백 없음, createTask와 동일 한계).
+          // RLY-20260806-041 — eventService.applyRecurrenceScope와 동일 사유(`??`를 쓰는 이유는
+          // reminder_offsets의 SC-reminder §7-1 계약이 recurrence_timezone과 다르기 때문).
+          reminder_offsets: patch.reminder_offsets ?? origin.reminder_offsets,
         });
         targetTaskId = forkTask.id;
 

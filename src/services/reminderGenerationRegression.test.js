@@ -175,9 +175,11 @@ const db = {
   events: {},
   event_instances: {},
   event_participants: {}, // key: `${instance_id}:${user_id}` — RLY-20260806-031
+  event_sections: {}, // key: `${event_id}:${section_id}` — RLY-20260806-041
   tasks: {},
   task_instances: {},
   task_participants: {}, // key: `${instance_id}:${user_id}` — RLY-20260806-031
+  task_sections: {}, // key: `${task_id}:${section_id}` — RLY-20260806-041
   special_days: {},
   reminders: {}, // key: id
   user_settings: { author1: { user_id: 'author1', timezone: 'Asia/Seoul' } },
@@ -241,6 +243,18 @@ async function mockQuery(sql, params = []) {
       row.updated_at = NOW;
     }
     return { rows: row ? [row] : [] };
+  }
+  // RLY-20260806-041 — EventDAO.addSection(createEvent가 이미 호출하던 것). 대칭 확인용 기준선.
+  if (s.startsWith('INSERT INTO event_sections')) {
+    const [event_id, section_id] = params;
+    db.event_sections[`${event_id}:${section_id}`] = { event_id, section_id, deleted_at: null };
+    return { rows: [] };
+  }
+  // RLY-20260806-041 — TaskDAO.addSection(createTask에 새로 배선). 결함 ①의 직접 재현 대상.
+  if (s.startsWith('INSERT INTO task_sections')) {
+    const [task_id, section_id] = params;
+    db.task_sections[`${task_id}:${section_id}`] = { task_id, section_id, deleted_at: null };
+    return { rows: [] };
   }
   if (s.startsWith('SELECT id, start_date FROM event_instances')) {
     const rows = Object.values(db.event_instances).filter((r) => r.event_id === params[0] && !r.deleted_at);
@@ -696,6 +710,27 @@ async function run() {
   check('⑨ 추가 직후 상태는 ready(0)', db.task_participants['tki-p2:user2']?.state === 0);
   await expectOk('⑨ 본인 상태 전이: ready → inProgress', () => TaskService.updateParticipantState('tk-p2', 'tki-p2', 'user2', { state: 1 }, ctxUser2));
   check('⑨ 상태 갱신 반영됨(inProgress=1)', db.task_participants['tki-p2:user2']?.state === 1);
+
+  // ======================= RLY-20260806-041 (결함 ① — 태스크 섹션 연결) =======================
+
+  // ⑩ 섹션을 지정해 이벤트를 만들면(기존 동작) 그 섹션에 연결된다 — 대칭 비교의 기준선.
+  const evWithSection = await expectOk('⑩ 섹션 지정 이벤트 생성', () => EventService.createEvent({
+    id: 'ev-sec1', calendar_id: 'cal1', author_id: 'author1', summary: '섹션 연결 이벤트',
+    section_id: 'sec1',
+    instances: [{ id: 'evi-sec1', original_date: '2026-09-14T00:00:00Z', start_date: '2026-09-14T00:00:00Z', end_date: '2026-09-14T01:00:00Z' }],
+  }, ctx));
+  check('⑩ 이벤트 생성 성공', !!evWithSection);
+  check('⑩ 이벤트가 지정한 섹션에 연결됨', !!db.event_sections['ev-sec1:sec1']);
+
+  // ⑪ 섹션을 지정해 태스크를 만들면 그 섹션에 연결된다 — 결함 ①의 직접 재현(과거: 호출부
+  //   0건이라 연결 안 됨). ⑩과 완전히 대칭인 시나리오로 만들어 "이벤트와 대칭"을 함께 고정한다.
+  const tkWithSection = await expectOk('⑪ 섹션 지정 태스크 생성', () => TaskService.createTask({
+    id: 'tk-sec1', calendar_id: 'cal1', summary: '섹션 연결 태스크',
+    section_id: 'sec1',
+    instances: [{ id: 'tki-sec1', original_date: '2026-09-14T00:00:00Z', due_date: '2026-09-14T00:00:00Z' }],
+  }, ctx));
+  check('⑪ 태스크 생성 성공', !!tkWithSection);
+  check('⑪ 태스크가 지정한 섹션에 연결됨(결함 ① 재현·수리 확인)', !!db.task_sections['tk-sec1:sec1']);
 
   console.log(`\n[reminderGenerationRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
   if (failures.length) {

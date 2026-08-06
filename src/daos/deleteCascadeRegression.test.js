@@ -13,6 +13,8 @@
  */
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { CalendarDAO } = require('./calendarDAO');
 const { BinderDAO } = require('./binderDAO');
 const { SyncDAO } = require('./syncDAO');
@@ -535,6 +537,103 @@ async function testEventSectionsLeftJoinExcludesDeletedLink() {
   check('⑨ 활성 링크가 있는 이벤트(evActiveLinked)는 그 section_id(secNew)를 정상적으로 실음(양성 대조)', byId.evActiveLinked && byId.evActiveLinked.section_id === 'secNew');
 }
 
+// ── task_sections LEFT JOIN deleted_at 방어 (RLY-20260806-041 결함① 후속 — getEventsDeltaFull의
+// event_sections LEFT JOIN(위 testEventSectionsLeftJoinExcludesDeletedLink)과 대칭) ──────────────
+// EventDAO.addSection처럼 TaskDAO.addSection도 이제 createTask에서 실제로 호출된다(041) — 그
+// 호출로 task_sections에 삭제된 링크 행이 생길 수 있으므로, getTasksDeltaFull의 LEFT JOIN도
+// event_sections와 똑같은 함정(WHERE에 두면 사실상 INNER JOIN이 되어 태스크 자체가 사라짐)을
+// 피해야 한다. getTasksDeltaFull은 UNION ALL이 아니라 단일 WHERE의 OR 결합이라 브랜치를 나누지
+// 않고, ON절/WHERE절 위치만 실제 SQL 텍스트로 판정한다.
+async function testTaskSectionsLeftJoinExcludesDeletedLink() {
+  const NOW = new Date();
+  const calendars = { cal1: { id: 'cal1', binder_id: 'b1', deleted_at: null } };
+  const tasks = [
+    // 예전엔 secOld에 연결돼 있었지만 그 링크가 soft-delete됨 — 다른 활성 링크 없음.
+    { id: 'tkUnlinked', calendar_id: 'cal1', deleted_at: null, updated_at: NOW, created_at: NOW },
+    // 한 번도 섹션에 연결된 적 없음.
+    { id: 'tkNeverLinked', calendar_id: 'cal1', deleted_at: null, updated_at: NOW, created_at: NOW },
+    // 지금도 살아있는 링크를 가짐(양성 대조).
+    { id: 'tkActiveLinked', calendar_id: 'cal1', deleted_at: null, updated_at: NOW, created_at: NOW },
+  ];
+  const taskSections = [
+    { task_id: 'tkUnlinked', section_id: 'secOld', deleted_at: 'T_REMOVED' },
+    { task_id: 'tkActiveLinked', section_id: 'secNew', deleted_at: null },
+  ];
+
+  function makePool() {
+    return {
+      async query(sql, params) {
+        const s = norm(sql);
+        const [oldDIds] = params;
+        // "JOIN calendars c ON t.calendar_id = c.id" 앞이 LEFT JOIN task_sections의 ON절,
+        // 뒤가 WHERE절 — 실제 SQL 텍스트에서 그 경계로 잘라 각 위치에 가드가 있는지 판정한다.
+        const [onClause, whereClause = ''] = s.split('JOIN calendars c ON t.calendar_id = c.id');
+        const onHasGuard = onClause.includes('ts.deleted_at IS NULL');
+        const whereHasGuard = whereClause.includes('ts.deleted_at IS NULL');
+
+        const rows = tasks
+          .filter((t) => calendars[t.calendar_id] && oldDIds.includes(calendars[t.calendar_id].binder_id))
+          .map((t) => {
+            const links = taskSections.filter((ts) => ts.task_id === t.id);
+            const joined = onHasGuard ? links.find((l) => !l.deleted_at) : links[0];
+            if (whereHasGuard && joined && joined.deleted_at) return null; // LEFT JOIN이 사실상 INNER JOIN이 됨
+            return { id: t.id, section_id: joined ? joined.section_id : null };
+          })
+          .filter(Boolean);
+        return { rows };
+      },
+    };
+  }
+
+  const ctx = {
+    oldDIds: ['b1'], oldCIds: [], oldTs: new Date(NOW.getTime() - 60000),
+    newDIds: [], newCIds: [], calWindowFrom: new Date(0),
+  };
+  const rows = await SyncDAO.getTasksDeltaFull(makePool(), ctx);
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+
+  check('task_sections: 링크가 삭제된 태스크(tkUnlinked)는 델타에 남아있음(event_sections와 대칭)', !!byId.tkUnlinked);
+  check('task_sections: 링크가 삭제된 태스크(tkUnlinked)는 옛 section_id(secOld)를 싣지 않음', byId.tkUnlinked && byId.tkUnlinked.section_id === null);
+  check('task_sections: 한 번도 연결 안 된 태스크(tkNeverLinked)는 델타에서 사라지지 않음', !!byId.tkNeverLinked);
+  check('task_sections: 활성 링크가 있는 태스크(tkActiveLinked)는 그 section_id(secNew)를 정상적으로 실음(양성 대조)', byId.tkActiveLinked && byId.tkActiveLinked.section_id === 'secNew');
+}
+
+// ── activity_feeds SECTION vs SECTION_MESSAGE 접근 판정 대칭 (RLY-20260806-041 결함③) ──────────
+// 025 담당자가 두 분기의 구조 차이(비대칭)를 의심 제기했었다 — 조사 결과 오탈자로 판정해
+// SECTION_MESSAGE 분기에 `s.deleted_at IS NULL`을 추가했다(syncDAO.js의 해당 분기 주석 참조).
+// 실 SQL의 CASE/EXISTS 구조를 mock으로 완전히 재현하는 대신(비용 대비 낮은 가치), 소스 텍스트
+// 대조로 "그 결함이 되돌아오지 않는가"를 고정한다 — eventTaskDeleteCascadeRegression.test.js의
+// ⑫⑬("이름/구조는 같은데 세부가 갈라지는" 유형)과 같은 패턴.
+function testActivityFeedSectionBranchesSymmetric() {
+  const syncDaoSrc = fs.readFileSync(path.join(__dirname, 'syncDAO.js'), 'utf8');
+  const stripAndNorm = (s) => s.replace(/--[^\n]*/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const sectionStart = syncDaoSrc.indexOf("WHEN target_type = 'SECTION' THEN");
+  const sectionMsgStart = syncDaoSrc.indexOf("WHEN target_type = 'SECTION_MESSAGE' THEN");
+  const elseStart = syncDaoSrc.indexOf('ELSE true');
+  check(
+    'activity_feeds SECTION/SECTION_MESSAGE 분기를 소스에서 찾음(getActivityFeedsForSync 구조 전제)',
+    sectionStart > -1 && sectionMsgStart > sectionStart && elseStart > sectionMsgStart
+  );
+
+  const sectionBranch = stripAndNorm(syncDaoSrc.slice(sectionStart, sectionMsgStart));
+  const sectionMsgBranch = stripAndNorm(syncDaoSrc.slice(sectionMsgStart, elseStart));
+
+  check('SECTION 분기가 s.deleted_at IS NULL을 확인함(기준선)', sectionBranch.includes('s.deleted_at IS NULL'));
+  check(
+    'SECTION_MESSAGE 분기도 s.deleted_at IS NULL을 확인함(대칭 — 041이 수정한 부분, 재발 방지)',
+    sectionMsgBranch.includes('s.deleted_at IS NULL')
+  );
+  check(
+    '두 분기 모두 access_scope 판정 구조가 동일함',
+    sectionBranch.includes('s.access_scope = 0 OR EXISTS') && sectionMsgBranch.includes('s.access_scope = 0 OR EXISTS')
+  );
+  check(
+    '두 분기 모두 section_members 멤버십 가드(secm.deleted_at IS NULL)가 동일함',
+    sectionBranch.includes('secm.deleted_at IS NULL') && sectionMsgBranch.includes('secm.deleted_at IS NULL')
+  );
+}
+
 // ── ⑧ 태스크 델타(신규 접근 스냅샷 브랜치)가 캘린더의 deleted_at을 확인한다 ─────
 // cascade가 실패했거나 과거 데이터가 남아 태스크 자신은 deleted_at이 없는데 캘린더만 삭제된
 // 경우를 재현 — 방어선(c.deleted_at IS NULL)이 독자적으로 작동하는지를 cascade 성공 여부와
@@ -586,6 +685,8 @@ async function run() {
   await testSyncExcludesDeletedBinder();
   await testTombstoneDeliveredToOtherMember();
   await testEventSectionsLeftJoinExcludesDeletedLink();
+  await testTaskSectionsLeftJoinExcludesDeletedLink();
+  testActivityFeedSectionBranchesSymmetric();
   await testTaskSnapshotChecksCalendarDeletedAt();
 
   console.log(`\n[deleteCascadeRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);

@@ -292,8 +292,14 @@ class EventService {
           locations: patch.locations !== undefined ? patch.locations : origin.locations,
           recurrence_timezone: Object.prototype.hasOwnProperty.call(patch, 'recurrence_timezone')
             ? patch.recurrence_timezone : origin.recurrence_timezone,
-          // 알림 오프셋은 owner 행에 안 남는다(findByIdForUpdate 주석 참조) — 아래 리마인더
-          // 파생은 patch.reminder_offsets를 직접 읽는다(origin 폴백 없음, createEvent와 동일 한계).
+          // RLY-20260806-041 — summary/r_rule과 같은 patch⊕origin 병합이지만, `??`(nullish
+          // coalescing)를 쓴다는 점이 다르다. reminder_offsets는 SC-reminder §7-1(RLY-20260806-031)
+          // 계약상 "부재/null 둘 다 무변동"이라 recurrence_timezone(명시적 null=지우기)과 계약이
+          // 다르다 — `patch.reminder_offsets !== undefined` 식(r_rule 패턴)을 그대로 베끼면
+          // 클라가 이 필드를 명시적으로 null로 보냈을 때(=무변동 의도) fork의 알림이 사라진다.
+          // 새로 만드는 행이라 "무변동"은 곧 "origin 상속"과 동치다 — `??`가 부재·명시적 null
+          // 양쪽을 전부 origin으로 폴백시켜 그 계약을 그대로 지킨다.
+          reminder_offsets: patch.reminder_offsets ?? origin.reminder_offsets,
         });
         targetEventId = forkEvent.id;
 

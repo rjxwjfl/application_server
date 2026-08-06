@@ -98,10 +98,11 @@ function assertColumnsExist(desc, tableName, columns) {
 }
 
 // events/event_instances — createForkEvent·insertInstancesBulk·findByIdForUpdate가 실제로
-// SELECT/INSERT하는 컬럼 전부.
+// SELECT/INSERT하는 컬럼 전부. (RLY-20260806-041 — findByIdForUpdate SELECT·createForkEvent
+// INSERT에 reminder_offsets를 추가해 fork가 origin의 알림 설정을 상속할 수 있게 됐다.)
 assertColumnsExist('EventDAO 범위 편집(fork)', 'events', [
   'id', 'calendar_id', 'author_id', 'event_type', 'summary', 'description', 'color',
-  'r_rule', 'recurrence_timezone', 'locations', 'forked_from', 'created_at', 'updated_at', 'deleted_at',
+  'r_rule', 'recurrence_timezone', 'reminder_offsets', 'locations', 'forked_from', 'created_at', 'updated_at', 'deleted_at',
 ]);
 assertColumnsExist('EventDAO 범위 편집(fork)', 'event_instances', [
   'id', 'event_id', 'instance_type', 'parent_id', 'summary', 'description', 'color',
@@ -109,28 +110,34 @@ assertColumnsExist('EventDAO 범위 편집(fork)', 'event_instances', [
 ]);
 assertColumnsExist('TaskDAO 범위 편집(fork)', 'tasks', [
   'id', 'calendar_id', 'author_id', 'task_type', 'summary', 'description', 'priority',
-  'r_rule', 'recurrence_timezone', 'locations', 'forked_from', 'created_at', 'updated_at', 'deleted_at',
+  'r_rule', 'recurrence_timezone', 'reminder_offsets', 'locations', 'forked_from', 'created_at', 'updated_at', 'deleted_at',
 ]);
 assertColumnsExist('TaskDAO 범위 편집(fork)', 'task_instances', [
   'id', 'task_id', 'instance_type', 'parent_id', 'summary', 'description', 'priority', 'locations',
   'is_all_day', 'completion_rule', 'original_date', 'start_date', 'due_date', 'created_at', 'updated_at', 'deleted_at',
 ]);
 
-// ⚠️ 026/027 경계 — 이 Task(034) 최초 구현 시점엔 eventDao.js·taskDAO.js가 알림 오프셋 컬럼을
-// 안 썼다(그때는 "안 쓴다"를 고정했다). RLY-20260806-026 후속(8216884)이 createEvent/updateEvent/
-// createTask/updateTask에 그 컬럼을 배선해 owner row에 저장하고 GET 응답에 싣는다 — 이제 "쓴다"가
-// 참이다. 단언을 지우지 않고 방향만 뒤집는다(team-lead 지시) — 이 배선이 나중에(리팩터 등으로)
-// 사라지면 그것도 이 회귀가 잡아야 한다.
-//
-// 내 새 메서드(findByIdForUpdate·createForkEvent·insertInstancesBulk)는 여전히 그 컬럼을 직접
-// 다루지 않는다(fork 시 알림은 patch.reminder_offsets를 그대로 파생하지 origin에서 물려받지
-// 않는다 — 구현보고서 후속 섹션에 "origin 상속 미구현" 후속 과제로 명시했다). 이 단언은 "파일
-// 전체에 그 식별자가 있는가"만 보므로 createEvent/updateEvent 쪽 배선만으로도 참이 된다.
+// ⚠️ 026/027/041 경계 — 이 Task(034) 최초 구현 시점엔 eventDao.js·taskDAO.js가 알림 오프셋
+// 컬럼을 안 썼다(그때는 "안 쓴다"를 고정했다). RLY-20260806-026 후속(8216884)이 createEvent/
+// updateEvent/createTask/updateTask에 그 컬럼을 배선해 owner row에 저장하고 GET 응답에 싣는다.
+// RLY-20260806-041이 이어서 findByIdForUpdate SELECT·createForkEvent/createForkTask INSERT에도
+// 배선해 fork가 origin의 알림 설정을 상속(또는 patch로 대체)하게 했다 — 결함②(fork
+// reminder_offsets 미배선) 수리. 단언을 지우지 않고 방향만 뒤집는다(team-lead 지시) — 이 배선이
+// 나중에(리팩터 등으로) 사라지면 그것도 이 회귀가 잡아야 한다. 실제 patch-반영/origin-상속
+// 동작은 아래 run() 의 ④⑤ 시나리오가 기능 단위로 고정한다.
 (function assertReminderOffsetsWiredIntoOwnerRow() {
   const eventDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/eventDao.js'), 'utf8');
   const taskDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/taskDAO.js'), 'utf8');
   check('⑨ eventDao.js가 알림 오프셋 컬럼을 씀(026 후속 배선)', /reminder_offsets/.test(eventDaoSrc));
   check('⑨ taskDAO.js가 알림 오프셋 컬럼을 씀(026 후속 배선)', /reminder_offsets/.test(taskDaoSrc));
+  check(
+    '⑨ eventDao.js의 createForkEvent가 reminder_offsets를 다룸(041 배선)',
+    /createForkEvent[\s\S]*?reminder_offsets/.test(eventDaoSrc),
+  );
+  check(
+    '⑨ taskDAO.js의 createForkTask가 reminder_offsets를 다룸(041 배선)',
+    /createForkTask[\s\S]*?reminder_offsets/.test(taskDaoSrc),
+  );
 })();
 
 async function expectOk(desc, fn) {
@@ -200,13 +207,18 @@ async function mockQuery(sql, params = []) {
     return { rows: [{ count }] };
   }
   if (s.startsWith('INSERT INTO events')) {
-    const [id, calendar_id, author_id, event_type, summary, description, color, r_rule, locations, forked_from, recurrence_timezone] = params;
+    // RLY-20260806-041 — createForkEvent 의 INSERT 컬럼 목록에 reminder_offsets 가 추가돼
+    // 파라미터가 11→12개가 됐다(마지막 자리). 일반 createEvent 의 INSERT 는 이 컬럼이 없어
+    // params[11] 이 undefined 인 채로 들어오는데, 그때는 row.reminder_offsets 를 세팅하지
+    // 않는다(무해).
+    const [id, calendar_id, author_id, event_type, summary, description, color, r_rule, locations, forked_from, recurrence_timezone, reminder_offsets] = params;
     if (db.events[id]) return { rows: [] }; // ON CONFLICT DO NOTHING
     const row = {
       id, calendar_id, author_id, event_type, summary, description, color, r_rule,
       locations: locations ? JSON.parse(locations) : null, forked_from, recurrence_timezone,
       created_at: 'NOW', updated_at: 'NOW', deleted_at: null,
     };
+    if (reminder_offsets !== undefined) row.reminder_offsets = reminder_offsets;
     db.events[id] = row;
     return { rows: [row] };
   }
@@ -280,13 +292,16 @@ async function mockQuery(sql, params = []) {
     return { rows: [{ count }] };
   }
   if (s.startsWith('INSERT INTO tasks')) {
-    const [id, calendar_id, author_id, task_type, summary, description, priority, locations, r_rule, forked_from, recurrence_timezone] = params;
+    // RLY-20260806-041 — 위 INSERT INTO events 와 동일 사유: createForkTask 의 INSERT 컬럼
+    // 목록에 reminder_offsets 가 추가됐다(마지막 자리).
+    const [id, calendar_id, author_id, task_type, summary, description, priority, locations, r_rule, forked_from, recurrence_timezone, reminder_offsets] = params;
     if (db.tasks[id]) return { rows: [] };
     const row = {
       id, calendar_id, author_id, task_type, summary, description, priority,
       locations: locations ? JSON.parse(locations) : null, r_rule, forked_from, recurrence_timezone,
       created_at: 'NOW', updated_at: 'NOW', deleted_at: null,
     };
+    if (reminder_offsets !== undefined) row.reminder_offsets = reminder_offsets;
     db.tasks[id] = row;
     return { rows: [row] };
   }
@@ -333,7 +348,12 @@ async function mockQuery(sql, params = []) {
     return { rows: [{ completed_at: null }] };
   }
 
-  // ── 리마인더(§2 offsets=undefined "무변동" 분기만 — 이 회귀는 reminder_offsets를 안 보낸다) ──
+  // ── 리마인더 ──────────────────────────────────────────────────────────
+  // RLY-20260806-041 — ⑩⑪ 시나리오가 patch.reminder_offsets를 실제로 채워 보내므로, fork
+  // 회차 생성 경로가 그 값으로 발송 원장(reminders)을 만드는 INSERT까지 실행한다. 이 회귀는
+  // 원장 내용 자체(발송 시각 계산 등)를 검증 범위로 삼지 않으므로(그건 reminderGenerationRegression
+  // 몫) 저장만 흉내 낸다.
+  if (s.startsWith('INSERT INTO reminders')) return { rows: [] };
   if (s.startsWith('UPDATE reminders')) return { rows: [] };
   if (s.startsWith('DELETE FROM reminders')) return { rows: [] };
 
@@ -487,6 +507,43 @@ async function run() {
   check('⑧ 366개 제출 시 400(occurrence_limit_exceeded)으로 거부', !!capError && capError.statusCode === 400 && capError.errorCode === 'occurrence_limit_exceeded');
   check('⑧ 거부됐으므로 fork 이벤트가 생성되지 않음(트랜잭션 롤백)', !db.events['evD-fork']);
   check('⑧ 거부됐으므로 원본 회차도 그대로(evD-i1 안 지워짐)', db.event_instances['evD-i1'] && !db.event_instances['evD-i1'].deleted_at);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ⑩⑪ RLY-20260806-041 결함② — fork(this_and_future)의 reminder_offsets 배선.
+  // summary/r_rule과 같은 "patch⊕origin" 규칙이되, SC-reminder §7-1 계약(부재/null=무변동)에
+  // 맞춰 origin 상속을 `??`로 판정한다(위 eventService.js/taskService.js 주석 참조).
+  // ═══════════════════════════════════════════════════════════════════
+  makeSeries('evE', 10, { event_type: 0, summary: 'Old', description: null, color: 1, r_rule: 'FREQ=DAILY;COUNT=10', recurrence_timezone: null, reminder_offsets: [600, 0], locations: null }, 'events', 'event_instances');
+  await expectOk('⑩ splitEvent(this_and_future) — patch에 reminder_offsets 없음', () => EventService.splitEvent({
+    event_id: 'evE', instance_id: 'evE-i5', new_event_id: 'evE-fork',
+    instances: submittedInstances('evE', 5, 10, 'events'),
+    summary: 'New',
+  }, ctx('editor1')));
+  check('⑩ fork 이벤트가 origin의 reminder_offsets를 상속(patch 부재)', db.events['evE-fork'] && JSON.stringify(db.events['evE-fork'].reminder_offsets) === JSON.stringify([600, 0]));
+
+  makeSeries('evF', 10, { event_type: 0, summary: 'Old', description: null, color: 1, r_rule: 'FREQ=DAILY;COUNT=10', recurrence_timezone: null, reminder_offsets: [600, 0], locations: null }, 'events', 'event_instances');
+  await expectOk('⑩ splitEvent(this_and_future) — patch에 reminder_offsets 있음', () => EventService.splitEvent({
+    event_id: 'evF', instance_id: 'evF-i5', new_event_id: 'evF-fork',
+    instances: submittedInstances('evF', 5, 10, 'events'),
+    summary: 'New', reminder_offsets: [0],
+  }, ctx('editor1')));
+  check('⑩ fork 이벤트가 patch의 reminder_offsets 값을 반영', db.events['evF-fork'] && JSON.stringify(db.events['evF-fork'].reminder_offsets) === JSON.stringify([0]));
+
+  makeSeries('tkE', 10, { task_type: 0, summary: 'Old', description: null, priority: 1, r_rule: 'FREQ=DAILY;COUNT=10', recurrence_timezone: null, reminder_offsets: [600, 0], locations: null }, 'tasks', 'task_instances');
+  await expectOk('⑪ Task splitTask(this_and_future) — patch에 reminder_offsets 없음', () => TaskService.splitTask({
+    task_id: 'tkE', instance_id: 'tkE-i5', new_task_id: 'tkE-fork',
+    instances: submittedInstances('tkE', 5, 10, 'tasks'),
+    summary: 'New',
+  }, ctx('editor1')));
+  check('⑪ Task: fork가 origin의 reminder_offsets를 상속(patch 부재, 이벤트와 대칭)', db.tasks['tkE-fork'] && JSON.stringify(db.tasks['tkE-fork'].reminder_offsets) === JSON.stringify([600, 0]));
+
+  makeSeries('tkF', 10, { task_type: 0, summary: 'Old', description: null, priority: 1, r_rule: 'FREQ=DAILY;COUNT=10', recurrence_timezone: null, reminder_offsets: [600, 0], locations: null }, 'tasks', 'task_instances');
+  await expectOk('⑪ Task splitTask(this_and_future) — patch에 reminder_offsets 있음', () => TaskService.splitTask({
+    task_id: 'tkF', instance_id: 'tkF-i5', new_task_id: 'tkF-fork',
+    instances: submittedInstances('tkF', 5, 10, 'tasks'),
+    summary: 'New', reminder_offsets: [0],
+  }, ctx('editor1')));
+  check('⑪ Task: fork가 patch의 reminder_offsets 값을 반영(이벤트와 대칭)', db.tasks['tkF-fork'] && JSON.stringify(db.tasks['tkF-fork'].reminder_offsets) === JSON.stringify([0]));
 
   console.log(`\n[recurrenceScopeRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
   if (failures.length) {
