@@ -352,10 +352,24 @@ class EventService {
         });
         targetEventId = forkEvent.id;
 
-        // "구간은 서로소다"(domain.md §3-13) — 원본에 남은(경계 이전) 회차 수로 원본 r_rule의
-        // COUNT를 낮춘다. UNTIL 기반 규칙은 조정 못 한다(utils/recurrenceRule.js 주석 참조).
+        // "구간은 서로소다"(domain.md §3-13) — 원본에 남은(경계 이전) 회차 수로 원본 r_rule을
+        // 조정한다(COUNT 치환 또는 UNTIL 재계산 — RLY-20260806-061, utils/recurrenceRule.js).
+        // UNTIL 조정엔 원본의 진짜 시작점이 필요하다 — deleteInstancesFromBoundary가 이미 위에서
+        // 미래 회차를 지웠으므로, 지금 남아있는(경계 이전) 것 중 가장 이른 회차가 곧 원본
+        // 계열이 애초에 시작한 지점이다(fork 이후에도 원본 자신의 시작점은 바뀌지 않는다).
         const remainingCount = await EventDAO.countActiveInstances(client, eventId);
-        const adjustedRRule = adjustRuleCount(origin.r_rule, remainingCount);
+        let expansionContext;
+        if (remainingCount > 0) {
+          const originEarliest = await EventDAO.findEarliestActiveInstance(client, eventId);
+          if (originEarliest) {
+            expansionContext = {
+              isAllDay: !!originEarliest.is_all_day,
+              recurrenceTimezone: origin.recurrence_timezone,
+              dtstartInstant: new Date(originEarliest.original_date),
+            };
+          }
+        }
+        const adjustedRRule = adjustRuleCount(origin.r_rule, remainingCount, expansionContext);
         if (adjustedRRule !== origin.r_rule) {
           await EventDAO.updateEvent(client, eventId, { r_rule: adjustedRRule });
         }

@@ -262,8 +262,21 @@ class TaskService {
         });
         targetTaskId = forkTask.id;
 
+        // RLY-20260806-061 — eventService.applyRecurrenceScope와 동일 사유(COUNT·UNTIL 양쪽
+        // 조정, UNTIL엔 원본의 진짜 시작점이 필요 — 위 주석 참조).
         const remainingCount = await TaskDAO.countActiveInstances(client, taskId);
-        const adjustedRRule = adjustRuleCount(origin.r_rule, remainingCount);
+        let expansionContext;
+        if (remainingCount > 0) {
+          const originEarliest = await TaskDAO.findEarliestActiveInstance(client, taskId);
+          if (originEarliest) {
+            expansionContext = {
+              isAllDay: !!originEarliest.is_all_day,
+              recurrenceTimezone: origin.recurrence_timezone,
+              dtstartInstant: new Date(originEarliest.original_date),
+            };
+          }
+        }
+        const adjustedRRule = adjustRuleCount(origin.r_rule, remainingCount, expansionContext);
         if (adjustedRRule !== origin.r_rule) {
           await TaskDAO.updateTask(client, taskId, { r_rule: adjustedRRule });
         }
