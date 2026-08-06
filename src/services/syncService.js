@@ -38,7 +38,10 @@ class SyncService {
     ]);
 
     if (!currDIds.length && !currCIds.length) {
-      return this._buildEmptyResponse(now, currDIds, currCIds);
+      // 바인더·캘린더가 모두 0개가 된 유저(=마지막 바인더에서 삭제·강퇴·탈퇴로 밀려난 경우 포함) —
+      // 아래 일반 경로와 똑같이 정리 목록을 실어야 한다(RLY-20260806-039). 그렇지 않으면 "잃은
+      // 마지막 하나"만 이 조기 반환 경로로 빠져 정리 목록에서 영원히 누락되는 사각지대가 생긴다.
+      return this._buildEmptyResponse(now, currDIds, currCIds, prevToken, previousSectionIds);
     }
 
     // 3. Sync Context (상태 Diff) 객체 생성 - 이 객체 하나로 모든 DAO 쿼리가 동작합니다.
@@ -63,9 +66,31 @@ class SyncService {
       previousSectionIds
     );
     const accessibleSectionIds = await SyncDAO.getAccessibleSectionIds(pool, userId, currDIds);
+    // purge_binder_ids(RLY-20260806-039) — purge_section_ids와 같은 기제를 바인더 레벨로 확장한
+    // 것이다: 삭제·강퇴·자진탈퇴로 바인더 접근을 잃으면 그 바인더가 currDIds에서 빠지고(025가
+    // 세운 방어선 — getBinderIdsByUserId가 binder_members.deleted_at·binders.deleted_at을
+    // 확인), 그 결과 그 바인더는 oldDIds(델타 스코프)에서도 함께 빠져 자식 tombstone이 원리적으로
+    // 전달되지 않는다(025 구현보고서 §구조적 발견). 세 경로(deleteBinder·kickBinderMember·
+    // leaveBinder) 전부 BinderDAO.cascadeSoftDelete/removeMember로 binder_members.deleted_at을
+    // 세워 currDIds 재계산에 동일하게 반영되므로, 이 diff 하나로 세 경로 전부를 구분 없이 잡는다
+    // (경로별 개별 훅 불필요 — "이미 있는 기제를 한 단계 위로 올리는 것").
+    //
+    // 과잉정리 위험(구현보고서 참조) — currDIds는 위 35행에서 단일 SELECT(getBinderIdsByUserId)로
+    // 얻는다. Postgres MVCC 하에서 이 쿼리는 커밋된 스냅샷 전체를 원자적으로 반환하므로 "일부만
+    // 반영된 반쪽 상태"가 결과에 섞일 수 없다 — 쿼리는 성공(완전한 최신 스냅샷) 아니면 예외(rejected
+    // Promise, pullChanges 자체가 실패해 응답이 만들어지지 않음) 둘 중 하나만 가능하다. 즉
+    // purgeBinderIds가 "실제로는 아직 멤버인" 바인더를 실을 수 있는 유일한 경로는 이 SELECT
+    // 자체가 잘못된 값을 반환하는 경우인데, 그러면 sync 전체(ACL의 뿌리, 34행 주석)가 이미
+    // 신뢰할 수 없는 상태 — purge_binder_ids만의 문제가 아니라 시스템 전체 authz가 깨진 것이다.
+    const purgeBinderIds = diff(prevToken.d_ids, currDIds);
+    if (purgeBinderIds.length > 0) {
+      // 관측성 — 정리가 오발동하면(위험 판단, 구현보고서 참조) 로그 볼륨으로 가장 먼저 드러난다.
+      logger.info('sync: purge_binder_ids emitted', { userId, count: purgeBinderIds.length, binderIds: purgeBinderIds });
+    }
     const accessReconciliation = {
       hydrate_section_ids: diff(accessibleSectionIds, previousSectionIds),
       purge_section_ids: diff(previousSectionIds, accessibleSectionIds),
+      purge_binder_ids: purgeBinderIds,
     };
     ctx.hydrateSectionIds = accessReconciliation.hydrate_section_ids;
 
@@ -210,9 +235,21 @@ class SyncService {
     return await UserSettingsDAO.updatePartial(pool, userId, settings);
   }
 
-  _buildEmptyResponse(now, currDIds, currCIds) {
+  _buildEmptyResponse(now, currDIds, currCIds, prevToken, previousSectionIds) {
+    // 이 경로에 들어왔다는 건 currDIds가 비었다는 뜻 — 접근 가능한 섹션도 있을 수 없으므로
+    // hydrate는 항상 []이고, 이전에 알던 바인더/섹션은 전부 상실로 취급해 purge로 내려보낸다.
+    // 일반 경로의 diff(old, curr) 대칭과 동일 규칙(curr=[])이다.
+    const purgeBinderIds = diff(prevToken.d_ids, currDIds);
+    const purgeSectionIds = diff(previousSectionIds, []);
     return {
-      data: { sectionMembers: [] },
+      data: {
+        sectionMembers: [],
+        access_reconciliation: {
+          hydrate_section_ids: [],
+          purge_section_ids: purgeSectionIds,
+          purge_binder_ids: purgeBinderIds,
+        },
+      },
       next_sync_token: SyncToken.encode({ ts: Math.floor(now.getTime() / 1000), d_ids: currDIds, c_ids: currCIds, s_ids: [] })
     };
   }
