@@ -24,7 +24,7 @@
  */
 
 const assert = require('assert');
-const { EventDAO } = require('./eventDAO');
+const { EventDAO } = require('./eventDao');
 const { TaskDAO } = require('./taskDAO');
 
 function makeStore() {

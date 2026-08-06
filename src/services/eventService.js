@@ -1,4 +1,4 @@
-const { EventDAO } = require('../daos/eventDAO');
+const { EventDAO } = require('../daos/eventDao');
 const { CalendarDAO } = require('../daos/calendarDAO');
 const { SectionDAO } = require('../daos/sectionDAO');
 const { ReminderDAO } = require('../daos/reminderDAO');

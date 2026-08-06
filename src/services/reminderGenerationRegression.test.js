@@ -168,7 +168,7 @@ assertColumnsExist('specialDayService.resolveOwnerTimezone', 'user_settings', ['
 assertColumnsExist('EventDAO.createEvent/updateEvent', 'events', ['reminder_offsets']);
 assertColumnsExist('TaskDAO.createTask/updateTask', 'tasks', ['reminder_offsets']);
 (function assertEventTaskDaoPersistsReminderOffsets() {
-  const eventDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/eventDAO.js'), 'utf8');
+  const eventDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/eventDao.js'), 'utf8');
   const taskDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/taskDAO.js'), 'utf8');
   const reminderDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/reminderDAO.js'), 'utf8');
   check('⑤ eventDAO.js가 이제 reminder_offsets를 씀(owner row 왕복 배선)', /reminder_offsets/.test(eventDaoSrc));

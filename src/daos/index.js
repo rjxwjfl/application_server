@@ -13,7 +13,7 @@
 // DAO 클래스 import
 const { BinderDAO } = require('./binderDAO');
 const { UserDAO } = require('./userDAO');
-const { EventDAO } = require('./eventDAO');
+const { EventDAO } = require('./eventDao');
 const { TaskDAO } = require('./taskDAO');
 const { SyncDAO } = require('./syncDAO');
 const { NotificationDAO } = require('./notificationDAO');
