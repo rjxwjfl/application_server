@@ -468,6 +468,11 @@ class SyncDAO {
   }
 
   static async getMessageEmbeds(pool, messageIds, oldTs) {
+    // RLY-20260806-079 — 078과 같은 부류인지 조사했다: message_embeds는 createMessage
+    // 트랜잭션 안에서만 INSERT되고(messageService.js:69-71) 그 뒤 독립적으로 추가·수정하는
+    // 경로가 코드 어디에도 없다(grep 확인) — "부모 메시지는 안 바뀌었는데 embed만 나중에
+    // 바뀌는" 상황 자체가 지금 발생할 수 없다. 그래서 078과 달리 독자 updated_at 분기를
+    // 넣지 않았다(구현 보고서 §1 — 목록만 보고, 강제로 같이 고치지 않는다).
     if (!messageIds.length) return [];
     const query = `
       SELECT * FROM message_embeds
@@ -479,19 +484,58 @@ class SyncDAO {
     return rows;
   }
 
-  static async getMessageReactions(pool, messageIds, oldTs) {
-    if (!messageIds.length) return [];
+  /**
+   * RLY-20260806-079 — 078과 같은 부류 확인: message_reactions는 addReaction·removeReaction
+   * (messageDAO.js)으로 메시지 생성과 완전히 독립된 시점에 추가·취소된다 — attachments와
+   * 똑같이 "부모 메시지는 안 바뀌었는데 자식만 나중에 바뀌는" 상황이 실제로 일어난다.
+   * removeReaction은 하드 delete가 아니라 소프트 delete(deleted_at + updated_at 갱신)라
+   * "취소"도 updated_at 조건으로 잡힌다 — ⚠️ attachments와 달리 이 함수는 원래도
+   * deleted_at IS NULL을 필터하지 않는다(SELECT *, 삭제된 행도 tombstone으로 그대로
+   * 내려보낸다) — 그 동작을 그대로 유지한다(새 필터를 추가하지 않는다).
+   *
+   * 078과 동일한 두 조건 OR: (1) messageIds 스코프(기존, 원본과 완전히 동일) (2) 독자
+   * updated_at + 섹션 접근 판정(getMessagesDeltaFull과 동일 재사용, 새 인가 개념 없음).
+   */
+  static async getMessageReactions(pool, messageIds, oldTs, userId, currDIds) {
+    const hasIndependentBranch = !!(oldTs && userId && currDIds && currDIds.length);
+    if (!messageIds.length && !hasIndependentBranch) return [];
+
+    if (!hasIndependentBranch) {
+      const query = `
+        SELECT * FROM message_reactions
+        WHERE message_id = ANY($1::uuid[])
+        ${oldTs ? 'AND updated_at > $2' : ''}
+      `;
+      const params = oldTs ? [messageIds, oldTs] : [messageIds];
+      const { rows } = await pool.query(query, params);
+      return rows;
+    }
+
     const query = `
-      SELECT * FROM message_reactions
-      WHERE message_id = ANY($1::uuid[])
-      ${oldTs ? 'AND updated_at > $2' : ''}
+      SELECT r.* FROM message_reactions r
+      JOIN section_messages m ON m.id = r.message_id
+      JOIN sections s ON s.id = m.section_id
+      WHERE (
+        (r.message_id = ANY($1::uuid[]) AND r.updated_at > $2)
+        OR (
+          r.updated_at > $2
+          AND s.binder_id = ANY($3::uuid[])
+          AND (s.access_scope = 0 OR EXISTS (
+            SELECT 1 FROM section_members sm
+            WHERE sm.section_id = s.id AND sm.user_id = $4 AND sm.deleted_at IS NULL
+          ))
+        )
+      )
     `;
-    const params = oldTs ? [messageIds, oldTs] : [messageIds];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(query, [messageIds, oldTs, currDIds, userId]);
     return rows;
   }
 
   static async getMessageMentions(pool, messageIds, oldTs) {
+    // RLY-20260806-079 — message_embeds와 동일 판정: message_mentions도 createMessage
+    // 트랜잭션 안에서만 INSERT되고(messageService.js:72-77) 그 뒤 독립적으로 추가·제거하는
+    // 경로가 없다(grep 확인 — insertMentions의 ON CONFLICT는 "재추가"만 다룬다). 독자
+    // updated_at 분기를 넣지 않았다(구현 보고서 §1).
     if (!messageIds.length) return [];
     const query = `
       SELECT * FROM message_mentions
