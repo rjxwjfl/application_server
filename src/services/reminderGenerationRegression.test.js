@@ -16,6 +16,9 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+// RLY-20260806-035 — 이 파서는 저장소 전체 DAO 정적 대조로 확장되며 공용 모듈로 뽑혔다
+// (schemaColumnCheck.js). 동작은 원본(RLY-20260806-026)과 동일 — 여기서는 그 모듈을 쓴다.
+const { readSchemaSql, extractTableColumns: extractTableColumnsRaw, stripJsComments } = require('../daos/schemaColumnCheck');
 
 let pass = 0;
 let fail = 0;
@@ -46,56 +49,8 @@ async function expectOk(desc, fn) {
 // ⑤ 없는 컬럼을 쓰지 않음 — config/schema.sql 실 정의를 파싱해 DAO 소스와 정적 대조
 // ════════════════════════════════════════════════════════════════════════
 
-const schemaSql = fs.readFileSync(path.join(__dirname, '../../config/schema.sql'), 'utf8');
-
-// CHECK(...) 블록을 균형 괄호로 통째로 제거한다 — 내부의 AND/OR/NOT/컬럼명이 라인 파싱에서
-// "컬럼처럼" 오검출되는 것(예: ck_sd_lunar_fields의 "OR (is_lunar AND ...")을 막는다.
-function stripCheckBlocks(text) {
-  let out = '';
-  let i = 0;
-  while (i < text.length) {
-    const idx = text.indexOf('CHECK', i);
-    if (idx === -1) { out += text.slice(i); break; }
-    out += text.slice(i, idx);
-    let j = idx + 5;
-    while (j < text.length && /\s/.test(text[j])) j += 1;
-    if (text[j] !== '(') { out += text.slice(idx, j); i = j; continue; }
-    let depth = 1; j += 1;
-    while (j < text.length && depth > 0) {
-      if (text[j] === '(') depth += 1;
-      else if (text[j] === ')') depth -= 1;
-      j += 1;
-    }
-    i = j; // CHECK(...) 전체 스킵
-  }
-  return out;
-}
-
-function extractTableColumns(tableName) {
-  const re = new RegExp(`CREATE TABLE ${tableName} \\(`);
-  const m = re.exec(schemaSql);
-  if (!m) throw new Error(`[schema] 테이블을 찾을 수 없음: ${tableName}`);
-  const start = m.index + m[0].length;
-  let depth = 1;
-  let j = start;
-  while (j < schemaSql.length && depth > 0) {
-    if (schemaSql[j] === '(') depth += 1;
-    else if (schemaSql[j] === ')') depth -= 1;
-    j += 1;
-  }
-  const body = schemaSql.slice(start, j - 1);
-  const cleaned = stripCheckBlocks(body);
-  const cols = [];
-  cleaned.split('\n').forEach((rawLine) => {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('--')) return;
-    const kw = line.split(/\s+/)[0].toUpperCase();
-    if (['CONSTRAINT', 'PRIMARY', 'UNIQUE', 'FOREIGN'].includes(kw)) return;
-    const colMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s/);
-    if (colMatch) cols.push(colMatch[1]);
-  });
-  return cols;
-}
+const schemaSql = readSchemaSql();
+const extractTableColumns = (tableName) => extractTableColumnsRaw(schemaSql, tableName);
 
 // 소스 파일 텍스트에서 "실제 컬럼처럼 쓰인" 식별자 후보를 이런 식으로 전부 뽑아내는 범용
 // SQL 파서는 짓지 않는다(과공학) — 대신 각 DAO가 실제로 참조하는 컬럼 목록을 코드를 읽고
@@ -114,17 +69,6 @@ function assertColumnsAbsent(desc, tableName, columns) {
   columns.forEach((col) => {
     check(`⑤ ${desc}: ${tableName}.${col} 부재(구 컬럼 재도입 회귀 방지)`, !real.has(col));
   });
-}
-
-// 주석(// ·  /* */)은 "왜 이 컬럼을 더 이상 안 쓰는지" 설명하느라 그 컬럼명을 자연스럽게
-// 언급한다(예: "구 user_id·base_time은 참조하지 않는다") — 이런 설명 자체가 오탐이 되면 안 되므로
-// 실제 코드(문자열 리터럴·SQL) 판정 전에 주석을 먼저 제거한다.
-function stripJsComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .split('\n')
-    .map((line) => line.replace(/\/\/.*$/, ''))
-    .join('\n');
 }
 
 function assertSourceDoesNotReference(desc, filePath, forbiddenIdentifiers) {

@@ -190,10 +190,12 @@ class BillingService {
   }
 
   async getAssets(userId) {
+    // user_assets에는 deleted_at이 없다(schema.sql — PK (user_id, asset_type, asset_id)
+    // 자연키, 구매 이력은 BillingDAO.deleteAsset이 hard DELETE로 회수한다).
     const result = await pool.query(
       `SELECT asset_type, asset_id, purchased_at
        FROM user_assets
-       WHERE user_id = $1 AND deleted_at IS NULL
+       WHERE user_id = $1
        ORDER BY purchased_at DESC`,
       [userId]
     );
