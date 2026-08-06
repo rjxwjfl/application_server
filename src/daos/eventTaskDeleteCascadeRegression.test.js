@@ -209,7 +209,7 @@ function makeConn(store) {
         const [eventId, sectionId] = params;
         const key = `${eventId}#${sectionId}`;
         const existing = store.eventSections.get(key);
-        const revivesOnConflict = s.includes('DO UPDATE') && s.includes('DELETED_AT = NULL');
+        const revivesOnConflict = s.toUpperCase().includes('DO UPDATE') && s.toUpperCase().includes('DELETED_AT = NULL');
         if (existing) {
           if (revivesOnConflict) existing.deleted_at = null;
         } else {
@@ -221,7 +221,7 @@ function makeConn(store) {
         const [taskId, sectionId] = params;
         const key = `${taskId}#${sectionId}`;
         const existing = store.taskSections.get(key);
-        const revivesOnConflict = s.includes('DO UPDATE') && s.includes('DELETED_AT = NULL');
+        const revivesOnConflict = s.toUpperCase().includes('DO UPDATE') && s.toUpperCase().includes('DELETED_AT = NULL');
         if (existing) {
           if (revivesOnConflict) existing.deleted_at = null;
         } else {
@@ -512,7 +512,53 @@ async function run() {
     );
   }
 
-  console.log('eventTaskDeleteCascadeRegression: 12/12 assertions passed');
+  // ⑬ 거동 대칭 회귀(addSection) — ⑫와 같은 문제가 addSection에도 있었다: 이름도 같고
+  //   (`addSection`) SQL 종류도 둘 다 `INSERT ... ON CONFLICT`라 ⑫의 soft/hard 분류로는 안
+  //   걸린다. 차이는 conflict 절뿐이었다(`DO NOTHING` — 구 EventDAO — vs `DO UPDATE SET
+  //   deleted_at = NULL` — TaskDAO). 그 conflict 절 자체를 분류해 직접 비교한다.
+  //   ⚠️ 대칭 장치의 한계: ⑫(soft/hard)와 ⑬(부활 가능 여부)은 각각 그 축 하나만 잡는
+  //   전용 비교이지, "임의의 두 메서드가 같은 일을 하는가"를 범용으로 검증하는 장치가
+  //   아니다. 세 번째 축(예: CASCADE 옵션 차이, 컬럼 목록 차이)이 갈라지면 이 두 테스트로는
+  //   안 잡힌다 — 그런 축이 또 발견되면 그때 같은 패턴으로 전용 비교를 하나 더 추가한다.
+  {
+    function conflictKind(sql) {
+      const s = sql.replace(/\s+/g, ' ').trim().toUpperCase();
+      if (s.includes('DO NOTHING')) return 'no-revival';
+      if (s.includes('DO UPDATE') && s.includes('DELETED_AT = NULL')) return 'revival';
+      return 'other';
+    }
+
+    const store = makeStore();
+    // 이미 해제된 연결 위에 addSection을 걸어야 conflict 절이 실제로 exercise된다.
+    store.eventSections.set('ev-13#sec-1', { event_id: 'ev-13', section_id: 'sec-1', deleted_at: new Date() });
+    store.taskSections.set('tk-13#sec-1', { task_id: 'tk-13', section_id: 'sec-1', deleted_at: new Date() });
+    const conn = makeConn(store);
+
+    await EventDAO.addSection(conn, 'ev-13', 'sec-1');
+    await TaskDAO.addSection(conn, 'tk-13', 'sec-1');
+
+    const eventAddSql = conn.queryLog.find((q) => q.sql.startsWith('INSERT INTO event_sections'))?.sql;
+    const taskAddSql = conn.queryLog.find((q) => q.sql.startsWith('INSERT INTO task_sections'))?.sql;
+    assert(eventAddSql && taskAddSql, '⑬addSection 호출이 기록돼야 한다');
+
+    assert.strictEqual(
+      conflictKind(eventAddSql),
+      conflictKind(taskAddSql),
+      `⑬EventDAO.addSection과 TaskDAO.addSection의 conflict 처리(부활 가능 여부)가 같아야 한다.\nEvent: ${eventAddSql}\nTask: ${taskAddSql}`
+    );
+    assert.strictEqual(
+      conflictKind(eventAddSql), 'revival',
+      '⑬addSection은 soft-delete된 연결을 되살려야 한다(DO NOTHING이면 해제 후 재연결이 영원히 막힌다)'
+    );
+
+    // 구조 단언(⑬)에 더해 실제 부활이 store에 반영됐는지도 확인 — mock이 conflict 절을
+    // 실제로 해석해 반영하므로(맹목적 부활이 아님), 이 단언은 SQL 문구가 아니라 관찰된
+    // 행동을 검증한다.
+    assert.strictEqual(store.eventSections.get('ev-13#sec-1').deleted_at, null, '⑬EventDAO.addSection 호출 후 실제로 부활해야 한다');
+    assert.strictEqual(store.taskSections.get('tk-13#sec-1').deleted_at, null, '⑬TaskDAO.addSection 호출 후 실제로 부활해야 한다');
+  }
+
+  console.log('eventTaskDeleteCascadeRegression: 13/13 assertions passed');
 }
 
 run().catch((error) => {
