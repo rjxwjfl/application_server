@@ -204,13 +204,16 @@ class BinderDAO {
     return result.rows;
   }
 
+  // RLY-20260806-066 — u.email을 실어 다른 멤버 전원의 이메일을 조회자에게 노출하던
+  // 과다노출의 수리. 이 로스터는 본질적으로 "타인 목록"이라 email이 필요한 내부 소비처가
+  // 없다(단일 호출부 — binderService.getBinderMembers). u.email 제거 후 `users u` JOIN도
+  // 더 쓰이지 않아 함께 뺀다.
   async getMembers(conn, binderId) {
     const query = `
       SELECT dm.binder_id, dm.user_id, dm.role, dm.notification_level,
              dm.nickname_in_binder, dm.joined_at,
-             ui.display_name, ui.user_code, ui.image_url, u.email
+             ui.display_name, ui.user_code, ui.image_url
       FROM binder_members dm
-      JOIN users u ON dm.user_id = u.id
       LEFT JOIN user_infos ui ON dm.user_id = ui.user_id
       WHERE dm.binder_id = $1 AND dm.deleted_at IS NULL AND dm.role >= 0
       ORDER BY dm.joined_at ASC
