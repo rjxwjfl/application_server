@@ -70,6 +70,14 @@ class ServiceUnavailableError extends AppError {
   }
 }
 
+// RLY-20260806-056 — api.md:2395가 이미 문서화한 계약(`POST /attachments/presign` 415
+// `UNSUPPORTED_MEDIA_TYPE`)을 처음 구현에 배선한다. 새 오류 개념이 아니라 문서에 있던 계약.
+class UnsupportedMediaTypeError extends AppError {
+  constructor(message = '지원하지 않는 파일 형식입니다', errorCode = 'UNSUPPORTED_MEDIA_TYPE') {
+    super(message, 415, errorCode);
+  }
+}
+
 module.exports = {
   AppError,
   BadRequestError,
@@ -82,4 +90,5 @@ module.exports = {
   NotImplementedError,
   UnprocessableEntityError,
   ServiceUnavailableError,
+  UnsupportedMediaTypeError,
 };

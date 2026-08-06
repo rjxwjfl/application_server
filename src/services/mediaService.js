@@ -4,12 +4,13 @@ const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
 const {
   NotFoundError, ForbiddenError, BadRequestError, PaymentRequiredError,
-  UnprocessableEntityError, ServiceUnavailableError,
+  UnprocessableEntityError, ServiceUnavailableError, UnsupportedMediaTypeError,
 } = require('../core/errors');
 const { SectionDAO } = require('../daos/sectionDAO');
 const { CastDAO } = require('../daos/castDAO');
 const { AttachmentDAO } = require('../daos/attachmentDAO');
 const { requireBinderMember, requireBinderMemberByCalendarId } = require('../core/authz');
+const { ALLOWED_IMAGE_MIME_TYPES } = require('../utils/mediaPipeline');
 
 const storage = new Storage();
 
@@ -56,6 +57,16 @@ class MediaService {
   async presign(data, context) {
     const { filename, content_type, file_size, context_type, context_id, binder_id, entity_type } = data;
     const id = generateUUID();
+
+    // RLY-20260806-056 — media.md:106,127이 서술하는 "MIME 타입 허용 목록 확인"이 코드엔
+    // 없었다(presign이 content_type을 어떤 목록과도 대조하지 않고 그대로 DB·GCS 폼에 썼다).
+    // api.md:2395가 이미 문서화한 415 UNSUPPORTED_MEDIA_TYPE 계약을 여기서 처음 배선한다.
+    // 이미지가 아닌 content_type(오디오·비디오·문서·기타)은 이번 Task 범위 밖이라 손대지
+    // 않는다(team-lead 지시) — avatar·cover는 §3-3상 항상 이미지 전용이라 이 검사가 그대로 적용된다.
+    if (content_type && content_type.toLowerCase().startsWith('image/')
+      && !ALLOWED_IMAGE_MIME_TYPES.has(content_type.toLowerCase())) {
+      throw new UnsupportedMediaTypeError('지원하지 않는 이미지 형식입니다');
+    }
 
     if (context_type === 'SECTION_MESSAGE') {
       const sectionId = await SectionDAO.findSectionIdByMessage(pool, context_id);
