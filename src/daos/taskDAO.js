@@ -1,4 +1,4 @@
-const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
+const { cascadeDeleteInstanceChildren, cascadeDeleteItemSections, REMINDER_TARGET_TYPE } = require('./deleteCascadeHelpers');
 
 class TaskDAO {
   // ============================================
@@ -112,6 +112,14 @@ class TaskDAO {
       participantTable: 'task_participants',
       reminderTargetType: REMINDER_TARGET_TYPE.TASK_INSTANCE,
       instanceIds,
+    });
+
+    // task_sections는 owner-키 자원 — 항목 삭제에서만 전파한다(EventDAO.softDeleteEvent와
+    // 대칭, RLY-20260806-029). softDeleteTaskInstance에서는 부르지 않는다.
+    await cascadeDeleteItemSections(conn, {
+      sectionTable: 'task_sections',
+      itemColumn: 'task_id',
+      itemId: taskId,
     });
   }
 

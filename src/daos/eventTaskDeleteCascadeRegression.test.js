@@ -1,13 +1,19 @@
 /**
  * src/daos/eventTaskDeleteCascadeRegression.test.js
  * =========================================================
- * RLY-20260806-027 회귀 스위트.
+ * RLY-20260806-027 회귀 스위트 (①~⑦) + RLY-20260806-029 확장 (⑧~⑫).
  *
- * 배경: `EventDAO.softDeleteEventInstance`가 정의돼 있지 않아 회차 삭제
- * (eventService.deleteEventInstance)가 호출 즉시 TypeError였다(결함 1). 또한
- * `softDeleteEvent`/`softDeleteTask`/`softDeleteTaskInstance`가 자기 행의
+ * RLY-20260806-027 배경: `EventDAO.softDeleteEventInstance`가 정의돼 있지 않아
+ * 회차 삭제(eventService.deleteEventInstance)가 호출 즉시 TypeError였다(결함 1).
+ * 또한 `softDeleteEvent`/`softDeleteTask`/`softDeleteTaskInstance`가 자기 행의
  * `deleted_at`만 세우고 하위(인스턴스·참가자·리마인더)로 전파하지 않아
  * 반복 일정(최대 365회차) 삭제 시 고아 행이 남았다(결함 2).
+ *
+ * RLY-20260806-029 배경: 027의 대칭 회귀(⑦)는 **이름**만 대조해 `EventDAO.removeSection`이
+ * hard DELETE, `TaskDAO.removeSection`이 soft UPDATE로 **거동**이 갈라져 있던 것을 못 잡았다.
+ * ⑧~⑪은 항목 삭제 → 섹션 연결(`event_sections`/`task_sections`) 전파를, ⑫는 그 거동
+ * 비대칭 자체를 재발 방지 장치로 고정한다. 판정 근거(왜 soft인가)는
+ * `deleteCascadeHelpers.cascadeDeleteItemSections`의 주석·구현 보고서 참조.
  *
  * 실 DB 없이 EventDAO/TaskDAO를 가짜 conn.query로 직접 호출하고, in-memory
  * store로 실제 UPDATE/DELETE의 WHERE 절 의미(특히 `deleted_at IS NULL` 가드)를
@@ -26,9 +32,11 @@ function makeStore() {
     events: new Map(),
     eventInstances: new Map(),
     eventParticipants: new Map(),
+    eventSections: new Map(), // key: `${event_id}#${section_id}`
     tasks: new Map(),
     taskInstances: new Map(),
     taskParticipants: new Map(),
+    taskSections: new Map(), // key: `${task_id}#${section_id}`
     reminders: new Map(),
   };
 }
@@ -156,6 +164,68 @@ function makeConn(store) {
           if (r.target_type === targetType && targetIds.includes(r.target_id)) {
             store.reminders.delete(id);
           }
+        }
+        return { rows: [] };
+      }
+
+      // --- RLY-20260806-029: event_sections/task_sections ---
+
+      // removeSection(itemId, sectionId) — 특정 쌍 하나만 대상. 항목-단위 캐스케이드보다
+      // 조건절이 더 좁으므로(section_id까지 포함) 먼저 매칭해야 한다.
+      if (s.startsWith('UPDATE event_sections SET deleted_at') && s.includes('AND section_id = $2')) {
+        const [eventId, sectionId] = params;
+        const link = store.eventSections.get(`${eventId}#${sectionId}`);
+        if (link && !link.deleted_at) link.deleted_at = new Date();
+        return { rows: [] };
+      }
+      if (s.startsWith('UPDATE task_sections SET deleted_at') && s.includes('AND section_id = $2')) {
+        const [taskId, sectionId] = params;
+        const link = store.taskSections.get(`${taskId}#${sectionId}`);
+        if (link && !link.deleted_at) link.deleted_at = new Date();
+        return { rows: [] };
+      }
+
+      // 항목 삭제 캐스케이드(cascadeDeleteItemSections) — 그 항목의 모든 섹션 링크.
+      if (s.startsWith('UPDATE event_sections SET deleted_at')) {
+        const [eventId] = params;
+        for (const link of store.eventSections.values()) {
+          if (link.event_id === eventId && !link.deleted_at) link.deleted_at = new Date();
+        }
+        return { rows: [] };
+      }
+      if (s.startsWith('UPDATE task_sections SET deleted_at')) {
+        const [taskId] = params;
+        for (const link of store.taskSections.values()) {
+          if (link.task_id === taskId && !link.deleted_at) link.deleted_at = new Date();
+        }
+        return { rows: [] };
+      }
+
+      // addSection(itemId, sectionId) — INSERT ... ON CONFLICT ... . 실제 SQL의 conflict
+      // 절을 그대로 해석한다(무조건 부활시키지 않는다) — 그래야 이 mock이 `DO NOTHING`으로
+      // 되돌아가는 회귀를 실제로 잡는다. `DO UPDATE ... SET DELETED_AT = NULL`일 때만 부활,
+      // 그 외(`DO NOTHING` 포함)는 기존 행을 그대로 둔다(= 부활 안 됨).
+      if (s.startsWith('INSERT INTO event_sections')) {
+        const [eventId, sectionId] = params;
+        const key = `${eventId}#${sectionId}`;
+        const existing = store.eventSections.get(key);
+        const revivesOnConflict = s.includes('DO UPDATE') && s.includes('DELETED_AT = NULL');
+        if (existing) {
+          if (revivesOnConflict) existing.deleted_at = null;
+        } else {
+          store.eventSections.set(key, { event_id: eventId, section_id: sectionId, deleted_at: null });
+        }
+        return { rows: [] };
+      }
+      if (s.startsWith('INSERT INTO task_sections')) {
+        const [taskId, sectionId] = params;
+        const key = `${taskId}#${sectionId}`;
+        const existing = store.taskSections.get(key);
+        const revivesOnConflict = s.includes('DO UPDATE') && s.includes('DELETED_AT = NULL');
+        if (existing) {
+          if (revivesOnConflict) existing.deleted_at = null;
+        } else {
+          store.taskSections.set(key, { task_id: taskId, section_id: sectionId, deleted_at: null });
         }
         return { rows: [] };
       }
@@ -323,7 +393,126 @@ async function run() {
     assert.strictEqual(typeof EventDAO.softDeleteEventInstance, 'function', '⑦softDeleteEventInstance가 정의돼 있어야 한다');
   }
 
-  console.log('eventTaskDeleteCascadeRegression: 7/7 assertions passed');
+  // ======================= RLY-20260806-029 =======================
+
+  // ⑧ 항목 삭제 → 섹션 연결이 정리된다(event_sections/task_sections)
+  {
+    const store = makeStore();
+    seedEvent(store, 'ev-8', 1, { withParticipant: false, withReminder: false });
+    store.eventSections.set('ev-8#sec-1', { event_id: 'ev-8', section_id: 'sec-1', deleted_at: null });
+    const conn = makeConn(store);
+
+    await EventDAO.softDeleteEvent(conn, 'ev-8');
+
+    assert(store.eventSections.get('ev-8#sec-1').deleted_at, '⑧이벤트 삭제 시 섹션 연결이 정리돼야 한다');
+  }
+  {
+    const store = makeStore();
+    seedTask(store, 'tk-8', 1, { withParticipant: false, withReminder: false });
+    store.taskSections.set('tk-8#sec-1', { task_id: 'tk-8', section_id: 'sec-1', deleted_at: null });
+    const conn = makeConn(store);
+
+    await TaskDAO.softDeleteTask(conn, 'tk-8');
+
+    assert(store.taskSections.get('tk-8#sec-1').deleted_at, '⑧태스크 삭제 시 섹션 연결이 정리돼야 한다');
+  }
+
+  // ⑨ 회차 삭제는 항목의 섹션 연결과 무관하다 — owner-키 자원(SC-event.md H15 vs H16,
+  //   design_intent.md §426). softDeleteEventInstance/softDeleteTaskInstance가 이걸 건드리면
+  //   회귀다.
+  {
+    const store = makeStore();
+    const [instanceId] = seedEvent(store, 'ev-9', 1, { withParticipant: false, withReminder: false });
+    store.eventSections.set('ev-9#sec-1', { event_id: 'ev-9', section_id: 'sec-1', deleted_at: null });
+    const conn = makeConn(store);
+
+    await EventDAO.softDeleteEventInstance(conn, instanceId);
+
+    assert(
+      !store.eventSections.get('ev-9#sec-1').deleted_at,
+      '⑨회차 삭제가 항목의 섹션 연결을 건드리면 안 된다(owner-키 자원)'
+    );
+  }
+
+  // ⑩ removeSection·addSection이 두 DAO에서 동일하게 동작한다 — soft delete + 부활 왕복.
+  {
+    const store = makeStore();
+    store.eventSections.set('ev-10#sec-1', { event_id: 'ev-10', section_id: 'sec-1', deleted_at: null });
+    store.taskSections.set('tk-10#sec-1', { task_id: 'tk-10', section_id: 'sec-1', deleted_at: null });
+    const conn = makeConn(store);
+
+    await EventDAO.removeSection(conn, 'ev-10', 'sec-1');
+    await TaskDAO.removeSection(conn, 'tk-10', 'sec-1');
+
+    assert(store.eventSections.get('ev-10#sec-1').deleted_at, '⑩EventDAO.removeSection이 soft delete여야 한다');
+    assert(store.taskSections.get('tk-10#sec-1').deleted_at, '⑩TaskDAO.removeSection이 soft delete여야 한다(기준선)');
+
+    // 부활 — 같은 (item_id, section_id) 쌍은 PK라 새 행을 만들 수 없다. addSection이
+    // deleted_at을 되살리지 못하면 한 번 해제한 쌍은 영원히 재연결이 막힌다.
+    await EventDAO.addSection(conn, 'ev-10', 'sec-1');
+    await TaskDAO.addSection(conn, 'tk-10', 'sec-1');
+
+    assert.strictEqual(
+      store.eventSections.get('ev-10#sec-1').deleted_at, null,
+      '⑩EventDAO.addSection이 해제된 연결을 되살려야 한다(구 ON CONFLICT DO NOTHING 버그 재발 방지)'
+    );
+    assert.strictEqual(
+      store.taskSections.get('tk-10#sec-1').deleted_at, null,
+      '⑩TaskDAO.addSection이 해제된 연결을 되살려야 한다'
+    );
+  }
+
+  // ⑪ 이미 정리된 섹션 연결의 삭제 시각이 덮이지 않는다.
+  {
+    const store = makeStore();
+    const staleTimestamp = new Date('2020-01-01T00:00:00Z');
+    seedEvent(store, 'ev-11', 0, { withParticipant: false, withReminder: false });
+    store.eventSections.set('ev-11#sec-1', { event_id: 'ev-11', section_id: 'sec-1', deleted_at: staleTimestamp });
+    const conn = makeConn(store);
+
+    await EventDAO.softDeleteEvent(conn, 'ev-11');
+
+    assert.strictEqual(
+      store.eventSections.get('ev-11#sec-1').deleted_at,
+      staleTimestamp,
+      '⑪이미 해제된 섹션 연결의 삭제 시각을 덮으면 안 된다'
+    );
+  }
+
+  // ⑫ 거동 대칭 회귀 — 027의 ⑦(이름 대조)은 이 결함(같은 이름·다른 SQL 종류)을 못 잡았다.
+  //   같은 이름의 메서드 쌍이 같은 종류(soft UPDATE vs hard DELETE)의 SQL을 쓰는지 직접 비교한다.
+  {
+    function sqlKind(sql) {
+      const s = sql.replace(/\s+/g, ' ').trim().toUpperCase();
+      if (s.startsWith('DELETE FROM')) return 'hard-delete';
+      if (s.startsWith('UPDATE') && s.includes('DELETED_AT = NOW()')) return 'soft-delete';
+      return 'other';
+    }
+
+    const store = makeStore();
+    store.eventSections.set('ev-12#sec-1', { event_id: 'ev-12', section_id: 'sec-1', deleted_at: null });
+    store.taskSections.set('tk-12#sec-1', { task_id: 'tk-12', section_id: 'sec-1', deleted_at: null });
+    const conn = makeConn(store);
+
+    await EventDAO.removeSection(conn, 'ev-12', 'sec-1');
+    await TaskDAO.removeSection(conn, 'tk-12', 'sec-1');
+
+    const eventRemoveSql = conn.queryLog.find((q) => q.sql.includes('event_sections') && q.sql.includes('section_id = $2'))?.sql;
+    const taskRemoveSql = conn.queryLog.find((q) => q.sql.includes('task_sections') && q.sql.includes('section_id = $2'))?.sql;
+    assert(eventRemoveSql && taskRemoveSql, '⑫removeSection 호출이 기록돼야 한다');
+
+    assert.strictEqual(
+      sqlKind(eventRemoveSql),
+      sqlKind(taskRemoveSql),
+      `⑫EventDAO.removeSection과 TaskDAO.removeSection의 삭제 종류(soft/hard)가 같아야 한다.\nEvent: ${eventRemoveSql}\nTask: ${taskRemoveSql}`
+    );
+    assert.strictEqual(
+      sqlKind(eventRemoveSql), 'soft-delete',
+      '⑫removeSection은 soft delete여야 한다(판정 근거: cleanupJobs STEPS·SectionDAO.softDelete 선례·design_intent.md §event_sections "soft delete로 연결 해제 이력 유지")'
+    );
+  }
+
+  console.log('eventTaskDeleteCascadeRegression: 12/12 assertions passed');
 }
 
 run().catch((error) => {
