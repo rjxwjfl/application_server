@@ -559,6 +559,53 @@ async function run() {
   }, ctx('editor1')));
   check('⑪ Task: fork가 patch의 reminder_offsets 값을 반영(이벤트와 대칭)', db.tasks['tkF-fork'] && JSON.stringify(db.tasks['tkF-fork'].reminder_offsets) === JSON.stringify([0]));
 
+  // ═══════════════════════════════════════════════════════════════════
+  // ⑫ RLY-20260806-061 — UNTIL 기반 규칙의 this_and_future 분리. 원본이 COUNT가 아니라
+  // UNTIL만 쓰면(evA 등 위 시나리오와 대칭, r_rule만 다름) 원본에 남은 r_rule도 UNTIL로
+  // 정확히 재계산돼야 하고, 그 뒤 원본을 다시 편집해도(같은 잔여 회차 재제출) 422가
+  // 나면 안 된다 — 결함의 실질 피해(다음 편집이 서버 자기 데이터를 거부)를 end-to-end로 고정한다.
+  // ═══════════════════════════════════════════════════════════════════
+  makeSeries('evG', 10, { event_type: 0, summary: 'Old', description: 'OldDesc', color: 1, r_rule: 'FREQ=DAILY;UNTIL=20260910T090000Z', recurrence_timezone: null, locations: null }, 'events', 'event_instances');
+
+  await expectOk('⑫ splitEvent(this_and_future) — UNTIL 기반 원본', () => EventService.splitEvent({
+    event_id: 'evG', instance_id: 'evG-i5', new_event_id: 'evG-fork',
+    instances: submittedInstances('evG', 5, 10, 'events'),
+    summary: 'New', description: 'NewDesc', color: 9, r_rule: 'FREQ=DAILY;UNTIL=20260910T090000Z',
+  }, ctx('editor1')));
+
+  check('⑫ fork 이벤트의 r_rule이 클라가 보낸 새 UNTIL 값', db.events['evG-fork'] && db.events['evG-fork'].r_rule === 'FREQ=DAILY;UNTIL=20260910T090000Z');
+  check('⑫ 경계 이전(evG-i4) 불변', db.event_instances['evG-i4'] && !db.event_instances['evG-i4'].deleted_at);
+  // 핵심 — 원본의 UNTIL이 "옛 값 그대로"가 아니라 잔여 회차(4개, 9/1~9/4)의 마지막 날짜로 재계산됐는가.
+  check('⑫ 원본 r_rule의 UNTIL이 잔여 회차의 실제 마지막 날짜로 조정됨(옛 값 12/31이 아니다)', db.events.evG.r_rule === 'FREQ=DAILY;UNTIL=20260904T090000Z');
+
+  await expectOk(
+    '⑫ 원본을 다시 all_upcoming으로 편집(같은 잔여 4개 재제출) — 조정된 UNTIL이면 422가 나면 안 된다',
+    () => EventService.updateEvent('evG', {
+      scope: 'all_upcoming',
+      instances: submittedInstances('evG', 1, 4, 'events'),
+    }, ctx('editor1'))
+  );
+  check('⑫ 재편집 후에도 원본 r_rule은 여전히 UNTIL 계열(조용히 COUNT로 바뀌지 않음)', db.events.evG.r_rule.includes('UNTIL='));
+
+  // Task 동일(이벤트와 대칭 — 같은 recurrenceRule.js를 공유하므로 taskService.js 배선도 검증).
+  makeSeries('tkG', 10, { task_type: 0, summary: 'Old', description: 'OldDesc', priority: 1, r_rule: 'FREQ=DAILY;UNTIL=20260910T090000Z', recurrence_timezone: null, locations: null }, 'tasks', 'task_instances');
+
+  await expectOk('⑫ Task: splitTask(this_and_future) — UNTIL 기반 원본', () => TaskService.splitTask({
+    task_id: 'tkG', instance_id: 'tkG-i5', new_task_id: 'tkG-fork',
+    instances: submittedInstances('tkG', 5, 10, 'tasks'),
+    summary: 'New', description: 'NewDesc', priority: 3, r_rule: 'FREQ=DAILY;UNTIL=20260910T090000Z',
+  }, ctx('editor1')));
+
+  check('⑫ Task: 원본 r_rule의 UNTIL이 잔여 회차의 실제 마지막 날짜로 조정됨', db.tasks.tkG.r_rule === 'FREQ=DAILY;UNTIL=20260904T090000Z');
+
+  await expectOk(
+    '⑫ Task: 원본을 다시 all_upcoming으로 편집(같은 잔여 4개 재제출) — 422가 나면 안 된다',
+    () => TaskService.updateTask('tkG', {
+      scope: 'all_upcoming',
+      instances: submittedInstances('tkG', 1, 4, 'tasks'),
+    }, ctx('editor1'))
+  );
+
   console.log(`\n[recurrenceScopeRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
   if (failures.length) {
     console.log('--- 실패 목록 ---');
