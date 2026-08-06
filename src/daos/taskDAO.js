@@ -138,47 +138,120 @@ class TaskDAO {
     });
   }
 
-  async splitTask(conn, originalTaskId, instanceId, newTaskId) {
-    const instance = await this.findInstanceById(conn, instanceId);
-    if (!instance) {
-      const error = new Error("인스턴스를 찾을 수 없습니다");
-      error.status = 404;
-      throw error;
-    }
+  // ============================================================================================
+  // 범위 편집(fork) — RLY-20260806-034. EventDAO의 대칭 5개 메서드와 동일 패턴 —
+  // TaskService.applyRecurrenceScope 하나가 이들을 조합해 PATCH scope와 split alias를 처리한다.
+  // ============================================================================================
 
-    const originalTask = await this.findById(conn, originalTaskId);
-    if (!originalTask) {
-      const error = new Error("할 일을 찾을 수 없습니다");
-      error.status = 404;
-      throw error;
-    }
-
-    const newTaskQuery = `
-      INSERT INTO tasks (
-        id, calendar_id, author_id, task_type,
-        summary, description, priority, locations,
-        r_rule, forked_from, recurrence_timezone, created_at, updated_at
-      )
-      SELECT $1, calendar_id, author_id, task_type,
+  // ⚠️ 항목 공통 알림 오프셋 컬럼은 일부러 SELECT하지 않는다 — eventDao.js의 findByIdForUpdate와
+  // 동일 사유(027 경계, 정적 대조 회귀가 이 파일 소스에 그 식별자가 없기를 기대한다).
+  async findByIdForUpdate(conn, taskId) {
+    const query = `
+      SELECT id, calendar_id, author_id, task_type,
              summary, description, priority, locations,
-             r_rule, id, recurrence_timezone, now(), now()
-      FROM tasks WHERE id = $2
+             r_rule, recurrence_timezone, forked_from,
+             created_at, updated_at, deleted_at
+      FROM tasks
+      WHERE id = $1 AND deleted_at IS NULL
+      FOR UPDATE
+    `;
+    const result = await conn.query(query, [taskId]);
+    return result.rows[0] || null;
+  }
+
+  async deleteInstancesFromBoundary(conn, taskId, boundaryDate) {
+    const result = await conn.query(
+      `UPDATE task_instances
+       SET deleted_at = now(), updated_at = now()
+       WHERE task_id = $1 AND original_date >= $2 AND deleted_at IS NULL
+       RETURNING id`,
+      [taskId, boundaryDate]
+    );
+    return result.rows.map((row) => row.id);
+  }
+
+  async countActiveInstances(conn, taskId) {
+    const result = await conn.query(
+      `SELECT COUNT(*)::int AS count FROM task_instances WHERE task_id = $1 AND deleted_at IS NULL`,
+      [taskId]
+    );
+    return result.rows[0].count;
+  }
+
+  // ⚠️ 알림 오프셋 컬럼은 INSERT 목록에 없다 — eventDao.js의 createForkEvent와 동일 사유·동일 경계.
+  async createForkTask(conn, data) {
+    const query = `
+      INSERT INTO tasks (
+        id, calendar_id, author_id, task_type, summary,
+        description, priority, locations, r_rule, forked_from,
+        recurrence_timezone, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
+      )
+      ON CONFLICT (id) DO NOTHING
       RETURNING *
     `;
-    const newTask = await conn.query(newTaskQuery, [newTaskId, originalTaskId]);
+    const result = await conn.query(query, [
+      data.id,
+      data.calendar_id,
+      data.author_id,
+      data.task_type,
+      data.summary,
+      data.description || null,
+      data.priority,
+      data.locations ? JSON.stringify(data.locations) : null,
+      data.r_rule || null,
+      data.forked_from,
+      data.recurrence_timezone || null,
+    ]);
+    if (result.rows[0]) return result.rows[0];
+    return this.findById(conn, data.id);
+  }
 
-    const moveQuery = `
-      UPDATE task_instances
-      SET task_id = $1, updated_at = now()
-      WHERE task_id = $2 AND original_date >= $3
+  // 참가자는 절대 넣지 않는다(명단 초기화 — 결정 64). completion_rule은 클라가 각 instance에
+  // 실어 보낸 값을 그대로 쓴다 — tasks(owner)에 default_completion_rule 컬럼이 없다(schema.sql에
+  // 없음, domain.md §3-13 표가 언급하는 컬럼이 아직 이식 안 됨 — 구현 보고서에 명시). 이 컬럼
+  // 부재는 createTask의 기존 동작(인스턴스별 값 사용)과도 일치해 새 문제를 만들지 않는다.
+  async insertInstancesBulk(conn, taskId, instances) {
+    if (!instances || instances.length === 0) return [];
+
+    const values = [];
+    const params = [];
+    let idx = 1;
+    for (const instance of instances) {
+      values.push(
+        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, now(), now())`
+      );
+      params.push(
+        instance.id,
+        taskId,
+        instance.instance_type || 0,
+        instance.parent_id || null,
+        instance.summary || null,
+        instance.description || null,
+        instance.priority || 0,
+        instance.locations ? JSON.stringify(instance.locations) : null,
+        instance.is_all_day || false,
+        instance.completion_rule || 0,
+        instance.original_date,
+        instance.start_date || null,
+        instance.due_date,
+      );
+    }
+
+    const query = `
+      INSERT INTO task_instances (
+        id, task_id, instance_type, parent_id,
+        summary, description, priority, locations,
+        is_all_day, completion_rule, original_date,
+        start_date, due_date,
+        created_at, updated_at
+      ) VALUES ${values.join(', ')}
+      ON CONFLICT (id) DO NOTHING
+      RETURNING *
     `;
-    await conn.query(moveQuery, [newTaskId, originalTaskId, instance.original_date]);
-
-    return {
-      original_task_id: originalTaskId,
-      new_task_id: newTaskId,
-      new_task: newTask.rows[0]
-    };
+    const result = await conn.query(query, params);
+    return result.rows;
   }
 
   // ============================================
