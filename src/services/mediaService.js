@@ -5,12 +5,24 @@ const withTransaction = require('../core/withTransaction');
 const {
   NotFoundError, ForbiddenError, BadRequestError, PaymentRequiredError,
   UnprocessableEntityError, ServiceUnavailableError, UnsupportedMediaTypeError,
+  PayloadTooLargeError,
 } = require('../core/errors');
 const { SectionDAO } = require('../daos/sectionDAO');
 const { CastDAO } = require('../daos/castDAO');
-const { AttachmentDAO } = require('../daos/attachmentDAO');
+const { AttachmentDAO, TIER_STORAGE_LIMIT_BYTES } = require('../daos/attachmentDAO');
 const { requireBinderMember, requireBinderMemberByCalendarId } = require('../core/authz');
 const { ALLOWED_IMAGE_MIME_TYPES } = require('../utils/mediaPipeline');
+
+// RLY-20260806-072 — media.md §3-1(단일 파일 최대 크기) 이미지 행. 조사 결과 파일 1건당
+// 상한이 서버 어디에도 없었다(바인더 총량 한도(F-S9)만 있었다) — 이 중 이미지만 우선 배선한다.
+// 오디오·비디오·문서·기타는 RLY-20260806-056이 그은 것과 같은 경계로 이번에도 미룬다:
+// 이미지 외 content_type은 아직 MIME 허용 목록조차 없어(presign의 위 §3-3-1 검사가
+// `image/`로 시작할 때만 대조) content_type 자체를 신뢰할 근거가 없다 — "판단이 안 서면
+// 넣지 않는다"(team-lead 지시, mediaPipeline.js 주석과 동일 원칙). image·audio·video는
+// content_type prefix만으로 모호함 없이 분류되지만 document·other는 그렇지 않다
+// (예: application/pdf vs application/zip — 둘 다 'application/'이라 목록 없이는 못 가른다).
+const IMAGE_FILE_SIZE_LIMIT_BYTES = [20, 50, 100].map((mb) => mb * 1024 * 1024); // Free/Lite/Plus
+const TIER_NAMES = ['free', 'lite', 'plus'];
 
 const storage = new Storage();
 
@@ -89,11 +101,28 @@ class MediaService {
     // F-S9 — 한도 집행 지점. avatar/cover는 binder_storage_usage 대상이 아니다(binder_id 없음).
     // SECTION_MESSAGE도 binder_id로 집계되므로 같이 검사한다(결정 33·SC-billing.md 액션 E).
     if (context_type !== 'avatar' && context_type !== 'cover') {
-      const [bytesUsed, limitBytes] = await Promise.all([
+      const [bytesUsed, tier] = await Promise.all([
         AttachmentDAO.getBytesUsed(pool, binder_id),
-        AttachmentDAO.getStorageLimitBytes(pool, binder_id),
+        AttachmentDAO.getTier(pool, binder_id),
       ]);
-      if (bytesUsed + (Number(file_size) || 0) > limitBytes) {
+      const declaredSize = Number(file_size) || 0;
+
+      // RLY-20260806-072 — media.md §4-1 step4(파일 1건당 상한, §3-1). 이미지만 배선한다
+      // (위 상수 정의 주석 참조). 이 상한을 넘는 파일은 presign 단계에서 거부해 GCS에 절대
+      // 업로드되지 않게 한다(주석대로 presign 실패 = 업로드 URL 미발급 = 고아 객체 없음).
+      if (content_type && content_type.toLowerCase().startsWith('image/')) {
+        const imageLimitBytes = IMAGE_FILE_SIZE_LIMIT_BYTES[tier] ?? IMAGE_FILE_SIZE_LIMIT_BYTES[0];
+        if (declaredSize > imageLimitBytes) {
+          const limitMb = Math.round(imageLimitBytes / (1024 * 1024));
+          throw new PayloadTooLargeError(
+            `이미지 파일은 ${limitMb}MB를 초과할 수 없습니다 (${TIER_NAMES[tier] ?? 'free'} tier)`
+          );
+        }
+      }
+
+      // F-S9 — 바인더 총 저장 한도(집계). 파일 1건당 상한과 별개 검사(§4-1 step5).
+      const limitBytes = TIER_STORAGE_LIMIT_BYTES[tier] ?? TIER_STORAGE_LIMIT_BYTES[0];
+      if (bytesUsed + declaredSize > limitBytes) {
         throw new PaymentRequiredError(
           '바인더 저장 공간이 부족합니다. Binder Boost로 용량을 늘려보세요.',
           'BOOST_STORAGE_LIMIT'
