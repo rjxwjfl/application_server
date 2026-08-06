@@ -268,7 +268,9 @@ class BinderService {
       const member = await BinderDAO.getMember(client, binderId, userId);
       if (!member || member.role !== 0) throw new ForbiddenError('권한이 없습니다');
 
-      await BinderDAO.softDelete(client, binderId);
+      // H15(SC-binder-manage.md:181-194) — binder_members·하위 캘린더(CalendarDAO.cascadeSoftDelete
+      // 재사용)·sections까지 전파. RLY-20260806-025 이전에는 binders 한 줄만 지웠다.
+      await BinderDAO.cascadeSoftDelete(client, binderId);
     });
 
     eventBus.emit('sync', {
