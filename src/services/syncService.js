@@ -52,6 +52,10 @@ class SyncService {
       oldCIds: prevToken.c_ids.filter(id => currCIds.includes(id)), // 유지된 기존 캘린더
       newDIds: diff(currDIds, prevToken.d_ids), // 새로 가입한 바인더
       newCIds: diff(currCIds, prevToken.c_ids), // 새로 구독한 캘린더
+      currDIds, // RLY-20260806-078 — getMessageAttachments가 부모 messageIds 없이도 인가
+      // 경계(현재 접근 가능한 바인더 전체)를 판정할 수 있어야 해서 추가. 동기화 토큰(ts·d_ids·
+      // c_ids·s_ids)과는 무관한 내부 ctx 필드다 — oldDIds∪newDIds와 값은 같지만 이미 위에서
+      // 계산된 currDIds를 그대로 재사용한다(새로 파생하지 않음).
       calWindowFrom,
       calWindowTo,
       msgWindowFrom
@@ -193,18 +197,24 @@ class SyncService {
 
   async _fetchTrackCMessaging(ctx) {
     const messages = await SyncDAO.getMessagesDeltaFull(pool, ctx);
-    
-    if (!messages.length) {
-      return { messages: [], attachments: [], message_embeds: [], message_reactions: [], message_mentions: [] };
-    }
-
     const messageIds = messages.map(m => m.id);
     const relatedOldTs = ctx.hydrateSectionIds.length ? null : ctx.oldTs;
+
+    // RLY-20260806-078 — 첨부는 messages.length===0(부모 메시지가 이번 델타에 하나도 없는
+    // 경우)이어도 계속 조회한다. Worker의 비동기 confirm→ready/rejected 전환이 메시지 자신의
+    // 동기화보다 항상 늦게 끝나(1분 폴링), "메시지는 이미 동기화됐는데 그 메시지에 달린 첨부
+    // 상태만 나중에 바뀌는" 순서가 예외가 아니라 일반적이다(구현 보고서 §1 재현). messageIds만
+    // 으로 스코프하면 그 변화가 부모 메시지 자신이 다시 바뀌지 않는 한 영원히 델타에서 빠진다 —
+    // getMessageAttachments에 독자 updated_at 조건을 추가해 이를 닫았다(인가는 messageIds가
+    // 아니라 ctx.currDIds·userId 기반 섹션 접근 검증으로 대체 — DAO 내부 주석 참조).
+    //
+    // message_embeds·reactions·mentions도 같은 부류의 결손이 있다(구현 보고서 §3 — 목록만
+    // 보고, 이번 Task 범위는 첨부뿐이라 기존 동작(messages 없으면 조회 안 함)을 그대로 둔다).
     const [attachments, embeds, reactions, mentions] = await Promise.all([
-      SyncDAO.getMessageAttachments(pool, messageIds, relatedOldTs),
-      SyncDAO.getMessageEmbeds(pool, messageIds, relatedOldTs),
-      SyncDAO.getMessageReactions(pool, messageIds, relatedOldTs),
-      SyncDAO.getMessageMentions(pool, messageIds, relatedOldTs)
+      SyncDAO.getMessageAttachments(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
+      messages.length ? SyncDAO.getMessageEmbeds(pool, messageIds, relatedOldTs) : [],
+      messages.length ? SyncDAO.getMessageReactions(pool, messageIds, relatedOldTs) : [],
+      messages.length ? SyncDAO.getMessageMentions(pool, messageIds, relatedOldTs) : [],
     ]);
 
     return { messages, attachments, message_embeds: embeds, message_reactions: reactions, message_mentions: mentions };

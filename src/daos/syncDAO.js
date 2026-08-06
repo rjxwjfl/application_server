@@ -410,16 +410,60 @@ class SyncDAO {
     return rows;
   }
 
-  static async getMessageAttachments(pool, messageIds, oldTs) {
-    if (!messageIds.length) return [];
+  /**
+   * RLY-20260806-078 — 원래 이 함수는 messageIds(이번 델타에 포함된 메시지)로만 스코프됐다.
+   * 메시지는 안 바뀌었는데 그 메시지에 달린 첨부만(Worker의 비동기 confirm→ready/rejected
+   * 전환이 메시지 자신의 동기화보다 항상 늦게 끝나서 — 1분 폴링) 바뀐 경우, messageIds에
+   * 그 메시지가 없어 그 변화가 부모가 다시 바뀌지 않는 한 영원히 델타에서 빠졌다.
+   *
+   * userId·currDIds가 주어지면(정상 sync 경로 — syncService._fetchTrackCMessaging) 두
+   * 조건을 OR로 묶는다:
+   *  (1) a.context_id = ANY(messageIds) — 이번 델타에 포함된 메시지의 첨부(신규·hydrate).
+   *      원래 동작과 완전히 동일(messageIds 스코프 내에서 oldTs 있으면 그 안에서도 시간 필터).
+   *  (2) a.updated_at > oldTs AND 그 섹션이 지금 접근 가능 — 부모는 안 바뀌었지만 첨부
+   *      자신이 바뀐 경우. messageIds가 주던 인가 경계(부모 메시지 조회 시 이미 섹션 접근이
+   *      검증돼 있었다)를 대신할 자체 검증이 필요해서, getMessagesDeltaFull과 똑같은
+   *      access_scope/section_members 판정을 그대로 재사용한다(새 인가 개념을 만들지 않는다).
+   *  oldTs가 없으면(hydrate 전용 델타) (2)는 적용하지 않는다 — 그 경우 (1)이 이미 해당
+   *  섹션의 메시지를 window 전체 실어(getMessagesDeltaFull hydrate 분기) 그 첨부도 (1)로
+   *  잡힌다. userId·currDIds가 없는 호출(이론상의 다른 호출부 대비)은 원래 쿼리 그대로 동작한다.
+   */
+  static async getMessageAttachments(pool, messageIds, oldTs, userId, currDIds) {
+    const hasIndependentBranch = !!(oldTs && userId && currDIds && currDIds.length);
+    if (!messageIds.length && !hasIndependentBranch) return [];
+
+    if (!hasIndependentBranch) {
+      const query = `
+        SELECT id, context_id AS message_id, filename, file_size, content_type, storage_key, status, updated_at
+        FROM attachments
+        WHERE context_type = 'SECTION_MESSAGE' AND context_id = ANY($1::uuid[]) AND deleted_at IS NULL
+        ${oldTs ? 'AND updated_at > $2' : ''}
+      `;
+      const params = oldTs ? [messageIds, oldTs] : [messageIds];
+      const { rows } = await pool.query(query, params);
+      return rows;
+    }
+
     const query = `
-      SELECT id, context_id AS message_id, filename, file_size, content_type, storage_key, status, updated_at
-      FROM attachments
-      WHERE context_type = 'SECTION_MESSAGE' AND context_id = ANY($1::uuid[]) AND deleted_at IS NULL
-      ${oldTs ? 'AND updated_at > $2' : ''}
+      SELECT a.id, a.context_id AS message_id, a.filename, a.file_size, a.content_type,
+             a.storage_key, a.status, a.updated_at
+      FROM attachments a
+      JOIN section_messages m ON m.id = a.context_id
+      JOIN sections s ON s.id = m.section_id
+      WHERE a.context_type = 'SECTION_MESSAGE' AND a.deleted_at IS NULL
+        AND (
+          (a.context_id = ANY($1::uuid[]) AND a.updated_at > $2)
+          OR (
+            a.updated_at > $2
+            AND s.binder_id = ANY($3::uuid[])
+            AND (s.access_scope = 0 OR EXISTS (
+              SELECT 1 FROM section_members sm
+              WHERE sm.section_id = s.id AND sm.user_id = $4 AND sm.deleted_at IS NULL
+            ))
+          )
+        )
     `;
-    const params = oldTs ? [messageIds, oldTs] : [messageIds];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(query, [messageIds, oldTs, currDIds, userId]);
     return rows;
   }
 
