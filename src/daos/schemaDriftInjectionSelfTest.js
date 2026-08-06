@@ -32,42 +32,48 @@ function runRegression() {
   }
 }
 
-// 5개 케이스 — 각각 (파일, 원문 조각, 주입 조각, 주입한 가짜 컬럼명).
+// 5개 케이스 — 팀리드 지시대로 **다섯 곳 전부 postDAO.js 한 파일**에 주입한다(팀리드가 같은
+// 파일로 직접 재현할 것이므로 위치를 맞춘다).
 const CASES = [
   {
     clause: 'SELECT 목록',
-    file: 'src/daos/billingDAO.js',
-    find: 'SELECT user_id, asset_type, asset_id, purchased_at\n      FROM user_assets',
-    replace: 'SELECT user_id, asset_type, asset_id, purchased_at, zzz_fake_select\n      FROM user_assets',
-    fakeColumn: 'zzz_fake_select',
+    file: 'src/daos/postDAO.js',
+    // findLike(): SELECT * → SELECT zzz_fake (팀리드 지정 형태 그대로)
+    find: '`SELECT * FROM post_likes WHERE post_id = $1 AND user_id = $2`',
+    replace: '`SELECT zzz_fake FROM post_likes WHERE post_id = $1 AND user_id = $2`',
+    fakeColumn: 'zzz_fake',
   },
   {
     clause: 'INSERT 컬럼 목록',
     file: 'src/daos/postDAO.js',
+    // createLike(): INSERT 컬럼 목록 맨 앞에 추가
     find: 'INSERT INTO post_likes (post_id, user_id, created_at)',
-    replace: 'INSERT INTO post_likes (post_id, user_id, created_at, zzz_fake_insert)',
-    fakeColumn: 'zzz_fake_insert',
+    replace: 'INSERT INTO post_likes (zzz_fake, post_id, user_id, created_at)',
+    fakeColumn: 'zzz_fake',
   },
   {
     clause: 'UPDATE SET',
     file: 'src/daos/postDAO.js',
-    find: '`UPDATE posts SET deleted_at = now(), updated_at = now()\n       WHERE id = $1 AND deleted_at IS NULL`',
-    replace: '`UPDATE posts SET deleted_at = now(), updated_at = now(), zzz_fake_set = now()\n       WHERE id = $1 AND deleted_at IS NULL`',
-    fakeColumn: 'zzz_fake_set',
+    // softDelete(): posts UPDATE의 SET 절에 추가
+    find: 'UPDATE posts SET deleted_at = now(), updated_at = now()',
+    replace: 'UPDATE posts SET deleted_at = now(), updated_at = now(), zzz_fake = 1',
+    fakeColumn: 'zzz_fake',
   },
   {
     clause: 'WHERE/AND/ON',
     file: 'src/daos/postDAO.js',
-    find: '`SELECT * FROM post_likes WHERE post_id = $1 AND user_id = $2`',
-    replace: '`SELECT * FROM post_likes WHERE post_id = $1 AND user_id = $2 AND zzz_fake_where IS NULL`',
-    fakeColumn: 'zzz_fake_where',
+    // getLikeCount(): WHERE post_id = $1 → AND zzz_fake IS NULL 추가(팀리드 지정 형태 그대로)
+    find: '`SELECT COUNT(*)::int AS count FROM post_likes WHERE post_id = $1`',
+    replace: '`SELECT COUNT(*)::int AS count FROM post_likes WHERE post_id = $1 AND zzz_fake IS NULL`',
+    fakeColumn: 'zzz_fake',
   },
   {
     clause: 'RETURNING',
-    file: 'src/daos/binderDAO.js',
-    find: 'RETURNING binder_id, is_public, is_searchable, require_approval\n    `;\n    const result = await conn.query(query, [\n      is_public,',
-    replace: 'RETURNING binder_id, is_public, is_searchable, require_approval, zzz_fake_returning\n    `;\n    const result = await conn.query(query, [\n      is_public,',
-    fakeColumn: 'zzz_fake_returning',
+    file: 'src/daos/postDAO.js',
+    // createLike(): RETURNING * → RETURNING *, zzz_fake
+    find: '       VALUES ($1,$2,COALESCE($3,now()))\n       RETURNING *`,',
+    replace: '       VALUES ($1,$2,COALESCE($3,now()))\n       RETURNING *, zzz_fake`,',
+    fakeColumn: 'zzz_fake',
   },
 ];
 
