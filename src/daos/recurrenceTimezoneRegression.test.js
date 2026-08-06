@@ -40,7 +40,8 @@ function makeEventConn(store) {
         return { rows: store.row.deleted_at ? [] : [{ ...store.row }] };
       }
       if (s.startsWith('UPDATE events SET summary')) {
-        const [summary, description, color, r_rule, locations, hasTz, tzValue, eventId] = params;
+        // RLY-20260806-026 — reminder_offsets 컬럼 이식으로 eventId가 $8→$9로 밀렸다.
+        const [summary, description, color, r_rule, locations, hasTz, tzValue, reminderOffsets, eventId] = params;
         assert.strictEqual(eventId, store.row.id, '이벤트 id가 WHERE 절 마지막 파라미터와 일치해야 한다');
         store.row.summary = summary ?? store.row.summary;
         store.row.description = description ?? store.row.description;
@@ -49,6 +50,7 @@ function makeEventConn(store) {
         store.row.locations = locations ?? store.row.locations;
         // CASE WHEN $6 THEN $7 ELSE recurrence_timezone END
         store.row.recurrence_timezone = hasTz ? (tzValue ?? null) : store.row.recurrence_timezone;
+        store.row.reminder_offsets = reminderOffsets ?? store.row.reminder_offsets;
         store.row.updated_at = new Date().toISOString();
         return { rows: [{ ...store.row }] };
       }
@@ -66,7 +68,8 @@ function makeTaskConn(store) {
         return { rows: store.row.deleted_at ? [] : [{ ...store.row }] };
       }
       if (s.startsWith('UPDATE tasks SET summary')) {
-        const [summary, description, priority, locations, r_rule, hasTz, tzValue, taskId] = params;
+        // RLY-20260806-026 — reminder_offsets 컬럼 이식으로 taskId가 $8→$9로 밀렸다.
+        const [summary, description, priority, locations, r_rule, hasTz, tzValue, reminderOffsets, taskId] = params;
         assert.strictEqual(taskId, store.row.id, '태스크 id가 WHERE 절 마지막 파라미터와 일치해야 한다');
         store.row.summary = summary ?? store.row.summary;
         store.row.description = description ?? store.row.description;
@@ -74,6 +77,7 @@ function makeTaskConn(store) {
         store.row.locations = locations ?? store.row.locations;
         store.row.r_rule = r_rule ?? store.row.r_rule;
         store.row.recurrence_timezone = hasTz ? (tzValue ?? null) : store.row.recurrence_timezone;
+        store.row.reminder_offsets = reminderOffsets ?? store.row.reminder_offsets;
         store.row.updated_at = new Date().toISOString();
         return { rows: [{ ...store.row }] };
       }

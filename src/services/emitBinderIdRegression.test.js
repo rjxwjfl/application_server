@@ -91,6 +91,11 @@ async function mockQuery(sql, params = []) {
   if (s.startsWith('INSERT INTO') || s.startsWith('UPDATE ')) {
     return { rows: [{ id: params[0] }] };
   }
+  // ReminderDAO.syncTarget(RLY-20260806-026)의 DELETE 분기 — createEvent/createTask가 인스턴스에
+  // reminder_offsets 없이 리마인더 파생을 시도할 때 탄다. 이 회귀의 관심사가 아니므로 흉내만 낸다.
+  if (s.startsWith('DELETE FROM reminders')) {
+    return { rows: [] };
+  }
 
   throw new Error(`[mock] Unhandled query: ${s.slice(0, 140)} params=${JSON.stringify(params)}`);
 }

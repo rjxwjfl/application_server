@@ -8,6 +8,7 @@ const { startSubscriptionJobs } = require('../jobs/subscriptionJobs');
 const { startMediaLifecycleJobs } = require('../jobs/mediaLifecycleJobs');
 const { startHolidayJobs } = require('../jobs/holidayJobs');
 const { startCleanupJobs } = require('../jobs/cleanupJobs');
+const { startReminderJobs } = require('../jobs/reminderJobs');
 
 async function loaders({ expressApp, config }) {
   // 1. DB 연결 초기화
@@ -21,6 +22,7 @@ async function loaders({ expressApp, config }) {
   startMediaLifecycleJobs();
   startHolidayJobs();
   startCleanupJobs();
+  startReminderJobs();
 
   return { pool };
 }

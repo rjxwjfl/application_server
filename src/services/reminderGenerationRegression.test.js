@@ -143,7 +143,18 @@ assertColumnsExist('ReminderDAO', 'reminders', [
   'created_at', 'updated_at',
 ]);
 assertColumnsAbsent('ReminderDAO', 'reminders', ['user_id', 'base_time', 'is_sent', 'deleted_at', 'source_template_id', 'is_override']);
-assertSourceDoesNotReference('ReminderDAO', 'src/daos/reminderDAO.js', ['user_id', 'base_time', 'is_sent']);
+assertSourceDoesNotReference('ReminderDAO', 'src/daos/reminderDAO.js', ['base_time', 'is_sent']);
+// user_id는 위 두 컬럼과 달리 파일 전체에서 금지할 수 없다 — RLY-20260806-032가 getRecipients에서
+// binder_members·event_participants·task_participants(전부 실제 user_id 컬럼 보유)를 조인해
+// 수신자를 구한다. 금지 대상은 정확히 "reminders 테이블 자신의 user_id 컬럼"이던 옛 패턴이다 —
+// reminders의 별칭(r) 또는 테이블명 그대로에 user_id를 붙여 참조하는 형태만 좁게 잡는다.
+(function assertReminderDaoDoesNotReferenceOwnUserId() {
+  const src = stripJsComments(fs.readFileSync(path.join(__dirname, '../daos/reminderDAO.js'), 'utf8'));
+  check(
+    '⑤ ReminderDAO: reminders 테이블 자신의 user_id 컬럼을 참조하지 않음(r.user_id·reminders.user_id·INSERT INTO reminders(...user_id...) 없음)',
+    !/\br\.user_id\b/.test(src) && !/reminders\.user_id\b/.test(src) && !/INSERT INTO reminders \([^)]*\buser_id\b/.test(src)
+  );
+})();
 
 // special_days — SpecialDayDAO.create/update가 실제로 다루는 전체 컬럼(구 is_yearly 제외).
 assertColumnsExist('SpecialDayDAO', 'special_days', [
@@ -161,19 +172,21 @@ assertColumnsExist('tasks 컬럼 이식', 'tasks', ['reminder_offsets']);
 // user_settings.timezone — specialDayService.resolveOwnerTimezone이 참조하는 컬럼.
 assertColumnsExist('specialDayService.resolveOwnerTimezone', 'user_settings', ['timezone']);
 
-// eventDAO.js·taskDAO.js는 이번 Task에서 손대지 않았다(RLY-20260806-027 경계) — 그래도
-// events·tasks.reminder_offsets를 그 DAO가 INSERT/UPDATE 컬럼 목록에 아직 못 넣었다는 사실
-// 자체를 소스에서 확인해 둔다(구현보고서의 "owner row에 안 남는다" 주장을 코드로 고정).
-(function assertEventTaskDaoDoesNotPersistReminderOffsetsYet() {
+// eventDAO.js·taskDAO.js — 027 경계가 풀린 뒤(team-lead 승인) createEvent/updateEvent·
+// createTask/updateTask가 owner row에 reminder_offsets를 실제로 쓴다. "역산 경로가 남아있지
+// 않다"도 함께 고정한다 — ReminderDAO.syncTarget이 기존 reminders 행의 trigger_offset을
+// 읽어 오프셋을 추론하는 코드(offsets===undefined 분기)가 재도입되면 이 단언이 잡는다.
+assertColumnsExist('EventDAO.createEvent/updateEvent', 'events', ['reminder_offsets']);
+assertColumnsExist('TaskDAO.createTask/updateTask', 'tasks', ['reminder_offsets']);
+(function assertEventTaskDaoPersistsReminderOffsets() {
   const eventDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/eventDAO.js'), 'utf8');
   const taskDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/taskDAO.js'), 'utf8');
+  const reminderDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/reminderDAO.js'), 'utf8');
+  check('⑤ eventDAO.js가 이제 reminder_offsets를 씀(owner row 왕복 배선)', /reminder_offsets/.test(eventDaoSrc));
+  check('⑤ taskDAO.js가 이제 reminder_offsets를 씀(owner row 왕복 배선)', /reminder_offsets/.test(taskDaoSrc));
   check(
-    '⑤ eventDAO.js가 아직 reminder_offsets를 안 씀(027 경계 확인용 — 배선되면 이 단언을 뒤집어라)',
-    !/reminder_offsets/.test(eventDaoSrc)
-  );
-  check(
-    '⑤ taskDAO.js가 아직 reminder_offsets를 안 씀(027 경계 확인용 — 배선되면 이 단언을 뒤집어라)',
-    !/reminder_offsets/.test(taskDaoSrc)
+    '⑤ ReminderDAO.syncTarget에 역산(offsets===undefined) 경로가 없음(오프셋 출처는 컬럼 하나)',
+    !/offsets\s*===\s*undefined/.test(stripJsComments(reminderDaoSrc))
   );
 })();
 
@@ -185,6 +198,7 @@ const dbPath = require.resolve('../../config/db');
 const NOW = new Date().toISOString();
 
 const db = {
+  binders: { b1: { id: 'b1', name: 'B', description: null, image_url: null, thumbnail_url: null, member_count: 1, last_activity_at: NOW, created_at: NOW, updated_at: NOW, deleted_at: null } },
   calendars: { cal1: { id: 'cal1', binder_id: 'b1', title: 'C', description: null, color: 0, is_public: false, created_at: NOW, updated_at: NOW, deleted_at: null } },
   binder_members: { 'b1:author1': { binder_id: 'b1', user_id: 'author1', role: 0, notification_level: 1, nickname_in_binder: null, joined_at: NOW, deleted_at: null } },
   events: {},
@@ -211,6 +225,12 @@ async function mockQuery(sql, params = []) {
     return { rows: row ? [row] : [] };
   }
 
+  // BinderDAO.findById (SpecialDayService.getById 존재 오라클 방어 체인)
+  if (s.startsWith('SELECT id, name, description, image_url, thumbnail_url, member_count') && s.includes('FROM binders')) {
+    const row = db.binders[params[0]];
+    return { rows: row && !row.deleted_at ? [row] : [] };
+  }
+
   // BinderDAO.getMember
   if (s.includes('FROM binder_members') && s.includes('WHERE binder_id = $1 AND user_id = $2')) {
     const row = db.binder_members[`${params[0]}:${params[1]}`];
@@ -221,10 +241,10 @@ async function mockQuery(sql, params = []) {
 
   // ── events / event_instances ──────────────────────────────────────────
   if (s.startsWith('INSERT INTO events (')) {
-    const [id, calendar_id, author_id, event_type, summary, description, color, r_rule, locations, forked_from, recurrence_timezone, created_at, updated_at] = params;
+    const [id, calendar_id, author_id, event_type, summary, description, color, r_rule, locations, forked_from, recurrence_timezone, reminder_offsets, created_at, updated_at] = params;
     const row = {
       id, calendar_id, author_id, event_type, summary, description, color, r_rule,
-      locations, forked_from, recurrence_timezone,
+      locations, forked_from, recurrence_timezone, reminder_offsets,
       created_at: created_at || NOW, updated_at: updated_at || NOW, deleted_at: null,
     };
     db.events[id] = row;
@@ -233,6 +253,25 @@ async function mockQuery(sql, params = []) {
   if (s.startsWith('SELECT id, calendar_id, author_id, event_type, summary') && s.includes('FROM events')) {
     const row = db.events[params[0]];
     return { rows: row && !row.deleted_at ? [row] : [] };
+  }
+  if (s.startsWith('UPDATE events') && s.includes('SET summary')) {
+    const [summary, description, color, r_rule, locations, hasRecurrenceTimezone, recurrence_timezone, reminder_offsets, eventId] = params;
+    const row = db.events[eventId];
+    if (row) {
+      if (summary != null) row.summary = summary;
+      if (description != null) row.description = description;
+      if (color != null) row.color = color;
+      if (r_rule != null) row.r_rule = r_rule;
+      if (locations != null) row.locations = locations;
+      if (hasRecurrenceTimezone) row.recurrence_timezone = recurrence_timezone;
+      if (reminder_offsets != null) row.reminder_offsets = reminder_offsets;
+      row.updated_at = NOW;
+    }
+    return { rows: row ? [row] : [] };
+  }
+  if (s.startsWith('SELECT id, start_date FROM event_instances')) {
+    const rows = Object.values(db.event_instances).filter((r) => r.event_id === params[0] && !r.deleted_at);
+    return { rows: rows.map((r) => ({ id: r.id, start_date: r.start_date })) };
   }
   if (s.startsWith('INSERT INTO event_instances (')) {
     const [id, event_id, instance_type, parent_id, summary, description, color, locations, is_all_day, original_date, start_date, end_date, created_at, updated_at] = params;
@@ -250,7 +289,7 @@ async function mockQuery(sql, params = []) {
     const ev = inst && db.events[inst.event_id];
     const cal = ev && db.calendars[ev.calendar_id];
     if (!inst || inst.event_id !== eventId || inst.deleted_at || !ev || ev.deleted_at || !cal || cal.deleted_at) return { rows: [] };
-    return { rows: [{ id: inst.id, deleted_at: inst.deleted_at, calendar_id: ev.calendar_id, author_id: ev.author_id, binder_id: cal.binder_id }] };
+    return { rows: [{ id: inst.id, deleted_at: inst.deleted_at, calendar_id: ev.calendar_id, author_id: ev.author_id, binder_id: cal.binder_id, reminder_offsets: ev.reminder_offsets }] };
   }
   if (s.startsWith('UPDATE event_instances') && s.includes('SET summary')) {
     const [summary, description, color, locations, is_all_day, start_date, end_date, instanceId] = params;
@@ -270,10 +309,10 @@ async function mockQuery(sql, params = []) {
 
   // ── tasks / task_instances ───────────────────────────────────────────
   if (s.startsWith('INSERT INTO tasks (')) {
-    const [id, calendar_id, author_id, task_type, summary, description, priority, locations, r_rule, forked_from, recurrence_timezone] = params;
+    const [id, calendar_id, author_id, task_type, summary, description, priority, locations, r_rule, forked_from, recurrence_timezone, reminder_offsets] = params;
     const row = {
       id, calendar_id, author_id, task_type, summary, description, priority, locations,
-      r_rule, forked_from, recurrence_timezone, created_at: NOW, updated_at: NOW, deleted_at: null,
+      r_rule, forked_from, recurrence_timezone, reminder_offsets, created_at: NOW, updated_at: NOW, deleted_at: null,
     };
     db.tasks[id] = row;
     return { rows: [row] };
@@ -281,6 +320,25 @@ async function mockQuery(sql, params = []) {
   if (s.startsWith('SELECT id, calendar_id, author_id, task_type') && s.includes('FROM tasks')) {
     const row = db.tasks[params[0]];
     return { rows: row && !row.deleted_at ? [row] : [] };
+  }
+  if (s.startsWith('UPDATE tasks') && s.includes('SET summary')) {
+    const [summary, description, priority, locations, r_rule, hasRecurrenceTimezone, recurrence_timezone, reminder_offsets, taskId] = params;
+    const row = db.tasks[taskId];
+    if (row) {
+      if (summary != null) row.summary = summary;
+      if (description != null) row.description = description;
+      if (priority != null) row.priority = priority;
+      if (locations != null) row.locations = locations;
+      if (r_rule != null) row.r_rule = r_rule;
+      if (hasRecurrenceTimezone) row.recurrence_timezone = recurrence_timezone;
+      if (reminder_offsets != null) row.reminder_offsets = reminder_offsets;
+      row.updated_at = NOW;
+    }
+    return { rows: row ? [row] : [] };
+  }
+  if (s.startsWith('SELECT id, due_date FROM task_instances')) {
+    const rows = Object.values(db.task_instances).filter((r) => r.task_id === params[0] && !r.deleted_at);
+    return { rows: rows.map((r) => ({ id: r.id, due_date: r.due_date })) };
   }
   if (s.startsWith('INSERT INTO task_instances (')) {
     const [id, task_id, instance_type, parent_id, summary, description, priority, locations, is_all_day, completion_rule, original_date, start_date, due_date] = params;
@@ -298,7 +356,7 @@ async function mockQuery(sql, params = []) {
     const tk = inst && db.tasks[inst.task_id];
     const cal = tk && db.calendars[tk.calendar_id];
     if (!inst || inst.task_id !== taskId || inst.deleted_at || !tk || tk.deleted_at || !cal || cal.deleted_at) return { rows: [] };
-    return { rows: [{ id: inst.id, completion_rule: inst.completion_rule, deleted_at: inst.deleted_at, calendar_id: tk.calendar_id, author_id: tk.author_id, binder_id: cal.binder_id }] };
+    return { rows: [{ id: inst.id, completion_rule: inst.completion_rule, deleted_at: inst.deleted_at, calendar_id: tk.calendar_id, author_id: tk.author_id, binder_id: cal.binder_id, reminder_offsets: tk.reminder_offsets }] };
   }
   if (s.startsWith('UPDATE task_instances') && s.includes('SET summary')) {
     const [summary, description, priority, locations, is_all_day, completion_rule, start_date, due_date, instanceId] = params;
@@ -442,6 +500,23 @@ async function run() {
   check('① trigger_at = start_date - offset', new Date(evReminder30.trigger_at).getTime() === new Date('2026-09-01T05:00:00Z').getTime() - 1800000);
   check('① Event 리마인더의 timezone은 NULL(§2-B, 수신자 다수)', evReminder30.timezone == null);
 
+  // 왕복 — 저장 → 조회 → 같은 값. 오프셋 출처가 컬럼 하나임을 검증(역산 경로 없음, team-lead 지시).
+  const evReadBack = await expectOk('① 이벤트 재조회(GET)', () => EventService.getEvent('ev1', 'author1'));
+  check('① GET 응답의 reminder_offsets가 저장한 값과 동일(왕복)', JSON.stringify((evReadBack.reminder_offsets || []).slice().sort()) === JSON.stringify([1800, 86400]));
+
+  // updateEvent(마스터 레벨)로 reminder_offsets만 교체 — 역산 없이 컬럼이 갱신되고, 모든 회차가 재파생된다.
+  // ev1/evi1과 별개인 전용 이벤트를 써서 아래 ④(ev1/evi1 시각 변경) 픽스처와 간섭하지 않는다.
+  const evForOffsetUpdate = await expectOk('전용 이벤트 생성(updateEvent 오프셋 교체용)', () => EventService.createEvent({
+    id: 'ev9', calendar_id: 'cal1', author_id: 'author1', summary: '오프셋 교체 테스트',
+    reminder_offsets: [1800],
+    instances: [{ id: 'evi9', original_date: '2026-09-03T00:00:00Z', start_date: '2026-09-03T00:00:00Z', end_date: '2026-09-03T01:00:00Z' }],
+  }, ctx));
+  check('전용 이벤트 생성 성공', !!evForOffsetUpdate);
+  await expectOk('updateEvent로 reminder_offsets 교체', () => EventService.updateEvent('ev9', { reminder_offsets: [3600] }, ctx));
+  const evAfterOffsetUpdate = await expectOk('오프셋 교체 후 재조회', () => EventService.getEvent('ev9', 'author1'));
+  check('updateEvent 왕복 — 조회 값이 새 오프셋과 일치', JSON.stringify(evAfterOffsetUpdate.reminder_offsets) === JSON.stringify([3600]));
+  check('updateEvent가 회차의 리마인더도 같이 재파생함(옛 오프셋 제거)', findReminders(0, 'evi9').length === 1 && findReminders(0, 'evi9')[0].trigger_offset === 3600);
+
   // ⑥ 반복 항목 — 회차 여러 개면 회차마다 원장이 붙는다(같은 오프셋 세트가 인스턴스별 독립 행으로).
   const evRecur = await expectOk('⑥ 반복 이벤트 생성(회차 2개)', () => EventService.createEvent({
     id: 'ev2', calendar_id: 'cal1', author_id: 'author1', summary: '주간 스탠드업',
@@ -477,6 +552,10 @@ async function run() {
   const tkReminder = findReminders(1, 'tki1')[0];
   check('② trigger_at = due_date - offset', new Date(tkReminder.trigger_at).getTime() === new Date('2026-09-05T09:00:00Z').getTime() - 86400000);
 
+  // 왕복 — Task도 저장 → 조회 → 같은 값.
+  const tkReadBack = await expectOk('② 태스크 재조회(GET)', () => TaskService.getTask('tk1', 'author1'));
+  check('② GET 응답의 reminder_offsets가 저장한 값과 동일(왕복)', JSON.stringify(tkReadBack.reminder_offsets) === JSON.stringify([86400]));
+
   // ④ Task 축도 동일하게 재파생.
   await expectOk('④ 태스크 인스턴스 마감일 변경', () => TaskService.updateTaskInstance('tk1', 'tki1', {
     due_date: '2026-09-06T09:00:00Z',
@@ -497,6 +576,10 @@ async function run() {
   // base_date 2026-04-15 09:00 Asia/Seoul(UTC+9) = 2026-04-15T00:00:00Z. offset 1주(604800초) 차감.
   const expectedSdTrigger = new Date(Date.UTC(2026, 3, 15, 0, 0, 0) - 604800 * 1000);
   check('③ trigger_at = base_date 09:00 로컬(author timezone) - offset', new Date(sdReminder.trigger_at).getTime() === expectedSdTrigger.getTime());
+
+  // 왕복 — SpecialDay도 저장 → 조회 → 같은 값.
+  const sdReadBack = await expectOk('③ 기념일 재조회(GET)', () => SpecialDayService.getById('sd1', 'author1'));
+  check('③ GET 응답의 reminder_offsets가 저장한 값과 동일(왕복)', JSON.stringify(sdReadBack.reminder_offsets) === JSON.stringify([604800]));
 
   // ④ 기념일도 시각(base_date)·오프셋 변경 시 재파생된다.
   await expectOk('④ 기념일 base_date·오프셋 변경', () => SpecialDayService.update('sd1', {

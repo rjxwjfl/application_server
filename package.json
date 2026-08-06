@@ -24,6 +24,7 @@
     "googleapis": "^171.4.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.1",
+    "korean-lunar-calendar": "^0.4.0",
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
