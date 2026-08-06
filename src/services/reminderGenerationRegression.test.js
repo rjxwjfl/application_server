@@ -143,7 +143,18 @@ assertColumnsExist('ReminderDAO', 'reminders', [
   'created_at', 'updated_at',
 ]);
 assertColumnsAbsent('ReminderDAO', 'reminders', ['user_id', 'base_time', 'is_sent', 'deleted_at', 'source_template_id', 'is_override']);
-assertSourceDoesNotReference('ReminderDAO', 'src/daos/reminderDAO.js', ['user_id', 'base_time', 'is_sent']);
+assertSourceDoesNotReference('ReminderDAO', 'src/daos/reminderDAO.js', ['base_time', 'is_sent']);
+// user_id는 위 두 컬럼과 달리 파일 전체에서 금지할 수 없다 — RLY-20260806-032가 getRecipients에서
+// binder_members·event_participants·task_participants(전부 실제 user_id 컬럼 보유)를 조인해
+// 수신자를 구한다. 금지 대상은 정확히 "reminders 테이블 자신의 user_id 컬럼"이던 옛 패턴이다 —
+// reminders의 별칭(r) 또는 테이블명 그대로에 user_id를 붙여 참조하는 형태만 좁게 잡는다.
+(function assertReminderDaoDoesNotReferenceOwnUserId() {
+  const src = stripJsComments(fs.readFileSync(path.join(__dirname, '../daos/reminderDAO.js'), 'utf8'));
+  check(
+    '⑤ ReminderDAO: reminders 테이블 자신의 user_id 컬럼을 참조하지 않음(r.user_id·reminders.user_id·INSERT INTO reminders(...user_id...) 없음)',
+    !/\br\.user_id\b/.test(src) && !/reminders\.user_id\b/.test(src) && !/INSERT INTO reminders \([^)]*\buser_id\b/.test(src)
+  );
+})();
 
 // special_days — SpecialDayDAO.create/update가 실제로 다루는 전체 컬럼(구 is_yearly 제외).
 assertColumnsExist('SpecialDayDAO', 'special_days', [

@@ -34,6 +34,13 @@ const storage = new Storage();
 const BUCKET = process.env.GCS_BUCKET_MEDIA || 'rally-media';
 
 const STEPS = [
+  // 0. 리마인더 발송 원장 — RLY-20260806-032. 자기 deleted_at이 없고(13컬럼 확정, schema.md
+  //    §10-4) 대신 sent_at 기준으로 GC한다("일회성은 발송 후 sent_at 기록 → 30일 후 GC
+  //    DELETE", SC-reminder.md:49). SpecialDay(target_type=2)는 발송 후 롤링되어 sent_at이
+  //    영구 NULL이므로 이 GC 대상이 아니다(같은 tick에서 자동으로 걸러진다) — 별도 분기 불필요.
+  //    다른 테이블과 FK 관계가 없어(참조하는 쪽도 참조받는 쪽도 없음) STEPS 순서 어디에 둬도
+  //    무방하다 — binder_storage_usage처럼 자기 deleted_at이 없는 케이스라 custom으로 뺀다.
+  { custom: 'reminders' },
   // 1. 메시지 부속 (leaf, FK no cascade)
   { table: 'message_reactions', column: 'deleted_at' },
   { table: 'message_mentions',  column: 'deleted_at' },
@@ -141,6 +148,15 @@ async function cleanupAttachments() {
   return deleted;
 }
 
+// RLY-20260806-032 — sent_at 기준 GC(deleted_at 기준 일반 STEPS 패턴과 다르다).
+// SpecialDay 롤링 행은 sent_at이 영구 NULL이라 이 WHERE에 걸리지 않는다.
+async function cleanupReminders() {
+  const result = await pool.query(
+    `DELETE FROM reminders WHERE sent_at IS NOT NULL AND sent_at < NOW() - INTERVAL '30 days'`
+  );
+  return result.rowCount;
+}
+
 async function runCleanup() {
   logger.info('Cleanup job started');
   let totalDeleted = 0;
@@ -149,7 +165,9 @@ async function runCleanup() {
     const label = step.table || step.custom;
     try {
       let count;
-      if (step.custom === 'attachments') {
+      if (step.custom === 'reminders') {
+        count = await cleanupReminders();
+      } else if (step.custom === 'attachments') {
         count = await cleanupAttachments();
       } else if (step.custom === 'binder_storage_usage') {
         // binder_storage_usage는 soft delete 대상이 아닌 집계 행이다(자기 deleted_at 없음).
