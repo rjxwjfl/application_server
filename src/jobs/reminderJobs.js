@@ -78,8 +78,8 @@ function buildNotification(reminder) {
 // 2/29 평년, 음력 윤달 없는 해)을 그냥 건너뛰고 존재하는 다음 해로 넘어간다 — 정상 경로에서 더는
 // throw하지 않는다(이전엔 음력 쪽이 여기서 throw해 아래 재시도 경로를 타다 결국 포기했고, 그게
 // 그 기념일 알림이 영구히 죽는 결함이었다 — throw 자체가 사라지므로 자연히 해소된다). 그래도
-// 남는 throw(전진 상한 초과 — 정상 데이터로는 도달 안 함)는 기존 그대로 아래 catch의
-// retryOrGiveUp이 처리한다 — 별도 처리 불필요.
+// 남는 throw(전진 상한 초과 등, 정상 데이터로는 도달 안 함)는 순수 계산 실패라 재시도해도 항상
+// 같은 결과다 — 아래 retryOrGiveUp이 error.permanent를 보고 백오프 없이 바로 종결한다.
 async function finalizeSuccess(reminder, claimToken) {
   if (reminder.target_type === 2) {
     const nextTriggerAt = computeNextTriggerAt({
@@ -104,6 +104,16 @@ async function finalizeSuccess(reminder, claimToken) {
 }
 
 async function retryOrGiveUp(reminder, claimToken, error) {
+  // error.permanent(specialDayRolling.js) — 순수 계산 실패는 재시도해도 항상 같은 결과라
+  // 백오프 없이 바로 종결한다. 클래스·reason 분류 체계는 만들지 않는다(지시) — 속성 하나만 본다.
+  if (error && error.permanent) {
+    logger.error('Reminder dispatch giving up — deterministic failure, retry would not help', {
+      reminderId: reminder.id, targetType: reminder.target_type, targetId: reminder.target_id,
+      attemptCount: reminder.attempt_count, error: error.message,
+    });
+    await ReminderDAO.giveUp(pool, reminder.id, claimToken);
+    return;
+  }
   if (reminder.attempt_count >= MAX_ATTEMPTS) {
     logger.error('Reminder dispatch giving up after max attempts', {
       reminderId: reminder.id, targetType: reminder.target_type, targetId: reminder.target_id,

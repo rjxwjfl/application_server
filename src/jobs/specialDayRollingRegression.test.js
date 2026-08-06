@@ -6,11 +6,15 @@
  * User 판정(2026-08-06): "존재하지 않는 날짜는 그 해에 없다. 당기지도 밀지도 않는다. 양력·음력
  * 모두. 없는 날은 그냥 생성하지 않으면 된다 — 굳이 복잡하게 할 필요 없다."
  * ⇒ specialDayRolling.js는 클램핑 없이 다음으로 존재하는 해까지 그냥 건너뛴다(단순 반복문 +
- * 무한 루프 방지용 상한 하나). 복잡한 오류 분류 체계는 만들지 않았다(지시).
+ * 무한 루프 방지용 상한 하나). **오류 클래스·`.reason` 분류 체계는 만들지 않는다**(지시) — 다만
+ * "재시도해도 항상 같은 결과인 순수 계산 실패"라는 판단 자체는 타당하다고 확인받아
+ * `err.permanent = true`(속성 하나, 클래스 아님) 하나로 되살렸다 — reminderJobs.js가 이걸 보고
+ * 백오프 재시도 없이 바로 종결한다.
  *
- * Part A(순수 함수, DB 불필요) — 전진 로직 자체.
- * Part B(job dispatch, mock DB) — dispatchOne이 롤링 성공 후 sent_at을 영구 NULL로 유지하는지
- * (032 계약 — 전진 로직을 넣다가 실수로 발송완료 표시를 세우면 그 기념일이 영구히 죽는다).
+ * Part A(순수 함수, DB 불필요) — 전진 로직·상한 자체.
+ * Part B(job dispatch, mock DB) — dispatchOne이 (a) 롤링 성공 후 sent_at을 영구 NULL로
+ * 유지하는지(032 계약), (b) 구조적 실패 시 sent_at을 최종적으로 세워 종결하되 백오프를
+ * 낭비하지 않는지 검증한다.
  *
  * 관행: 테스트 프레임워크 없음, plain assert + `node <file>.js` 직접 실행.
  *
@@ -82,6 +86,25 @@ const { nextSolarAnniversary, nextLunarAnniversary } = require('../utils/special
   check('③ 평범한 음력 기념일(윤달 아님)은 매번 정상적으로 다음 해로 롤링(회귀 안전장치)', normalLunar.year === 2025);
 }
 
+// ④ 무한 루프 방지 상한 — 실 데이터로 재현 가능한 케이스를 그대로 쓴다(몽키패치 불필요).
+//   음력 2월 윤달의 다음 발생은 2042년이고(③), 그 다음은 2051년인데 그건 라이브러리 지원
+//   범위(1000~2050) 밖이다. `setLunarDate`는 범위 밖에서도 그냥 false를 반환하므로(모듈 헤더
+//   주석 — 직접 확인) "그 해에 없음"과 똑같이 취급되어 계속 전진하다 MAX_ROLL_YEARS(25)에서
+//   막힌다 — 상한이 실제로 도달·작동함을 실측으로 보여준다. 클래스가 아니라 일반 Error이고
+//   메시지가 원인을 담고, `.permanent`가 붙는지만 확인한다(분류 체계 없음 — 지시).
+{
+  let thrown = null;
+  try {
+    nextLunarAnniversary(2042, 4, 5, 2, 15, true); // 다음 윤달 2월은 2051년 — 상한 안에서 못 찾음
+  } catch (err) {
+    thrown = err;
+  }
+  check('④ 상한 초과 시 예외가 실제로 던져짐(무한 루프 아님)', thrown !== null);
+  check('④ 클래스가 아니라 일반 Error(분류 체계 없음)', thrown && thrown.constructor === Error);
+  check('④ 메시지가 상한 초과 원인을 담고 있음', thrown && thrown.message.includes('25년 안에'));
+  check('④ err.permanent === true(재시도 무의미 신호, 클래스·reason 없이 속성 하나만)', thrown && thrown.permanent === true);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Part B — reminderJobs.js의 dispatchOne 통합 검증(mock DB·mock fcm)
 // ════════════════════════════════════════════════════════════════════════
@@ -92,6 +115,10 @@ const fcmPath = require.resolve('../utils/fcm');
 // 자체를 타지 않게 한다(recipientIds.length > 0 가드). fcm은 require 시점 부수효과(Firebase
 // Admin 초기화) 회피를 위해서만 mock한다.
 const db = { reminders: {} };
+// ⑦ 대조군 전용 — 롤링 계산 자체는 성공했는데 그 결과를 저장하는 DB 쓰기(rollSpecialDay)가
+// 실패하는 상황(네트워크·커넥션 등 진짜 일시적 장애)을 흉내낸다. 이 id로 걸리면 mockQuery가
+// 딱 한 번 던지고 이후엔 정상 처리한다(재시도하면 성공할 수 있는 진짜 일시적 실패의 성질).
+const dbFailOnceIds = new Set();
 
 async function mockQuery(sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
@@ -101,6 +128,10 @@ async function mockQuery(sql, params = []) {
   }
   if (s.startsWith('UPDATE reminders') && s.includes('SET trigger_at = $1, attempt_count = 0')) {
     const [nextTriggerAt, id, claimToken] = params; // ReminderDAO.rollSpecialDay
+    if (dbFailOnceIds.has(id)) {
+      dbFailOnceIds.delete(id);
+      throw new Error('simulated transient DB write failure (rollSpecialDay)');
+    }
     const r = db.reminders[id];
     if (r && r.claim_token === claimToken) {
       r.trigger_at = nextTriggerAt;
@@ -150,7 +181,7 @@ require.cache[fcmPath] = { id: fcmPath, filename: fcmPath, loaded: true, exports
 const { dispatchOne } = require('./reminderJobs');
 
 async function run() {
-  // ── ④ 롤링 후에도 sent_at은 영구 NULL로 남는다(032 계약) ─────────────────────────
+  // ── ⑤ 롤링 성공 후에도 sent_at은 영구 NULL로 남는다(032 계약) ────────────────────────
   // ⚠️ 핵심 회귀 — 전진 처리를 넣다가 실수로 sent_at을 세우면 그 기념일이 영구히 죽는다(지금
   //   고치려는 결함과 같은 결과).
   {
@@ -162,11 +193,11 @@ async function run() {
       timezone: 'Asia/Seoul', claim_token: claimToken, claimed_at: new Date().toISOString(), attempt_count: 1,
       special_day_is_lunar: true, special_day_lunar_month: 8, special_day_lunar_day: 15, special_day_lunar_is_leap_month: false,
     };
-    await expectOk('④ 정상 롤링 dispatchOne 실행', () => dispatchOne(db.reminders.r1, claimToken));
-    check('④ 롤링 후 sent_at NULL 유지(영구 — GC되지 않고 다음 해에 다시 발화 가능)', db.reminders.r1.sent_at == null);
-    check('④ trigger_at이 다음 해(2025)로 전진', new Date(db.reminders.r1.trigger_at).getUTCFullYear() === 2025);
-    check('④ 롤링 후 attempt_count가 0으로 리셋(다음 해를 위한 새 재시도 예산)', db.reminders.r1.attempt_count === 0);
-    check('④ 롤링 후 claim_token 해제', db.reminders.r1.claim_token === null);
+    await expectOk('⑤ 정상 롤링 dispatchOne 실행', () => dispatchOne(db.reminders.r1, claimToken));
+    check('⑤ 롤링 후 sent_at NULL 유지(영구 — GC되지 않고 다음 해에 다시 발화 가능)', db.reminders.r1.sent_at == null);
+    check('⑤ trigger_at이 다음 해(2025)로 전진', new Date(db.reminders.r1.trigger_at).getUTCFullYear() === 2025);
+    check('⑤ 롤링 후 attempt_count가 0으로 리셋(다음 해를 위한 새 재시도 예산)', db.reminders.r1.attempt_count === 0);
+    check('⑤ 롤링 후 claim_token 해제', db.reminders.r1.claim_token === null);
   }
 
   // ── 윤달 기념일도 실제 dispatchOne 경로로 정상 롤링됨을 한 번 더 확인(③의 통합 버전) ──────
@@ -183,6 +214,44 @@ async function run() {
     check('윤달 기념일도 sent_at NULL 유지', db.reminders.r2.sent_at == null);
     check('윤달 기념일 trigger_at이 2042년으로 전진', new Date(db.reminders.r2.trigger_at).getUTCFullYear() === 2042);
     check('윤달 기념일도 attempt_count가 0으로 리셋', db.reminders.r2.attempt_count === 0);
+  }
+
+  // ── ⑥ 구조적 실패(상한 초과) → 백오프 재시도 없이 단 1회 만에 즉시 종결 ─────────────────
+  // ④와 같은 실 데이터 조합(2042→2051, 범위 밖)을 dispatchOne을 통해 그대로 재현한다.
+  // dispatchReminders()의 claimDueBatch(trigger_at <= now() 제약)를 우회해 dispatchOne을 직접
+  // 호출한다 — "이미 2042년" 상태는 실시간으로는 재현 불가능하지만 단위 호출로는 정확히 재현된다.
+  {
+    const claimToken = 'tok-permanent';
+    db.reminders.r3 = {
+      id: 'r3', target_type: 2, target_id: 'sd-permanent', trigger_offset: 1000,
+      // 2042-04-05 = 음력 2042-2(윤달)-15 — 다음 윤달 2월은 2051년(범위 밖), ④에서 확인한 조합.
+      trigger_at: new Date(Date.UTC(2042, 3, 5, 0, 0, 0) - 1000 * 1000).toISOString(),
+      timezone: 'Asia/Seoul', claim_token: claimToken, claimed_at: new Date().toISOString(), attempt_count: 1,
+      special_day_is_lunar: true, special_day_lunar_month: 2, special_day_lunar_day: 15, special_day_lunar_is_leap_month: true,
+    };
+    await expectOk('⑥ 구조적 실패 dispatchOne 실행(에러가 dispatchOne 밖으로 새지 않아야 함)', () => dispatchOne(db.reminders.r3, claimToken));
+    check('⑥ 단 1회 시도(attempt_count=1)만에 종결됨(retryOrGiveUp의 5회 백오프를 거치지 않음)', db.reminders.r3.attempt_count === 1);
+    check('⑥ sent_at이 세워져 최종 종결됨(더 이상 발화 안 함 — 롤링이 불가능해 종결되는 유일한 경우)', db.reminders.r3.sent_at != null);
+    check('⑥ next_attempt_at이 세워지지 않음(백오프 경로를 안 탔다는 증거)', db.reminders.r3.next_attempt_at == null);
+  }
+
+  // ── ⑦ 대조군 — 롤링 계산 자체는 성공했는데 그걸 저장하는 DB 쓰기가 실패하는 경우(진짜
+  //   일시적 장애)는 여전히 기존 백오프 경로(markFailed)를 탄다 — permanent가 안 붙은 에러라
+  //   ⑥의 즉시-종결 분기를 타지 않는다는 걸 직접 대조한다.
+  {
+    const claimToken = 'tok-transient';
+    db.reminders.r4 = {
+      id: 'r4', target_type: 2, target_id: 'sd-transient', trigger_offset: 1000,
+      // 평범한(윤달 아닌) 음력 기념일 — 롤링 계산 자체는 문제없이 성공한다.
+      trigger_at: new Date(Date.UTC(2024, 8, 17, 0, 0, 0) - 1000 * 1000).toISOString(),
+      timezone: 'Asia/Seoul', claim_token: claimToken, claimed_at: new Date().toISOString(), attempt_count: 1,
+      special_day_is_lunar: true, special_day_lunar_month: 8, special_day_lunar_day: 15, special_day_lunar_is_leap_month: false,
+    };
+    dbFailOnceIds.add('r4'); // rollSpecialDay 쓰기 자체를 한 번 실패시킴(계산이 아니라 저장 단계 장애)
+    await expectOk('⑦ 일반(비구조적) 실패 dispatchOne 실행', () => dispatchOne(db.reminders.r4, claimToken));
+    check('⑦ sent_at은 아직 세워지지 않음(즉시 종결 아님 — ⑥과 대조)', db.reminders.r4.sent_at == null);
+    check('⑦ next_attempt_at이 세워짐(기존 백오프 경로 — markFailed)', db.reminders.r4.next_attempt_at != null);
+    check('⑦ claim_token이 해제됨(다음 tick에 재claim 가능하도록 markFailed가 놓아줌)', db.reminders.r4.claim_token == null);
   }
 
   console.log(`\n[specialDayRollingRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
