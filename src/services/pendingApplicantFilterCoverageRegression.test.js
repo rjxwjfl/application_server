@@ -287,7 +287,8 @@ async function testGetUsersForSync() {
       return { rows };
     },
   };
-  const result = await SyncDAO.getUsersForSync(pool, ['b1'], null);
+  // RLY-20260806-050 — getUsersForSync가 oldTs 인자를 더 이상 받지 않는다(무조건 100% 재전송으로 정정).
+  const result = await SyncDAO.getUsersForSync(pool, ['b1']);
   const ids = result.map((r) => r.id);
   check('⑨ SyncDAO.getUsersForSync: pending 프로필은 다른 멤버 동기화에 노출 안 됨', !ids.includes('pending1'));
   check('⑨ SyncDAO.getUsersForSync: 정상 멤버 프로필은 포함', ids.includes('member1'));

@@ -156,8 +156,8 @@ class SyncService {
       SyncDAO.getBinderMembers(pool, currDIds),
       SyncDAO.getBinderPreferences(pool, userId, currDIds),
       SyncDAO.getBinderSettings(pool, currDIds),
-      SyncDAO.getUsersForSync(pool, currDIds, oldTs),
-      SyncDAO.getGroups(pool, currDIds, oldTs),
+      SyncDAO.getUsersForSync(pool, currDIds), // RLY-20260806-050 — oldTs 인자 제거(무조건 100%로 정정)
+      SyncDAO.getGroups(pool, currDIds), // RLY-20260806-050 — 동일(getUsersForSync와 같은 결함)
       SyncDAO.getOwnGroupMembers(pool, userId, oldTs),
       Promise.all(currDIds.map((binderId) => SyncDAO.fetchSectionMembers(pool, binderId, userId, oldTs))),
       SyncDAO.getSection(pool, userId, currDIds, oldTs, previousSectionIds),
