@@ -114,6 +114,7 @@ CREATE INDEX idx_consent_user ON user_terms_consents (user_id, consented_at DESC
 
 DROP TABLE IF EXISTS binder_storage_usage  CASCADE;
 DROP TABLE IF EXISTS binder_boosts         CASCADE;
+DROP TABLE IF EXISTS binder_join_requests  CASCADE;
 DROP TABLE IF EXISTS binder_invitations    CASCADE;
 DROP TABLE IF EXISTS binder_members        CASCADE;
 DROP TABLE IF EXISTS binder_settings       CASCADE;
@@ -159,7 +160,10 @@ CREATE TABLE binder_members (
   deleted_at          TIMESTAMPTZ,
   PRIMARY KEY (binder_id, user_id),
   CONSTRAINT fk_bm_binder FOREIGN KEY (binder_id) REFERENCES binders(id),
-  CONSTRAINT fk_bm_user   FOREIGN KEY (user_id)   REFERENCES users(id)
+  CONSTRAINT fk_bm_user   FOREIGN KEY (user_id)   REFERENCES users(id),
+  -- RLY-20260806-024 — join-request 승인 대기가 binder_join_requests로 이전되어 role=-1
+  -- sentinel(RLY-20260806-018)이 소멸했다. 이제 DB 레벨에서 음수 role을 원천 차단한다.
+  CONSTRAINT chk_bm_role  CHECK (role BETWEEN 0 AND 3)
 );
 CREATE INDEX idx_binder_members_sync ON binder_members (binder_id, updated_at);
 CREATE INDEX idx_binder_members_user ON binder_members (user_id, updated_at);
@@ -179,6 +183,31 @@ CREATE TABLE binder_invitations (
   CONSTRAINT fk_bi_inviter FOREIGN KEY (inviter_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX idx_inv_binder ON binder_invitations (binder_id);
+
+-- 공개 binder 참가 신청 (D6, 2026-07-15) — require_approval=true binder 대상
+CREATE TABLE binder_join_requests (
+  id            UUID        NOT NULL DEFAULT gen_random_uuid(),
+  binder_id     UUID        NOT NULL,
+  requester_id  UUID        NOT NULL,
+  -- PENDING|APPROVED|REJECTED|CANCELLED|BLOCKED
+  status        TEXT        NOT NULL DEFAULT 'PENDING'
+                CHECK (status IN ('PENDING','APPROVED','REJECTED','CANCELLED','BLOCKED')),
+  decided_by    UUID,
+  decided_at    TIMESTAMPTZ,
+  expires_at    TIMESTAMPTZ NOT NULL DEFAULT now() + INTERVAL '30 days',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (id),
+  CONSTRAINT fk_bjr_binder    FOREIGN KEY (binder_id)    REFERENCES binders(id) ON DELETE CASCADE,
+  CONSTRAINT fk_bjr_requester FOREIGN KEY (requester_id) REFERENCES users(id)   ON DELETE CASCADE,
+  CONSTRAINT fk_bjr_decider   FOREIGN KEY (decided_by)   REFERENCES users(id)
+);
+-- 동일 유저 동시 복수 PENDING 금지 (부분 유니크 인덱스 — 인라인 CONSTRAINT ... WHERE 불가)
+CREATE UNIQUE INDEX uq_bjr_pending ON binder_join_requests (binder_id, requester_id)
+  WHERE status = 'PENDING';
+-- 차단 이력 전용 인덱스: BLOCKED 유저 재신청 O(1) 확인
+CREATE INDEX idx_bjr_blocked ON binder_join_requests (binder_id, requester_id)
+  WHERE status = 'BLOCKED';
 
 CREATE TABLE binder_boosts (
   binder_id                UUID        NOT NULL,

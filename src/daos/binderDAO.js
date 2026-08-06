@@ -1,4 +1,5 @@
 const { SectionDAO } = require('./sectionDAO');
+const { ConflictError } = require('../core/errors');
 
 class BinderDAO {
   /**
@@ -140,28 +141,16 @@ class BinderDAO {
   // BinderMembers 테이블
   // ============================================
 
-  // role >= 0 필터 — role = -1 은 requestBinderJoin이 심는 승인 대기 sentinel이다(RLY-20260806-018).
-  // 대기 행은 "멤버"가 아니다: 이 메서드 하나로 여기 결과를 소비하는 모든 서비스 레이어의
-  // `!member || member.deleted_at` / `member.role > N` 인가 분기가 자동으로 pending을 배제한다
-  // (음수 role은 `role > N` 비교에서 항상 false가 되어 최상위 권한처럼 통과하므로, 애초에 결과에
-  // 나타나지 않게 막는 것이 개별 호출부 수십 곳을 각각 고치는 것보다 안전하다).
+  // role >= 0 필터 — RLY-20260806-018 당시 role = -1 은 승인 대기 sentinel이었다. RLY-20260806-024
+  // 로 대기 상태가 binder_join_requests로 이전되면서 binder_members에는 이제 음수 role이 전혀
+  // 쓰이지 않는다(chk_bm_role CHECK로 DB 레벨에서도 차단). 그래도 이 필터는 지우지 않는다 —
+  // role에 CHECK가 없던 시절 이 13곳이 유일한 방어선이었고, 회귀 커버리지(RLY-20260806-023)가
+  // 지금 이 필터들을 검증 대상으로 잡고 있다. 방어적 이중 잠금으로 유지한다.
   async getMember(conn, binderId, userId) {
     const query = `
       SELECT binder_id, user_id, role, notification_level, nickname_in_binder, joined_at, deleted_at
       FROM binder_members
       WHERE binder_id = $1 AND user_id = $2 AND role >= 0
-    `;
-    const result = await conn.query(query, [binderId, userId]);
-    return result.rows[0] || null;
-  }
-
-  // requestBinderJoin의 중복 신청 판별 전용 — pending(role=-1) 행도 보이는 getMember의 비필터 버전.
-  // 다른 곳에서 쓰지 마라: 대기 행을 "멤버"로 취급하는 모든 인가 판단은 getMember를 써야 한다.
-  async getMemberIncludingPending(conn, binderId, userId) {
-    const query = `
-      SELECT binder_id, user_id, role, notification_level, nickname_in_binder, joined_at, deleted_at
-      FROM binder_members
-      WHERE binder_id = $1 AND user_id = $2
     `;
     const result = await conn.query(query, [binderId, userId]);
     return result.rows[0] || null;
@@ -332,27 +321,6 @@ class BinderDAO {
     await conn.query(query, [binderId]);
   }
 
-  async getPendingMembers(conn, binderId) {
-    const { rows } = await conn.query(
-      `SELECT dm.user_id, dm.created_at,
-              ui.display_name, ui.user_code, ui.image_url
-       FROM binder_members dm
-       LEFT JOIN user_infos ui ON dm.user_id = ui.user_id
-       WHERE dm.binder_id = $1 AND dm.role = -1 AND dm.deleted_at IS NULL`,
-      [binderId]
-    );
-    return rows;
-  }
-
-  async removePendingRequest(conn, binderId, userId) {
-    await conn.query(
-      `UPDATE binder_members
-       SET deleted_at = now(), updated_at = now()
-       WHERE binder_id = $1 AND user_id = $2 AND role = -1`,
-      [binderId, userId]
-    );
-  }
-
   async updateNickname(conn, binderId, userId, nickname) {
     await conn.query(
       `UPDATE binder_members
@@ -370,6 +338,96 @@ class BinderDAO {
        WHERE binder_id = $2 AND user_id = $3 AND deleted_at IS NULL`,
       [notification_level, binderId, userId]
     );
+  }
+
+  // ============================================
+  // BinderJoinRequests 테이블 (RLY-20260806-024 — schema.md:234-256, api.md:446-513)
+  // ============================================
+
+  // idx_bjr_blocked 사용 — 차단 이력 존재 여부. 차단 이력은 영구 보존되므로 있으면 항상 true.
+  async hasActiveBlock(conn, binderId, requesterId) {
+    const { rows } = await conn.query(
+      `SELECT id FROM binder_join_requests
+       WHERE binder_id = $1 AND requester_id = $2 AND status = 'BLOCKED'
+       LIMIT 1`,
+      [binderId, requesterId]
+    );
+    return rows.length > 0;
+  }
+
+  // uq_bjr_pending(동일 binder·requester 동시 복수 PENDING 금지)에 걸리면 23505로 떨어진다 —
+  // 사전 SELECT 없이 이 인덱스 자체를 동시성 가드로 쓰고 여기서 409로 번역한다.
+  async createJoinRequest(conn, id, binderId, requesterId) {
+    try {
+      const { rows } = await conn.query(
+        `INSERT INTO binder_join_requests (id, binder_id, requester_id, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 'PENDING', now(), now())
+         RETURNING id, binder_id, requester_id, status, decided_by, decided_at, expires_at, created_at, updated_at`,
+        [id, binderId, requesterId]
+      );
+      return rows[0];
+    } catch (err) {
+      if (err.code === '23505' && err.constraint === 'uq_bjr_pending') {
+        throw new ConflictError('이미 승인 대기 중인 신청이 있습니다', 'ALREADY_REQUESTED');
+      }
+      throw err;
+    }
+  }
+
+  // 관리자용 목록 조회. status 미지정 시 전체. 만료된 PENDING(expires_at < now())은 실제 만료
+  // 처리(배치)가 없어 status가 그대로 'PENDING'이지만, api.md·design_intent.md가 요구하는
+  // "조회 시점 판정"에 따라 목록에서는 제외한다 — status 자체를 바꾸지 않으므로 재신청 시
+  // uq_bjr_pending과는 별개다(재신청 회귀는 이 gap을 감안해 작성됨, 구현보고서 참조).
+  async getJoinRequests(conn, binderId, status, limit, offset) {
+    const params = [binderId];
+    let where = 'bjr.binder_id = $1';
+    if (status) {
+      params.push(status);
+      where += ` AND bjr.status = $${params.length}`;
+    }
+    where += " AND (bjr.status != 'PENDING' OR bjr.expires_at > now())";
+
+    const countResult = await conn.query(
+      `SELECT COUNT(*) AS count FROM binder_join_requests bjr WHERE ${where}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0].count, 10);
+
+    const listParams = [...params, limit, offset];
+    const { rows } = await conn.query(
+      `SELECT bjr.id, bjr.requester_id, bjr.status, bjr.created_at, bjr.expires_at,
+              bjr.decided_by, bjr.decided_at, ui.display_name
+       FROM binder_join_requests bjr
+       LEFT JOIN user_infos ui ON ui.user_id = bjr.requester_id
+       WHERE ${where}
+       ORDER BY bjr.created_at DESC
+       LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+      listParams
+    );
+    return { rows, total };
+  }
+
+  // approve/reject/block 공용 — FOR UPDATE로 동시 처리(이중 승인 등)를 막는다.
+  async getJoinRequestForUpdate(conn, binderId, requestId) {
+    const { rows } = await conn.query(
+      `SELECT id, binder_id, requester_id, status, expires_at
+       FROM binder_join_requests
+       WHERE id = $1 AND binder_id = $2
+       FOR UPDATE`,
+      [requestId, binderId]
+    );
+    return rows[0] || null;
+  }
+
+  async decideJoinRequest(conn, requestId, status, deciderId) {
+    const { rows } = await conn.query(
+      `UPDATE binder_join_requests
+       SET status = $1, decided_by = $2, decided_at = now(), updated_at = now()
+       WHERE id = $3
+       RETURNING id, binder_id, requester_id, status, decided_by, decided_at, expires_at, created_at, updated_at`,
+      [status, deciderId, requestId]
+    );
+    return rows[0];
   }
 }
 

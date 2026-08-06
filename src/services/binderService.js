@@ -8,6 +8,10 @@ const { BadRequestError, NotFoundError, ForbiddenError, ConflictError, NotImplem
 const { requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
+// PATCH /binders/:binderId/join-requests/:requestId 의 action → binder_join_requests.status 매핑
+// (api.md:500-521)
+const ACTION_TO_STATUS = { approve: 'APPROVED', reject: 'REJECTED', block: 'BLOCKED' };
+
 class BinderService {
 
   async searchBinders(keyword, limit = 20, offset = 0) {
@@ -112,32 +116,38 @@ class BinderService {
     eventBus.emit('member:joined', { user_id: userId, binder_id, device_uuid });
   }
 
-  // require_approval=true 인 바인더는 즉시 정식 멤버(role=3)를 주지 않는다 — role=-1 sentinel로
-  // 대기 상태만 기록하고, 관리자의 approveJoinRequest가 승격시킬 때까지 정식 role을 주지 않는다.
-  // (RLY-20260806-018 — 이전에는 require_approval을 분기 없이 무시하고 즉시 addMember(role=3)했다.)
+  // require_approval=true 인 바인더는 즉시 정식 멤버(role=3)를 주지 않는다 — binder_join_requests
+  // 에 PENDING 행만 만들고, 관리자의 decideJoinRequest(approve)가 승격시킬 때까지 binder_members
+  // 에는 아무것도 넣지 않는다(RLY-20260806-024 — schema.md:234-256, api.md:446-461).
   //
-  // 대기 sentinel은 BinderDAO.getMember에서 필터되므로(role >= 0) 이 함수가 심는 pending 행은
-  // getBinderMembers·search·getBinder 등 기존 멤버십 게이트 어디에서도 "멤버"로 읽히지 않는다.
+  // (RLY-20260806-018 당시엔 role=-1 sentinel을 binder_members에 심어 대기를 표시했으나,
+  // 스펙은 별도 테이블을 요구해 이 sentinel을 완전히 제거했다 — 대기자는 이제 binder_members에
+  // 전혀 나타나지 않으므로 getBinderMembers·search·getBinder 등 기존 멤버십 게이트를 고칠 필요가
+  // 없다. role >= 0 필터는 남겨두되(CHECK 제약 이전 시절의 방어선, 회귀 커버리지 대상) 여기서는
+  // 더 이상 그 필터에 의존하지 않는다.)
   async requestBinderJoin(binderId, userId, device_uuid) {
     let joinedImmediately = false;
+    let joinRequest = null;
 
     await withTransaction(async (client) => {
       const settings = await BinderDAO.getSettings(client, binderId);
       if (!settings) throw new NotFoundError('바인더를 찾을 수 없습니다');
       if (!settings.is_public && !settings.require_approval) throw new ForbiddenError('비공개 바인더입니다');
 
-      // pending(role=-1) 재신청·거절 후 재신청·이미 정식 멤버인 경우를 구분해야 하므로,
-      // 필터 없는 조회(getMemberIncludingPending)를 쓴다 — getMember는 pending 행을 숨긴다.
-      const existing = await BinderDAO.getMemberIncludingPending(client, binderId, userId);
-      if (existing && !existing.deleted_at) {
-        if (existing.role === -1) throw new ConflictError('이미 승인 대기 중인 신청이 있습니다', 'JOIN_REQUEST_PENDING');
-        throw new ConflictError('이미 이 바인더의 멤버입니다', 'ALREADY_MEMBER');
+      if (settings.require_approval) {
+        // idx_bjr_blocked — 차단 이력이 있으면 영구 재신청 불가(api.md:466).
+        const blocked = await BinderDAO.hasActiveBlock(client, binderId, userId);
+        if (blocked) throw new ForbiddenError('차단된 사용자는 재신청할 수 없습니다', 'BLOCKED');
       }
 
-      // existing이 soft-delete된 행(거절 이력·과거 탈퇴 등)이면 addMember의 ON CONFLICT UPSERT가
-      // deleted_at을 지우고 role을 아래 값으로 갱신한다 — 재신청 시 새 행을 만들 필요가 없다.
+      const existingMember = await BinderDAO.getMember(client, binderId, userId);
+      if (existingMember && !existingMember.deleted_at) {
+        throw new BadRequestError('이미 이 바인더의 멤버입니다', 'ALREADY_MEMBER');
+      }
+
       if (settings.require_approval) {
-        await BinderDAO.addMember(client, binderId, userId, -1);
+        // uq_bjr_pending 위반 시 createJoinRequest가 ConflictError('ALREADY_REQUESTED')로 번역한다.
+        joinRequest = await BinderDAO.createJoinRequest(client, generateUUID(), binderId, userId);
       } else {
         await BinderDAO.addMember(client, binderId, userId, 3);
         await BinderDAO.incrementMemberCount(client, binderId);
@@ -150,6 +160,8 @@ class BinderService {
     if (joinedImmediately) {
       eventBus.emit('member:joined', { user_id: userId, binder_id: binderId, device_uuid });
     }
+
+    return joinRequest;
   }
 
   async getBinderMembers(binderId, userId) {
@@ -350,26 +362,60 @@ class BinderService {
     return { id, name, description, image_url, thumbnail_url, member_count, last_activity_at, created_at, updated_at };
   }
 
-  async getJoinRequests(binderId, userId) {
+  // 관리자(host/manager) 전용 목록 조회. api.md:474-496 — status/page/limit 필터, {requests, total, page}.
+  async getJoinRequests(binderId, userId, { status, page = 1, limit = 20 } = {}) {
     const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at || member.role > 1) throw new ForbiddenError('권한이 없습니다');
-    return await BinderDAO.getPendingMembers(pool, binderId);
+
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+    const pg = Math.max(parseInt(page, 10) || 1, 1);
+    const { rows, total } = await BinderDAO.getJoinRequests(pool, binderId, status, lim, (pg - 1) * lim);
+
+    return {
+      requests: rows.map((r) => ({
+        id: r.id,
+        requester: { id: r.requester_id, display_name: r.display_name },
+        status: r.status,
+        created_at: r.created_at,
+        expires_at: r.expires_at,
+        decided_by: r.decided_by,
+        decided_at: r.decided_at,
+      })),
+      total,
+      page: pg,
+    };
   }
 
-  async approveJoinRequest(binderId, targetUserId, requesterId) {
-    await withTransaction(async (client) => {
-      const requester = await BinderDAO.getMember(client, binderId, requesterId);
+  // 승인·거절·차단 공용. api.md:500-521 — action: approve|reject|block.
+  // approve만 동일 트랜잭션에서 binder_members INSERT(role=3). block은 idx_bjr_blocked로
+  // 영구 재신청 차단에 쓰인다(BinderDAO.hasActiveBlock).
+  async decideJoinRequest(binderId, requestId, action, deciderId) {
+    const newStatus = ACTION_TO_STATUS[action];
+    if (!newStatus) throw new BadRequestError('유효하지 않은 action입니다');
+
+    const decided = await withTransaction(async (client) => {
+      const requester = await BinderDAO.getMember(client, binderId, deciderId);
       if (!requester || requester.deleted_at || requester.role > 1) throw new ForbiddenError('권한이 없습니다');
-      await BinderDAO.addMember(client, binderId, targetUserId, 3);
-      await BinderDAO.incrementMemberCount(client, binderId);
-    });
-    eventBus.emit('member:joined', { user_id: targetUserId, binder_id: binderId });
-  }
 
-  async rejectJoinRequest(binderId, targetUserId, requesterId) {
-    const requester = await BinderDAO.getMember(pool, binderId, requesterId);
-    if (!requester || requester.deleted_at || requester.role > 1) throw new ForbiddenError('권한이 없습니다');
-    await BinderDAO.removePendingRequest(pool, binderId, targetUserId);
+      const joinRequest = await BinderDAO.getJoinRequestForUpdate(client, binderId, requestId);
+      if (!joinRequest) throw new NotFoundError('가입 신청을 찾을 수 없습니다');
+      if (joinRequest.status !== 'PENDING') throw new ConflictError('이미 처리된 신청입니다', 'ALREADY_DECIDED');
+
+      const result = await BinderDAO.decideJoinRequest(client, requestId, newStatus, deciderId);
+
+      if (action === 'approve') {
+        await BinderDAO.addMember(client, binderId, joinRequest.requester_id, 3);
+        await BinderDAO.incrementMemberCount(client, binderId);
+      }
+
+      return result;
+    });
+
+    if (action === 'approve') {
+      eventBus.emit('member:joined', { user_id: decided.requester_id, binder_id: binderId });
+    }
+
+    return decided;
   }
 
   async updateNickname(binderId, userId, nickname) {
