@@ -55,6 +55,10 @@ db.binders.b3 = { id: 'b3', deleted_at: null }; // 하드 삭제 대상(30일 �
 db.binders.b3.deleted_at = new Date(NOW.getTime() - 31 * DAY).toISOString();
 db.binder_storage_usage.b3 = { binder_id: 'b3', bytes_used: 999 };
 
+// RLY-20260806-075 — 동시 presign 수용 판정(§ 하단) 전용 바인더. Free tier.
+db.binders['b-race'] = { id: 'b-race', deleted_at: null };
+db.binder_members['b-race:u1'] = { binder_id: 'b-race', user_id: 'u1', role: 3, deleted_at: null };
+
 let nextAttId = 1;
 function insertAttachment({ binder_id, storage_key, file_size, uploader_id, status = 'pending', deleted_at = null }) {
   const id = `att-${nextAttId++}`;
@@ -448,9 +452,12 @@ async function run() {
   });
 
   await check('Boost Lite(tier=1) 바인더는 50GB 한도로 통과(Free라면 402였을 크기)', async () => {
-    const overFreeUnderLite = 10 * 1024 ** 3; // 10GB — Free는 거부, Lite(50GB)는 통과
+    const overFreeUnderLite = 10 * 1024 ** 3; // 10GB — Free 총량(5GB)은 거부, Lite 총량(50GB)은 통과
+    // RLY-20260806-075 — video는 이제 파일 1건당 상한(Lite 1GB)도 걸린다. 이 테스트는 총량
+    // (바인더 전체) tier 구분만 보려는 것이므로, 파일 1건당 상한이 없는 content_type(문서·기타 —
+    // 이번 Task에서 보류된 영역)으로 바꿔 이 테스트의 원래 목적을 유지한다.
     const result = await MediaService.presign(
-      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b2', filename: 'huge.mp4', content_type: 'video/mp4', file_size: overFreeUnderLite },
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b2', filename: 'huge.zip', content_type: 'application/zip', file_size: overFreeUnderLite },
       ctx('u1')
     );
     assert.ok(result.id);
@@ -474,6 +481,83 @@ async function run() {
     402,
     'BOOST_STORAGE_LIMIT'
   );
+
+  // ═══════════════════════════════════════════════════════════════
+  // RLY-20260806-075 — 동시 presign 경합으로 인한 한도 초과: 수용한다 (User 판정 2026-08-07)
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // ⚠️ 이 절은 "실패해야 정상"인 회귀가 아니다 — 아래 단언은 **의도된 동작**을 고정한다.
+  //
+  // presign의 F-S9 검사는 bytesUsed를 "읽고" 비교하는 형태다(applyStorageDelta의 원자
+  // UPSERT는 confirm에서만 실행된다 — presign은 아무것도 쓰지 않는다). 그래서 두 presign이
+  // 같은 stale bytesUsed를 읽으면, 개별로는 한도 이내인 두 파일이 둘 다 통과할 수 있다.
+  // (이 가짜 DB는 단일 스레드라 진짜 경합을 재현하지 못한다 — storageQuotaRegression.test.js
+  // 파일 상단 §AC-S9-6 주석과 동일한 한계. 여기서는 "두 presign을 순차 호출해도 둘 다 stale
+  // bytesUsed(둘 다 이 파일이 반영되기 전 값)를 본다"는 사실 자체로 경합의 존재를 증명한다 —
+  // presign이 bytesUsed를 갱신하지 않는 한 순차 호출과 동시 호출이 이 관점에서 구분되지 않는다.)
+  //
+  // ⚠️ **왜 수용하는가** (구현 보고서 RLY-20260806-072 §3-2 · User 판정 2026-08-07):
+  //  1. confirm 시점에는 "동시성 경합으로 인한 초과"와 "±10% tolerance 이내 근소 초과"가
+  //     구분되지 않는다 — 후자는 이미 확정·회귀로 고정된 수용 정책이다(바로 위 §RLY-20260806-015
+  //     블록의 "한도를 근소 초과해도 confirm은 통과" 시나리오). 전자만 골라 막을 원자적 방법이
+  //     없다(둘 다 "이 델타를 반영하면 초과"로 동일하게 보인다).
+  //  2. 초과분은 **경합에 실제로 참여한 요청들의 파일 크기 합만큼, 딱 한 번**만 발생한다 —
+  //     무한 성장이 아니다(아래 ④가 이를 증명한다).
+  //  3. 그 직후부터는 bytesUsed가 이미 한도를 넘겼으므로 **다음 presign이 즉시 다시 막는다**
+  //     (아래 ⑤ 자가 치유 — 이게 수용의 전제다. 이게 깨지면 이 수용은 무효가 된다).
+  //  4. 제대로 봉쇄하려면 pending 첨부를 "예약"으로 취급하는 새 상태 + 정리 안 된 pending을
+  //     청소하는 별도 메커니즘이 필요한데, 그건 새 동시성 계약이라 이 저장소 역할 지침상
+  //     확정된 승인 없이 만들 수 없다(구현 보고서 §3-2) — **예약 메커니즘은 판정으로 배제됐다.**
+  {
+    const FREE_LIMIT_RACE = 5 * 1024 ** 3;
+    const HEADROOM = 150;
+    db.binder_storage_usage['b-race'] = { binder_id: 'b-race', bytes_used: FREE_LIMIT_RACE - HEADROOM }; // 150바이트 여유
+
+    let idRaceA;
+    let idRaceB;
+    await check('① 경합 두 presign이 각각 개별로는 한도 이내라 둘 다 통과한다(같은 stale bytesUsed를 본다)', async () => {
+      const resA = await MediaService.presign(
+        { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-race', filename: 'race-a.mp4', content_type: 'video/mp4', file_size: 100 },
+        ctx('u1')
+      );
+      const resB = await MediaService.presign(
+        { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-race', filename: 'race-b.mp4', content_type: 'video/mp4', file_size: 100 },
+        ctx('u1')
+      );
+      assert.ok(resA.id && resB.id, '100+100=200 > 여유 150이지만, 각각 100 <= 150이라 둘 다 개별 승인된다');
+      idRaceA = resA.id;
+      idRaceB = resB.id;
+    });
+
+    await check('② 두 confirm이 모두 통과하고(§RLY-20260806-015 tolerance 정책과 동일하게 거부하지 않는다)', async () => {
+      await Promise.all([MediaService.confirm(idRaceA, ctx('u1')), MediaService.confirm(idRaceB, ctx('u1'))]);
+      assert.strictEqual(db.attachments[idRaceA].status, 'processing');
+      assert.strictEqual(db.attachments[idRaceB].status, 'processing');
+    });
+
+    await check('③ 회계 자체는 정확하다(AC-S9-6과 동일 불변식) — 손실 없이 100+100 그대로 반영', () => {
+      assert.strictEqual(
+        db.binder_storage_usage['b-race'].bytes_used,
+        FREE_LIMIT_RACE - HEADROOM + 200,
+        '경합이 회계를 부정확하게 만드는 게 아니다 — applyStorageDelta는 항상 정확하다'
+      );
+    });
+
+    await check('④ ⚠️ 수용의 실체 — 결과적으로 한도를 "딱 그 경합분만큼(50바이트)" 초과한 상태가 됐다', () => {
+      const over = db.binder_storage_usage['b-race'].bytes_used - FREE_LIMIT_RACE;
+      assert.strictEqual(over, 50, '초과분은 경합 참여분(200) - 여유(150) = 50 — 무한 성장이 아니라 이 경합 1회분에 정확히 bound된다');
+    });
+
+    await expectStatus(
+      '⑤ ⚠️ 자가 치유(수용의 전제) — 한도 초과 상태가 남으면 다음 presign은 즉시 다시 402로 막힌다',
+      () => MediaService.presign(
+        { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-race', filename: 'next.mp4', content_type: 'video/mp4', file_size: 1 },
+        ctx('u1')
+      ),
+      402,
+      'BOOST_STORAGE_LIMIT'
+    );
+  }
 
   // ═══════════════════════════════════════════════════════════════
   // RLY-20260806-015 — confirm 실제 크기 서버 재확인
