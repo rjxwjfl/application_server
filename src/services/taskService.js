@@ -3,6 +3,7 @@ const { BinderDAO } = require('../daos/binderDAO');
 const { ReminderDAO } = require('../daos/reminderDAO');
 const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('../daos/deleteCascadeHelpers');
 const { adjustRuleCount } = require('../utils/recurrenceRule');
+const { assertOccurrencesMatchRule } = require('../utils/recurrenceExpansion');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -40,6 +41,21 @@ class TaskService {
   async createTask(taskData, context) {
     // 반환된 calendar.binder_id를 emit에 재사용한다(A-NEW-13) — taskData.binder_id는 클라 payload라 신뢰할 수 없다.
     const { calendar: authzCalendar } = await requireBinderMemberByCalendarId(pool, taskData.calendar_id, context.sender_id);
+
+    // RLY-20260806-037 — eventService.createEvent와 동일 사유·동일 계약(system.md §4-7).
+    if (taskData.instances && taskData.instances.length > 0) {
+      const earliest = taskData.instances.reduce((min, inst) => {
+        const t = new Date(inst.original_date).getTime();
+        return t < min ? t : min;
+      }, Infinity);
+      assertOccurrencesMatchRule({
+        rRule: taskData.r_rule,
+        isAllDay: !!taskData.instances[0].is_all_day,
+        recurrenceTimezone: taskData.recurrence_timezone,
+        dtstartInstant: new Date(earliest),
+        submittedInstances: taskData.instances,
+      });
+    }
 
     const taskId = taskData.id || generateUUID();
 
@@ -186,6 +202,30 @@ class TaskService {
 
       if (toCreate.length > MAX_OCCURRENCES) {
         throw new BadRequestError(`회차는 최대 ${MAX_OCCURRENCES}개까지 생성할 수 있습니다`, 'occurrence_limit_exceeded');
+      }
+
+      // RLY-20260806-037 — eventService.applyRecurrenceScope와 동일 사유·동일 DTSTART 규칙
+      // (recurrenceExpansion.js 헤더·eventDao.findEarliestActiveInstance 주석 참조).
+      if (toCreate.length > 0) {
+        const effectiveRRule = patch.r_rule !== undefined ? patch.r_rule : origin.r_rule;
+        const effectiveRecurrenceTimezone = Object.prototype.hasOwnProperty.call(patch, 'recurrence_timezone')
+          ? patch.recurrence_timezone : origin.recurrence_timezone;
+
+        let dtstartInstant;
+        if (scope === 'this_and_future') {
+          dtstartInstant = boundaryDate;
+        } else {
+          const earliest = await TaskDAO.findEarliestActiveInstance(client, taskId);
+          dtstartInstant = earliest ? new Date(earliest.original_date) : new Date(toCreate[0].original_date);
+        }
+
+        assertOccurrencesMatchRule({
+          rRule: effectiveRRule,
+          isAllDay: !!toCreate[0].is_all_day,
+          recurrenceTimezone: effectiveRecurrenceTimezone,
+          dtstartInstant,
+          submittedInstances: toCreate,
+        });
       }
 
       const deletedInstanceIds = await TaskDAO.deleteInstancesFromBoundary(client, taskId, effectiveBoundary);

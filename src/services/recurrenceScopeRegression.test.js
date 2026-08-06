@@ -206,6 +206,13 @@ async function mockQuery(sql, params = []) {
     const count = Object.values(db.event_instances).filter((r) => r.event_id === params[0] && !r.deleted_at).length;
     return { rows: [{ count }] };
   }
+  // RLY-20260806-037 — EventDAO.findEarliestActiveInstance(all_upcoming RRULE 대조 DTSTART).
+  if (s.startsWith('SELECT id, original_date, is_all_day') && s.includes('FROM event_instances')) {
+    const rows = Object.values(db.event_instances)
+      .filter((r) => r.event_id === params[0] && !r.deleted_at)
+      .sort((a, b) => new Date(a.original_date) - new Date(b.original_date));
+    return { rows: rows.length ? [rows[0]] : [] };
+  }
   if (s.startsWith('INSERT INTO events')) {
     // RLY-20260806-041 — createForkEvent 의 INSERT 컬럼 목록에 reminder_offsets 가 추가돼
     // 파라미터가 11→12개가 됐다(마지막 자리). 일반 createEvent 의 INSERT 는 이 컬럼이 없어
@@ -290,6 +297,13 @@ async function mockQuery(sql, params = []) {
   if (s.startsWith('SELECT COUNT(*)::int AS count FROM task_instances')) {
     const count = Object.values(db.task_instances).filter((r) => r.task_id === params[0] && !r.deleted_at).length;
     return { rows: [{ count }] };
+  }
+  // RLY-20260806-037 — TaskDAO.findEarliestActiveInstance(all_upcoming RRULE 대조 DTSTART).
+  if (s.startsWith('SELECT id, original_date, is_all_day') && s.includes('FROM task_instances')) {
+    const rows = Object.values(db.task_instances)
+      .filter((r) => r.task_id === params[0] && !r.deleted_at)
+      .sort((a, b) => new Date(a.original_date) - new Date(b.original_date));
+    return { rows: rows.length ? [rows[0]] : [] };
   }
   if (s.startsWith('INSERT INTO tasks')) {
     // RLY-20260806-041 — 위 INSERT INTO events 와 동일 사유: createForkTask 의 INSERT 컬럼

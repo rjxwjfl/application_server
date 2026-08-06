@@ -204,6 +204,24 @@ class EventDAO {
     return result.rows[0].count;
   }
 
+  // RLY-20260806-037 — all_upcoming 범위 편집에서 r_rule 독립 전개의 DTSTART로 쓴다. INTERVAL>1
+  // 규칙은 DTSTART의 정확한 날짜가 반복 위상을 결정하므로, 제출된 회차 중 아무 날짜나 쓰면
+  // 안 되고 그 계열의 진짜(과거 포함) 첫 회차를 써야 한다 — all_upcoming은 같은 owner 행을
+  // 유지하므로 이 값이 곧 "진짜 시작점"이다(fork로 새로 시작한 조각이면 그 조각의 첫 인스턴스가
+  // 곧 자신의 시작점이라 이 함수가 이미 맞는 값을 돌려준다). deleteInstancesFromBoundary 호출
+  // 전에 불러야 한다 — 삭제 후에는 경계 이전 회차만 남아 결과가 달라진다.
+  async findEarliestActiveInstance(conn, eventId) {
+    const result = await conn.query(
+      `SELECT id, original_date, is_all_day
+       FROM event_instances
+       WHERE event_id = $1 AND deleted_at IS NULL
+       ORDER BY original_date ASC
+       LIMIT 1`,
+      [eventId]
+    );
+    return result.rows[0] || null;
+  }
+
   // 새 owner(fork) 이벤트 행. calendar_id/author_id/event_type은 원본에서 상속(패치 대상 아님) —
   // 나머지(summary 등)는 호출부가 patch⊕origin으로 미리 병합해 넘긴다. id는 클라가 보낸
   // UUIDv7(new_event_id) — 서버가 생성하지 않는다(H19, §10-2 재전송 멱등). ON CONFLICT DO NOTHING

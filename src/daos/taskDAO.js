@@ -180,6 +180,20 @@ class TaskDAO {
     return result.rows[0].count;
   }
 
+  // RLY-20260806-037 — eventDao.js의 findEarliestActiveInstance와 동일 사유·동일 계약(all_upcoming
+  // r_rule 독립 전개의 DTSTART). deleteInstancesFromBoundary 호출 전에 불러야 한다.
+  async findEarliestActiveInstance(conn, taskId) {
+    const result = await conn.query(
+      `SELECT id, original_date, is_all_day
+       FROM task_instances
+       WHERE task_id = $1 AND deleted_at IS NULL
+       ORDER BY original_date ASC
+       LIMIT 1`,
+      [taskId]
+    );
+    return result.rows[0] || null;
+  }
+
   // RLY-20260806-041 — eventDao.js의 createForkEvent와 동일 사유(reminder_offsets를 INSERT
   // 목록에 추가, 026 후속 배선이 끝나 옛 경계 사유가 사라졌다).
   async createForkTask(conn, data) {
