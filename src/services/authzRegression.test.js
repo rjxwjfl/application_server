@@ -186,9 +186,15 @@ async function mockQuery(sql, params = []) {
     const row = db.task_instances[params[0]];
     return { rows: row ? [{ ...row, original_date: NOW }] : [] };
   }
-  // authz 통과 후 도달하는 나머지 쓰기 구문(UPDATE/INSERT..SELECT) — SQL 정합성은 이 회귀의 관심사가
-  // 아니다(서비스 레이어 인가 분기만 검증). 값 없이 성공만 흉내낸다.
-  if (s.startsWith('UPDATE ') || s.startsWith('INSERT INTO')) {
+  // RLY-20260806-034 — EventDAO/TaskDAO.countActiveInstances(범위 편집 fork의 r_rule COUNT 조정용).
+  // 인가 분기 이후에만 도달하고 이 회귀의 관심사는 아니라 0으로 흉내낸다.
+  if (s.startsWith('SELECT COUNT(*)::int AS count FROM event_instances')
+    || s.startsWith('SELECT COUNT(*)::int AS count FROM task_instances')) {
+    return { rows: [{ count: 0 }] };
+  }
+  // authz 통과 후 도달하는 나머지 쓰기 구문(UPDATE/INSERT..SELECT/DELETE) — SQL 정합성은 이 회귀의
+  // 관심사가 아니다(서비스 레이어 인가 분기만 검증). 값 없이 성공만 흉내낸다.
+  if (s.startsWith('UPDATE ') || s.startsWith('INSERT INTO') || s.startsWith('DELETE FROM')) {
     return { rows: [{}] };
   }
 
@@ -272,7 +278,8 @@ async function run() {
   await expectStatus('Task.updateTaskInstance 비멤버', () => TaskService.updateTaskInstance('t1', 'ti1', { summary: 'y' }, ctx(OUT)), 403);
   await expectStatus('Task.deleteTaskInstance 비멤버', () => TaskService.deleteTaskInstance('t1', 'ti1', ctx(OUT)), 403);
   await expectOk('Task.updateTask 작성자는 항상 가능', () => TaskService.updateTask('t1', { summary: 'y' }, ctx('author1')));
-  await expectOk('Task.splitTask editor 가능(instance 존재 확인 포함)', () => TaskService.splitTask({ task_id: 't1', instance_id: 'ti1' }, ctx('editor1')));
+  // RLY-20260806-034 — new_task_id는 클라 UUIDv7이 필수(H19, 서버가 더 이상 생성하지 않음).
+  await expectOk('Task.splitTask editor 가능(instance 존재 확인 포함)', () => TaskService.splitTask({ task_id: 't1', instance_id: 'ti1', new_task_id: 'new-t1-fork' }, ctx('editor1')));
 
   // ============ SpecialDay (1) ============
   await expectStatus('SpecialDay.getById 비멤버', () => SpecialDayService.getById('sd1', OUT), 403);

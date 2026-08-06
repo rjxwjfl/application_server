@@ -2,17 +2,21 @@ const { EventDAO } = require('../daos/eventDAO');
 const { CalendarDAO } = require('../daos/calendarDAO');
 const { SectionDAO } = require('../daos/sectionDAO');
 const { ReminderDAO } = require('../daos/reminderDAO');
+const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('../daos/deleteCascadeHelpers');
+const { adjustRuleCount } = require('../utils/recurrenceRule');
 const { BinderDAO } = require('../daos');
-const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
-const { BadRequestError, NotFoundError, ForbiddenError } = require('../core/errors');
+const { BadRequestError, NotFoundError, ForbiddenError, ConflictError } = require('../core/errors');
 const { requireBinderMemberByCalendarId, requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 const pool = require('../../config/db');
 
 // reminders.target_type: 0=event_instance 1=task_instance 2=special_day (schema.md §10-4)
 const EVENT_INSTANCE_TARGET_TYPE = 0;
+
+// domain.md §3-13 · system.md §4-7 — 회차 상한. 서버가 강제한다(재생성 경로에서도 예외 없음).
+const MAX_OCCURRENCES = 365;
 
 // 캘린더 항목(Event) 편집·삭제 권한 (domain.md §(12) [확정]): 작성자는 항상 가능,
 // 그 외는 Binder 편집자(editor, role<=2) 이상. binder_settings.item_edit_role(기본값=2)로
@@ -126,7 +130,14 @@ class EventService {
     return event;
   }
 
+  // scope 유무로 "메타데이터만 편집"과 "범위 재생성(fork)"이 갈린다(api.md §8 "body.scope 유무로
+  // 갈린다", 8-A "scope 필드는 생략 가능하며, 없으면 회차를 건드리지 않는 메타데이터 편집").
+  // scope가 있으면 applyRecurrenceScope로 위임한다 — split(POST .../split)과 같은 함수를 탄다.
   async updateEvent(event_id, updateData, context) {
+    if (updateData.scope) {
+      return this.applyRecurrenceScope(event_id, updateData, context);
+    }
+
     const { result, binder_id } = await withTransaction(async (client) => {
       const event = await EventDAO.findById(client, event_id);
       if (!event) throw new NotFoundError('이벤트를 찾을 수 없습니다');
@@ -143,6 +154,180 @@ class EventService {
       action: ActionType.UPDATE,
       target_type: TargetType.EVENT,
       target_id: event_id,
+    });
+
+    return result;
+  }
+
+  // ============================================================================================
+  // 범위 편집(fork) — RLY-20260806-034, 결정 64(domain.md §3-14) · api.md §8-A · system.md §4-3.
+  // ============================================================================================
+  // PATCH scope=this_and_future/all_upcoming와 POST .../split(호환 alias, EventService.splitEvent가
+  // 여기로 위임)이 이 함수 하나로 수렴한다 — "두 벌" 금지(팀리드 지시).
+  //
+  // 처리 순서는 system.md §4-3을 그대로 따른다: ①원본 행 잠금+인가 ②stale_revision 검사
+  // ③대상(경계) 소속 검증 ④과거 제외 재평가 ⑤적용(삭제→생성) ⑥응답(skipped_past_count 포함).
+  // 전부 한 트랜잭션 — LWW가 아니라 "회차 구조를 바꾸는 조작"의 예외 경로다.
+  //
+  // @param {object} opts
+  // @param {'this_and_future'|'all_upcoming'} opts.scope
+  // @param {string} [opts.boundary_instance_id] - split alias 전용. 이 인스턴스의 original_date가
+  //   경계다(선택 회차 포함, "이후"). PATCH this_and_future는 대신 instances[0]을 경계로 쓴다
+  //   (api.md 8-A "첫 항목이 선택 회차").
+  // @param {Array} [opts.instances] - 재생성할 회차 전량(클라 계산, 상한 365). this_and_future/
+  //   all_upcoming 공통.
+  // @param {string} [opts.new_event_id] - this_and_future 전용, 클라 UUIDv7(H19 — 서버가 안 만듦).
+  // @param {string} [opts.expected_updated_at] - 낙관적 동시성(stale_revision).
+  // @param {...*} patch - summary·description·color·r_rule·locations·recurrence_timezone·
+  //   reminder_offsets 등 편집값. this_and_future면 새 owner 행에, all_upcoming이면 기존 owner
+  //   행에 적용된다.
+  async applyRecurrenceScope(eventId, opts, context) {
+    const {
+      scope, boundary_instance_id: boundaryInstanceId, instances,
+      new_event_id: newEventId, expected_updated_at: expectedUpdatedAt,
+      ...patch
+    } = opts;
+
+    if (scope !== 'this_and_future' && scope !== 'all_upcoming') {
+      throw new BadRequestError('지원하지 않는 scope입니다', 'unsupported_scope');
+    }
+
+    const { result, binder_id } = await withTransaction(async (client) => {
+      // ① 원본 행 잠금 + 인가
+      const origin = await EventDAO.findByIdForUpdate(client, eventId);
+      if (!origin) throw new NotFoundError('이벤트를 찾을 수 없습니다');
+      const { calendar, member } = await requireBinderMemberByCalendarId(client, origin.calendar_id, context.sender_id);
+      assertCanEditItem(origin.author_id, context.sender_id, member);
+
+      // ② stale_revision — 낡은 화면에서 제출한 요청이 잠금·소속 검증을 통과하면서 사용자가
+      // 의도한 것보다 좁은 범위에 조용히 적용되는 것을 막는 유일한 검사(system.md §4-3 step3).
+      if (expectedUpdatedAt) {
+        const expectedMs = new Date(expectedUpdatedAt).getTime();
+        const actualMs = new Date(origin.updated_at).getTime();
+        if (Number.isNaN(expectedMs) || expectedMs !== actualMs) {
+          throw new ConflictError('편집 대상이 이미 변경되었습니다', 'stale_revision');
+        }
+      }
+
+      // ③ 대상(경계) 소속 검증
+      let boundaryDate;
+      if (scope === 'this_and_future') {
+        if (boundaryInstanceId) {
+          // split alias 경로 — URL의 instanceId가 경계다.
+          const boundaryInstance = await EventDAO.findInstanceById(client, boundaryInstanceId);
+          if (!boundaryInstance || boundaryInstance.event_id !== eventId) {
+            throw new ConflictError('선택한 회차가 이 이벤트에 속하지 않습니다', 'instance_not_in_event');
+          }
+          boundaryDate = new Date(boundaryInstance.original_date);
+        } else if (Array.isArray(instances) && instances.length > 0) {
+          // PATCH scope=this_and_future 경로 — "첫 항목이 선택 회차"(api.md 8-A).
+          boundaryDate = new Date(instances[0].original_date);
+        } else {
+          throw new BadRequestError('경계 회차를 판정할 수 없습니다(instance_id 또는 instances[0] 필요)');
+        }
+        if (!newEventId) throw new BadRequestError('new_event_id가 필요합니다');
+      } else {
+        // all_upcoming — 경계는 항상 "지금"(선택 회차 개념이 없다).
+        boundaryDate = new Date();
+      }
+
+      // ④ 과거 제외 재평가 — 처리 시각 기준으로 이미 시작한 회차는 대상에서 뺀다. stale_revision
+      // 검사(②)보다 반드시 뒤에 둔다(system.md §4-3 step5 순서 그대로) — 앞에 두면 남이 이미
+      // 손댄 요청이 과거 제외만 통과해 부분 적용된다.
+      const now = new Date();
+      const effectiveBoundary = boundaryDate > now ? boundaryDate : now;
+
+      const submitted = Array.isArray(instances) ? instances : [];
+      const toCreate = submitted.filter((inst) => new Date(inst.original_date) >= effectiveBoundary);
+      const skippedPastCount = submitted.length - toCreate.length;
+
+      if (toCreate.length > MAX_OCCURRENCES) {
+        throw new BadRequestError(`회차는 최대 ${MAX_OCCURRENCES}개까지 생성할 수 있습니다`, 'occurrence_limit_exceeded');
+      }
+
+      // ⑤ 적용 — 삭제(경계 이후 기존 회차, 참가자·리마인더 cascade) 후 재생성.
+      const deletedInstanceIds = await EventDAO.deleteInstancesFromBoundary(client, eventId, effectiveBoundary);
+      await cascadeDeleteInstanceChildren(client, {
+        participantTable: 'event_participants',
+        reminderTargetType: REMINDER_TARGET_TYPE.EVENT_INSTANCE,
+        instanceIds: deletedInstanceIds,
+      });
+
+      if (deletedInstanceIds.length === 0 && toCreate.length === 0) {
+        throw new ConflictError('영향받는 회차가 없습니다(이미 다른 분리가 가져갔거나 전부 과거 회차입니다)', 'no_occurrences_moved');
+      }
+
+      let targetEventId = eventId;
+      let forkEvent = null;
+
+      if (scope === 'this_and_future') {
+        // 새 owner(fork) 행 — 패치값이 있으면 그 값, 없으면 원본값을 그대로 물려받는다
+        // (COALESCE(patch, origin)과 동치). event_type·calendar_id·author_id는 패치 대상이
+        // 아니라 항상 원본에서 상속한다.
+        forkEvent = await EventDAO.createForkEvent(client, {
+          id: newEventId,
+          calendar_id: origin.calendar_id,
+          author_id: origin.author_id,
+          event_type: origin.event_type,
+          forked_from: eventId,
+          summary: patch.summary !== undefined && patch.summary !== null ? patch.summary : origin.summary,
+          description: patch.description !== undefined ? patch.description : origin.description,
+          color: patch.color !== undefined && patch.color !== null ? patch.color : origin.color,
+          r_rule: patch.r_rule !== undefined ? patch.r_rule : origin.r_rule,
+          locations: patch.locations !== undefined ? patch.locations : origin.locations,
+          recurrence_timezone: Object.prototype.hasOwnProperty.call(patch, 'recurrence_timezone')
+            ? patch.recurrence_timezone : origin.recurrence_timezone,
+          // 알림 오프셋은 owner 행에 안 남는다(findByIdForUpdate 주석 참조) — 아래 리마인더
+          // 파생은 patch.reminder_offsets를 직접 읽는다(origin 폴백 없음, createEvent와 동일 한계).
+        });
+        targetEventId = forkEvent.id;
+
+        // "구간은 서로소다"(domain.md §3-13) — 원본에 남은(경계 이전) 회차 수로 원본 r_rule의
+        // COUNT를 낮춘다. UNTIL 기반 규칙은 조정 못 한다(utils/recurrenceRule.js 주석 참조).
+        const remainingCount = await EventDAO.countActiveInstances(client, eventId);
+        const adjustedRRule = adjustRuleCount(origin.r_rule, remainingCount);
+        if (adjustedRRule !== origin.r_rule) {
+          await EventDAO.updateEvent(client, eventId, { r_rule: adjustedRRule });
+        }
+      } else {
+        // all_upcoming — 새 owner 행 없음. 같은 이벤트의 메타데이터를 그대로 갱신한다
+        // (기존 EventDAO.updateEvent 재사용 — COALESCE partial update).
+        await EventDAO.updateEvent(client, eventId, patch);
+      }
+
+      // 재생성 회차 — 참가자는 절대 승계하지 않는다(명단 초기화, 결정 64).
+      const createdInstances = await EventDAO.insertInstancesBulk(client, targetEventId, toCreate);
+
+      for (const inst of createdInstances) {
+        await ReminderDAO.syncTarget(client, {
+          targetType: EVENT_INSTANCE_TARGET_TYPE,
+          targetId: inst.id,
+          baseTime: inst.start_date,
+          offsets: patch.reminder_offsets,
+          timezone: null,
+        });
+      }
+
+      return {
+        binder_id: calendar.binder_id,
+        result: {
+          event_id: targetEventId,
+          original_event_id: eventId,
+          new_event_id: scope === 'this_and_future' ? targetEventId : null,
+          created_instance_count: createdInstances.length,
+          deleted_instance_count: deletedInstanceIds.length,
+          skipped_past_count: skippedPastCount,
+        },
+      };
+    });
+
+    eventBus.emit('sync', {
+      binder_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: scope === 'this_and_future' ? ActionType.CREATE : ActionType.UPDATE,
+      target_type: TargetType.EVENT,
+      target_id: result.event_id,
     });
 
     return result;
@@ -185,37 +370,20 @@ class EventService {
     return result;
   }
 
+  // 【결정 64】 POST .../split은 활성 액션이 아니라 구 클라이언트·동결 큐 호환용 alias다
+  // (api.md §8, ~~POST~~ 행). 처리는 scope=this_and_future와 완전히 같은 함수로 수렴한다 —
+  // "patch 부재 여부와 무관하게 삭제·재생성이고 명단은 초기화된다"(api.md 8-A) — 순수 분리
+  // 옵션은 없다.
   async splitEvent(splitData, context) {
-    const { event_id, instance_id } = splitData;
+    const { event_id, instance_id, ...rest } = splitData;
     if (!event_id || !instance_id) {
       throw new BadRequestError('eventId와 instanceId가 필요합니다');
     }
-
-    const new_event_id = generateUUID();
-
-    const { result, binder_id } = await withTransaction(async (client) => {
-      const event = await EventDAO.findById(client, event_id);
-      if (!event) throw new NotFoundError('이벤트를 찾을 수 없습니다');
-      const { calendar, member } = await requireBinderMemberByCalendarId(client, event.calendar_id, context.sender_id);
-      assertCanEditItem(event.author_id, context.sender_id, member);
-
-      const instance = await EventDAO.findInstanceContext(client, event_id, instance_id);
-      if (!instance) throw new NotFoundError('이벤트 인스턴스를 찾을 수 없습니다');
-
-      const result = await EventDAO.splitEvent(client, event_id, instance_id, new_event_id);
-      return { result, binder_id: calendar.binder_id };
-    });
-
-    eventBus.emit('sync', {
-      binder_id,
-      sender_id: context.sender_id,
-      device_uuid: context.device_uuid,
-      action: ActionType.CREATE,
-      target_type: TargetType.EVENT,
-      target_id: new_event_id,
-    });
-
-    return result;
+    return this.applyRecurrenceScope(event_id, {
+      ...rest,
+      scope: 'this_and_future',
+      boundary_instance_id: instance_id,
+    }, context);
   }
 
   async deleteEvent(event_id, context) {
