@@ -1,5 +1,6 @@
 const { TaskDAO } = require('../daos/taskDAO');
 const { BinderDAO } = require('../daos/binderDAO');
+const { ReminderDAO } = require('../daos/reminderDAO');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -7,6 +8,9 @@ const { BadRequestError, NotFoundError, ForbiddenError } = require('../core/erro
 const { requireBinderMemberByCalendarId, requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 const pool = require('../../config/db');
+
+// reminders.target_type: 0=event_instance 1=task_instance 2=special_day (schema.md §10-4)
+const TASK_INSTANCE_TARGET_TYPE = 1;
 
 // 캘린더 항목(Task) 편집·삭제 권한 (domain.md §(12) [확정], api.md DELETE /tasks/:taskId와 동일 축):
 // 작성자는 항상 가능, 그 외는 Binder 편집자(editor, role<=2) 이상. Event 쪽 assertCanEditItem과
@@ -35,11 +39,30 @@ class TaskService {
     const taskId = taskData.id || generateUUID();
 
     const task = await withTransaction(async (client) => {
-      return await TaskDAO.createTask(client, {
+      const created = await TaskDAO.createTask(client, {
         ...taskData,
         id: taskId,
         author_id: context.sender_id,
       });
+
+      // RLY-20260806-026 — Task 축은 ReminderDAO를 아예 호출하지 않아 리마인더가 조용히
+      // 버려지고 있었다(회귀 없이 그냥 무시). SC-reminder §7-1 계약대로 `reminder_offsets`
+      // (초 배열) 기반으로 회차(due 기준)마다 발송 원장을 파생한다. Event 쪽과 동일 사유로
+      // tasks.reminder_offsets는 TaskDAO.createTask의 INSERT 컬럼 목록에 없어(taskDAO.js는
+      // RLY-20260806-027 경계라 손대지 않음) owner row엔 안 남고 요청 payload를 직접 읽는다.
+      if (taskData.instances && taskData.instances.length > 0) {
+        for (const instance of taskData.instances) {
+          await ReminderDAO.syncTarget(client, {
+            targetType: TASK_INSTANCE_TARGET_TYPE,
+            targetId: instance.id,
+            baseTime: instance.due_date,
+            offsets: taskData.reminder_offsets,
+            timezone: null, // Event와 동일 — 수신자가 여럿이라 항목 기준 시간대 불가(§2-B)
+          });
+        }
+      }
+
+      return created;
     });
 
     eventBus.emit('sync', {
@@ -79,6 +102,18 @@ class TaskService {
       const member = await requireBinderMember(client, instance.binder_id, context.sender_id);
       assertCanEditItem(instance.author_id, context.sender_id, member);
       const result = await TaskDAO.updateTaskInstance(client, instanceId, updateData);
+
+      // RLY-20260806-026 — due_date가 바뀌었으면 이미 붙어 있는 리마인더의 trigger_at을 다시
+      // 파생한다(eventService.updateEventInstance와 동일 패턴). offsets 미지정 = "무변동" 분기 —
+      // 기존 trigger_offset은 유지하고 새 due_date 기준으로만 trigger_at을 재계산한다.
+      await ReminderDAO.syncTarget(client, {
+        targetType: TASK_INSTANCE_TARGET_TYPE,
+        targetId: instanceId,
+        baseTime: result.due_date,
+        offsets: undefined,
+        timezone: null,
+      });
+
       return { result, binder_id: instance.binder_id };
     });
 

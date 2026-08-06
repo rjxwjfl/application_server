@@ -11,6 +11,9 @@ const { requireBinderMemberByCalendarId, requireBinderMember } = require('../cor
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 const pool = require('../../config/db');
 
+// reminders.target_type: 0=event_instance 1=task_instance 2=special_day (schema.md §10-4)
+const EVENT_INSTANCE_TARGET_TYPE = 0;
+
 // 캘린더 항목(Event) 편집·삭제 권한 (domain.md §(12) [확정]): 작성자는 항상 가능,
 // 그 외는 Binder 편집자(editor, role<=2) 이상. binder_settings.item_edit_role(기본값=2)로
 // 바인더별 조정 가능하다고 확정돼 있으나 그 컬럼이 아직 스키마에 없어(config/schema.sql) 여기서는
@@ -58,11 +61,25 @@ class EventService {
         await EventDAO.addSection(client, data.id, data.section_id);
       }
 
-      if (data.reminders && data.reminders.length > 0) {
-        for (const reminder of data.reminders) {
-          await ReminderDAO.create(client, {
-            ...reminder,
-            user_id: context.sender_id,
+      // RLY-20260806-026 — 구 nested `data.reminders[]` 루프 제거(ReminderDAO.create가 실제
+      // 스키마에 없는 user_id·base_time 컬럼으로 INSERT해 항상 SQL 에러 — 리마인더를 하나라도
+      // 붙이면 이벤트 생성 자체가 롤백됐다). [확정](2026-08-03, SC-reminder §7-1) 계약대로
+      // `reminder_offsets`(초 배열) 기반으로 회차마다 발송 원장을 파생한다.
+      //
+      // ⚠️ events.reminder_offsets 컬럼은 이번에 추가했으나(migrations/20260806_events_tasks_
+      // reminder_offsets.sql) EventDAO.createEvent의 INSERT 컬럼 목록엔 없다 — eventDAO.js는
+      // RLY-20260806-027 경계라 손대지 않는다(구현보고서에 별도 명시). owner row엔 안 남고
+      // 요청 payload의 reminder_offsets를 그때그때 직접 읽어 파생한다.
+      if (data.instances && data.instances.length > 0) {
+        for (const instance of data.instances) {
+          await ReminderDAO.syncTarget(client, {
+            targetType: EVENT_INSTANCE_TARGET_TYPE,
+            targetId: instance.id,
+            baseTime: instance.start_date,
+            offsets: data.reminder_offsets,
+            // Event·Task는 timezone NULL(ck_rem_tz 허용) — 수신자가 여럿이라 항목 기준 시간대가
+            // 성립하지 않는다(§2-B). SpecialDay만 소유자 단일 수신자라 예외적으로 값을 채운다.
+            timezone: null,
           });
         }
       }
@@ -138,6 +155,21 @@ class EventService {
       const member = await requireBinderMember(client, instance.binder_id, context.sender_id);
       assertCanEditItem(instance.author_id, context.sender_id, member);
       const result = await EventDAO.updateEventInstance(client, instance_id, updateData);
+
+      // RLY-20260806-026 — 회차 시각이 바뀌었으면 이 회차에 이미 붙어 있는 리마인더의 trigger_at을
+      // 다시 파생한다(지시 §2 "항목 시각이 바뀌면 원장을 다시 만들어야 한다"). offsets를 안 넘겨
+      // "무변동" 분기를 태운다 — 기존 행의 trigger_offset을 그대로 두고 새 start_date 기준으로만
+      // trigger_at을 재계산한다(오프셋 자체를 바꾸는 경로는 createEvent 쪽 payload에서만 들어온다).
+      // start_date가 이번 요청에서 안 바뀌었어도 result.start_date는 COALESCE로 보존된 현재값이라
+      // 같은 값으로 재대입돼 부작용이 없다.
+      await ReminderDAO.syncTarget(client, {
+        targetType: EVENT_INSTANCE_TARGET_TYPE,
+        targetId: instance_id,
+        baseTime: result.start_date,
+        offsets: undefined,
+        timezone: null,
+      });
+
       return { result, binder_id: instance.binder_id };
     });
 
