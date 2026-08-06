@@ -630,12 +630,21 @@ CREATE INDEX idx_scm_sync ON section_messages (section_id, updated_at);
 
 CREATE TABLE attachments (
   id            UUID         NOT NULL,
-  -- 다형 context: SECTION_MESSAGE · EVENT · TASK · POST · CAST · SPECIAL_DAY
+  -- 다형 context — 9종:
+  --   첨부 6종        : SECTION_MESSAGE · EVENT · TASK · POST · CAST · SPECIAL_DAY
+  --   엔티티 이미지 3종: USER_AVATAR · BINDER_AVATAR · CAST_COVER
+  --     RLY-20260806-080(S1) — [확정 — User 판정 2026-08-07] 아바타·커버를 첨부와 같은 검사 경로로
+  --     통합(media.md §3-3-1). 구 설계("DB 레코드 없음 — 별도 GCS 경로")는 폐기 — 상태 없이는
+  --     재시도·거부·회수가 성립하지 않아 검사 자체가 불가능했고 실제 무검사 통과가 확인됐다.
+  --     엔티티 이미지는 저장 용량 집계(binder_storage_usage) 대상이 아니며 플랫 상한
+  --     (아바타 10MB · 커버 20MB)으로만 막는다. 생명주기 cron·바인더 파일함에서도 제외한다.
   context_type  VARCHAR(30)  NOT NULL,
   -- 컨텍스트 PK (FK 없음 — 무결성은 서비스 레이어). pre-upload 시 null 허용
+  -- (엔티티 이미지 3종은 대상 엔티티 PK가 항상 있어야 한다 — chk_att_entity_target)
   context_id    UUID,
   -- denormalized: binder 스토리지 사용량 집계 + GCS 키 네이밍
-  binder_id     UUID         NOT NULL,
+  -- USER_AVATAR만 NULL(귀속 바인더 없음) — chk_att_binder_scope가 그 외를 강제한다
+  binder_id     UUID,
   uploader_id   UUID         NOT NULL,
   filename      TEXT         NOT NULL,
   file_size     BIGINT       NOT NULL,
@@ -663,9 +672,23 @@ CREATE TABLE attachments (
   PRIMARY KEY (id),
   CONSTRAINT fk_att_binder   FOREIGN KEY (binder_id)   REFERENCES binders(id),
   CONSTRAINT fk_att_uploader FOREIGN KEY (uploader_id) REFERENCES users(id),
-  CONSTRAINT chk_att_context CHECK (context_type IN ('SECTION_MESSAGE','EVENT','TASK','POST','CAST','SPECIAL_DAY')),
-  CONSTRAINT chk_att_status CHECK (status IN ('pending','processing','ready','hidden','deleted','rejected','error'))
+  CONSTRAINT chk_att_context CHECK (context_type IN (
+    'SECTION_MESSAGE','EVENT','TASK','POST','CAST','SPECIAL_DAY',
+    'USER_AVATAR','BINDER_AVATAR','CAST_COVER')),
+  CONSTRAINT chk_att_status CHECK (status IN ('pending','processing','ready','hidden','deleted','rejected','error')),
+  -- 유저 아바타만 귀속 바인더가 없다. 그 외 8종은 binder_id 필수 — 파일함·집계·삭제가 전부
+  -- binder_id에 걸려 있어 NULL이 새면 그 경로들이 조용히 빠진다.
+  CONSTRAINT chk_att_binder_scope CHECK (context_type = 'USER_AVATAR' OR binder_id IS NOT NULL),
+  -- 엔티티 이미지는 "무엇의 사진인가" 없이 존재할 수 없다(첨부와 달리 pre-upload 개념이 없다).
+  -- 부수 효과: 고아 정리 cron(context_id IS NULL)의 대상이 구조적으로 될 수 없다.
+  CONSTRAINT chk_att_entity_target CHECK (
+    context_type NOT IN ('USER_AVATAR','BINDER_AVATAR','CAST_COVER') OR context_id IS NOT NULL)
 );
+-- RLY-20260806-080(S1) — [확정 — User 판정 2026-08-07] (context_type, context_id) 유일 인덱스를
+-- 걸지 않는다. 엔티티 이미지는 1 entity = 1 이미지지만 그 1:1은 엔티티의 이미지 컬럼(포인터)이
+-- 표현한다. 유일 제약을 걸면 교체 자체가 불가능해진다 — 새 파일이 검사를 통과할 때까지 이전 행이
+-- 살아 있어야 하는데 그 겹침을 금지하기 때문이다. 겹침을 피하려 이전 행을 먼저 지우면 새 파일이
+-- 거부됐을 때 되돌릴 사진이 없다. (media.md §3-3-1 — 이 주석을 지우면 다시 넣게 된다)
 CREATE INDEX idx_att_context   ON attachments (context_type, context_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_binder    ON attachments (binder_id, created_at DESC) WHERE deleted_at IS NULL;
 -- RLY-20260806-047 — Worker claim 후보 조회(idx_rem_dispatch와 동일 패턴, §10-13). status='processing'
