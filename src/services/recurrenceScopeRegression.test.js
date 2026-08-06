@@ -531,7 +531,7 @@ async function run() {
   await expectOk('⑩ splitEvent(this_and_future) — patch에 reminder_offsets 없음', () => EventService.splitEvent({
     event_id: 'evE', instance_id: 'evE-i5', new_event_id: 'evE-fork',
     instances: submittedInstances('evE', 5, 10, 'events'),
-    summary: 'New',
+    summary: 'New', r_rule: 'FREQ=DAILY;COUNT=6',
   }, ctx('editor1')));
   check('⑩ fork 이벤트가 origin의 reminder_offsets를 상속(patch 부재)', db.events['evE-fork'] && JSON.stringify(db.events['evE-fork'].reminder_offsets) === JSON.stringify([600, 0]));
 
@@ -539,7 +539,7 @@ async function run() {
   await expectOk('⑩ splitEvent(this_and_future) — patch에 reminder_offsets 있음', () => EventService.splitEvent({
     event_id: 'evF', instance_id: 'evF-i5', new_event_id: 'evF-fork',
     instances: submittedInstances('evF', 5, 10, 'events'),
-    summary: 'New', reminder_offsets: [0],
+    summary: 'New', r_rule: 'FREQ=DAILY;COUNT=6', reminder_offsets: [0],
   }, ctx('editor1')));
   check('⑩ fork 이벤트가 patch의 reminder_offsets 값을 반영', db.events['evF-fork'] && JSON.stringify(db.events['evF-fork'].reminder_offsets) === JSON.stringify([0]));
 
@@ -547,7 +547,7 @@ async function run() {
   await expectOk('⑪ Task splitTask(this_and_future) — patch에 reminder_offsets 없음', () => TaskService.splitTask({
     task_id: 'tkE', instance_id: 'tkE-i5', new_task_id: 'tkE-fork',
     instances: submittedInstances('tkE', 5, 10, 'tasks'),
-    summary: 'New',
+    summary: 'New', r_rule: 'FREQ=DAILY;COUNT=6',
   }, ctx('editor1')));
   check('⑪ Task: fork가 origin의 reminder_offsets를 상속(patch 부재, 이벤트와 대칭)', db.tasks['tkE-fork'] && JSON.stringify(db.tasks['tkE-fork'].reminder_offsets) === JSON.stringify([600, 0]));
 
@@ -555,7 +555,7 @@ async function run() {
   await expectOk('⑪ Task splitTask(this_and_future) — patch에 reminder_offsets 있음', () => TaskService.splitTask({
     task_id: 'tkF', instance_id: 'tkF-i5', new_task_id: 'tkF-fork',
     instances: submittedInstances('tkF', 5, 10, 'tasks'),
-    summary: 'New', reminder_offsets: [0],
+    summary: 'New', r_rule: 'FREQ=DAILY;COUNT=6', reminder_offsets: [0],
   }, ctx('editor1')));
   check('⑪ Task: fork가 patch의 reminder_offsets 값을 반영(이벤트와 대칭)', db.tasks['tkF-fork'] && JSON.stringify(db.tasks['tkF-fork'].reminder_offsets) === JSON.stringify([0]));
 
