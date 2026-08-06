@@ -135,8 +135,7 @@ assertSchemaLacks('billingService(getAssets — RLY-20260806-035 결함 회귀 �
 
 // RLY-20260806-031이 소유 — inviter_id 결함이 이미 알려져 있다(위 헤더 §7). 병합되면 여기서 뺀다.
 const EXCLUDED_FILES = new Set([
-  'src/daos/eventDao.js',
-  'src/daos/taskDAO.js',
+  // RLY-20260806-031 병합 완료 — 제외 해제됨. 두 파일 모두 스캐너 대상이다.
 ]);
 
 // ════════════════════════════════════════════════════════════════════════
