@@ -12,7 +12,8 @@ const getUserByCode = asyncHandler(async (req, res) => {
 });
 
 const updateUser = asyncHandler(async (req, res) => {
-  const updated = await userService.updateUserById(req.params.id, req.body);
+  // RLY-20260806-054 — req.params.id를 인증 신원(req.user_id)과 대조하지 않던 IDOR의 수리.
+  const updated = await userService.updateUserById(req.params.id, req.body, req.user_id);
   res.json({ success: true, data: updated });
 });
 

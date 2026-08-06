@@ -271,8 +271,8 @@ async function run() {
     { statusCode: 400, errorCode: 'INVALID_IMAGE_REFERENCE' }
   );
   await expectRejected(
-    'PATCH /users/:id(userService.updateUserById) — 임의 URL 거부',
-    () => userService.updateUserById('self1', { thumbnail_url: 'https://evil.example.com/x.png' }),
+    'PATCH /users/:id(userService.updateUserById) — 임의 URL 거부(본인 요청, RLY-20260806-054 인가 통과 후)',
+    () => userService.updateUserById('self1', { thumbnail_url: 'https://evil.example.com/x.png' }, 'self1'),
     { statusCode: 400, errorCode: 'INVALID_IMAGE_REFERENCE' }
   );
   await expectAuthzOk(
