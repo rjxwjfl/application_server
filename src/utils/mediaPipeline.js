@@ -10,7 +10,7 @@
  * sharp는 읽기→변환→쓰기 파이프라인이라 메타데이터만 남기고 픽셀 데이터를 원본과
  * 바이트 단위로 동일하게 유지할 방법이 없다(항상 재인코딩) — "원본 보존·압축·인코딩
  * 없음"(CHANGELOG:278)과 정면 충돌한다(진단 및 판정: 047 투자 보고서, 팀리드 승인).
- * 그래서 sharp 대신 포맷별 "세그먼트/청크 제거" 도구를 쓴다 — 둘 다 픽셀 데이터를
+ * 그래서 sharp 대신 포맷별 "세그먼트/청크 제거" 도구를 쓴다 — 셋 다 픽셀 데이터를
  * 감싸는 봉투만 열어 메타데이터 블록을 도려내고 나머지 바이트는 그대로 둔다:
  *   - JPEG: `piexifjs`(Python piexif 포트, 순수 JS) — EXIF APP1 세그먼트 전체를
  *     찾아 제거한다. GPS·기기 모델·촬영 시각·임베디드 썸네일이 전부 이 APP1
@@ -21,12 +21,26 @@
  *     타입, PNG 스펙상 픽셀 데이터가 아니다)만 걸러내고 `IHDR`·`IDAT`·`IEND`
  *     등은 그대로 둔다. `iCCP`(색상 프로파일)는 프라이버시 데이터가 아니라
  *     제거 목록에서 뺐다 — 지우면 색이 달라져 보일 수 있다.
- * 실측(node -e 스모크 테스트, 보고서 참조): 두 도구 모두 처리 전/후 raw 픽셀
- * 버퍼가 완전히 동일함을 확인했다(sharp().raw().toBuffer() 비교).
+ *   - WebP(RLY-20260806-056): RIFF는 청크끼리 서로의 파일 오프셋을 참조하지 않는
+ *     평면 구조라(JPEG·PNG와 같은 이유로 안전) `EXIF` 청크만 얕게 잘라낸다 —
+ *     새 라이브러리 없이 손으로 RIFF를 훑는다(PNG의 chunk 분해·재조립과 동일 규모).
+ *     libvips/sharp가 쓰는 WebP EXIF 청크 payload를 실측하니 `"Exif\x00\x00"` 접두사
+ *     + TIFF 헤더로 **JPEG APP1 payload와 완전히 같은 포맷**이었다 — 그래서 새 TIFF
+ *     파서를 짜지 않고 위 JPEG 스텝과 **같은 `piexifjs` 호출**을 그대로 재사용한다
+ *     (`piexif.load()`가 `"Exif"`로 시작하는 문자열을 JPEG 래핑 없이 직접 받는 분기가
+ *     있다 — 소스 확인). 픽셀 청크(`VP8`/`VP8L`/`ALPH`)는 전혀 읽지도 쓰지도 않는다.
+ *     EXIF 청크는 완전히 지우지 않고 항상 남긴다(JPEG 스텝과 동일 이유 — Orientation만
+ *     있는 최소 청크라도 유지) — 그래서 `VP8X` 청크의 "Exif 있음" 플래그를 건드릴
+ *     필요가 없다(청크가 사라지는 경우가 없으므로).
+ * 실측(node -e 스모크 테스트, 보고서 참조): 세 도구 전부 처리 전/후 raw 픽셀
+ * 버퍼가 완전히 동일함을 확인했다(sharp().raw().toBuffer() 비교, WebP는 VP8/VP8L
+ * 청크 바이트 자체가 손대지 않으므로 raw 비교보다 더 강한 보장 — 청크 단위 동일성).
  *
- * **처리 못 하는 이미지 포맷**(WebP·HEIC/HEIF·TIFF·BMP 등)은 재인코딩하지 않고
+ * **처리 못 하는 이미지 포맷**(HEIC/HEIF·TIFF·BMP 등)은 재인코딩하지 않고
  * 원본 그대로 둔다(EXIF 미제거) — team-lead 지시("화질을 깎느니 그 포맷의 EXIF를
- * 남기는 편이 낫다"). 호출부가 이 사실을 반드시 로그로 남긴다.
+ * 남기는 편이 낫다"). 호출부가 이 사실을 반드시 로그로 남긴다. 다만 RLY-20260806-056
+ * 판정으로 HEIC/HEIF는 애초에 `ALLOWED_IMAGE_MIME_TYPES`에 없어 presign 단계에서
+ * 거부되므로(안드로이드 미지원 포맷), 이 파일까지 도달하는 경우가 사실상 없다.
  * =========================================
  */
 
@@ -43,7 +57,27 @@ const ffmpegPath = require('ffmpeg-static');
 const PNG_METADATA_CHUNK_TYPES = new Set(['eXIf', 'tEXt', 'zTXt', 'iTXt', 'tIME']);
 
 // Step3이 세그먼트/청크 단위로 EXIF를 제거할 수 있는 이미지 포맷 — 나머지는 미지원(원본 유지).
-const EXIF_STRIPPABLE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
+const EXIF_STRIPPABLE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+// RLY-20260806-056 — presign에서 대조하는 이미지 허용 목록. 문서(media.md §3-3)에 세부
+// MIME 목록이 없어 User 판정 기준으로 정했다: "안드로이드가 네이티브로 여는 포맷을
+// 허용한다 — 그 집합은 애플에서도 열린다(역은 성립하지 않는다)". JPEG·PNG·WebP·GIF는
+// 안드로이드 BitmapFactory가 기본 지원하는 포맷이라 허용. HEIC/HEIF는 애플 전용
+// 포맷(안드로이드 미지원)이라 거부 — "검증 불가능해서"가 아니라 "안드로이드가 못 열어서"가
+// 근거다(검증 가능해져도 받을 이유가 없다). BMP는 안드로이드가 열지만, 클라가 이미
+// presign 이전에 항상 WebP로 변환해 보내(media_compression_service.dart:67 — bmp도
+// _isImagePath에 포함돼 compress() 대상) 서버가 image/bmp를 정상 경로로 받을 일이
+// 없어 목록에 넣지 않았다 — 판단이 안 서면 넣지 않는다(team-lead 지시), 필요해지면 별도 판정.
+// WebP는 059(클라 출력 JPEG/PNG 전환) 병합 이후에도 남긴다 — "059 병합 전 클라가 그것을
+// 보내서"만이 아니라 "안드로이드 네이티브라 규칙상 정당"하다는 것이 근거다(team-lead 확인).
+//
+// ⚠️ GIF는 목록에 있지만(team-lead 최종 지시로 포함) 별도 클라 버그를 보고서(RLY-20260806-056)에
+// 남겨뒀다 — 클라가 GIF만 압축 대상에서 빠뜨려(`_isImagePath`에 'gif' 없음) 실제로는 원본 GIF
+// 바이트를 보내면서 content_type은 무조건 'image/webp'로 잘못 선언한다(storage_repository.dart:
+// 107-116) — 그래서 지금은 이 목록에 gif가 있어도 정상 경로로 image/gif가 오지 않을 수 있다
+// (Worker의 MIME 위변조 검사가 비동기로 거부한다). 서버 목록은 정책대로 넣었고, 클라 버그
+// 자체는 클라이언트 코드라 여기서 고치지 않는다 — 별건.
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 /**
  * Step1 — 매직 바이트로 실제 MIME을 감지한다(media.md:221-223, 문서 예시 지정: file-type).
@@ -96,6 +130,99 @@ function stripPngExif(buffer) {
 }
 
 /**
+ * WebP(RIFF)를 청크 단위로 훑는다. FourCC(4B) + size(4B LE) + payload(size B) + 홀수면
+ * 패딩 1B. RIFF는 청크끼리 서로의 파일 오프셋을 참조하지 않는 평면 구조라(HEIC의 `iloc`처럼
+ * 남이 가리키는 절대 오프셋이 없다) 순서대로 훑기만 하면 된다 — PNG 청크 훑기와 같은 이유로
+ * 안전하다.
+ * @param {Buffer} buffer - `RIFF....WEBP` 로 시작하는 전체 파일 버퍼.
+ * @returns {{ fourCC: string, data: Buffer }[]}
+ */
+function parseWebpChunks(buffer) {
+  const chunks = [];
+  let offset = 12; // 'RIFF'(4) + size(4) + 'WEBP'(4) 다음부터.
+  while (offset + 8 <= buffer.length) {
+    const fourCC = buffer.toString('ascii', offset, offset + 4);
+    const size = buffer.readUInt32LE(offset + 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + size;
+    if (dataEnd > buffer.length) break; // 잘렸거나 손상된 파일 — 남은 바이트는 무시하고 훑기 종료.
+    chunks.push({ fourCC, data: buffer.slice(dataStart, dataEnd) });
+    offset = dataEnd + (size % 2); // 청크 payload는 짝수 바이트로 패딩된다.
+  }
+  return chunks;
+}
+
+/**
+ * `parseWebpChunks`가 훑은 청크 목록을 다시 유효한 WebP 파일 버퍼로 조립한다.
+ * @param {{ fourCC: string, data: Buffer }[]} chunks
+ * @returns {Buffer}
+ */
+function buildWebpBuffer(chunks) {
+  const parts = [];
+  for (const { fourCC, data } of chunks) {
+    const header = Buffer.alloc(8);
+    header.write(fourCC, 0, 4, 'ascii');
+    header.writeUInt32LE(data.length, 4);
+    parts.push(header, data);
+    if (data.length % 2 === 1) parts.push(Buffer.from([0]));
+  }
+  const body = Buffer.concat(parts);
+  const riffHeader = Buffer.alloc(12);
+  riffHeader.write('RIFF', 0, 4, 'ascii');
+  riffHeader.writeUInt32LE(body.length + 4, 4); // RIFF size = 이후 전체 바이트('WEBP' 4B 포함).
+  riffHeader.write('WEBP', 8, 4, 'ascii');
+  return Buffer.concat([riffHeader, body]);
+}
+
+/**
+ * Step3 — WebP의 EXIF 청크를 선택적으로 제거한다(RLY-20260806-056). VP8/VP8L/ALPH(픽셀) 청크는
+ * 읽지도 쓰지도 않는다 — EXIF 청크만 찾아 교체하고 나머지 청크는 훑은 그대로 재조립한다.
+ *
+ * libvips/sharp가 쓰는 WebP EXIF payload를 실측하니 `"Exif\x00\x00"` + TIFF 헤더로 JPEG APP1
+ * payload와 완전히 같은 포맷이었다 — `stripJpegExif`와 동일한 piexifjs 호출(Orientation만
+ * 남기고 GPS·Make·Model·DateTimeOriginal·DateTimeDigitized·임베디드 썸네일 제거)을 그대로
+ * 재사용한다. EXIF 청크는 완전히 지우지 않고 항상 남긴다(Orientation만 있어도) — 그래서
+ * `VP8X`의 "Exif 있음" 플래그를 건드릴 필요가 없다.
+ *
+ * `"Exif\x00\x00"` 접두사가 없는(TIFF 헤더로 바로 시작하는) 인코더의 산출물도 있을 수 있어
+ * 접두사 유무를 감지해 없으면 붙였다가 dump 후 다시 뗀다 — 원래 형태를 보존한다.
+ * @param {Buffer} buffer - 전체 WebP 파일 버퍼.
+ * @returns {{ buffer: Buffer, applied: boolean, reason?: string }}
+ */
+function stripWebpExif(buffer) {
+  const chunks = parseWebpChunks(buffer);
+  const exifIndex = chunks.findIndex((c) => c.fourCC === 'EXIF');
+  if (exifIndex === -1) {
+    return { buffer, applied: true }; // 지울 EXIF 청크가 없다 — 이미 깨끗함.
+  }
+
+  const raw = chunks[exifIndex].data;
+  const hasPrefix = raw.length >= 6 && raw.toString('binary', 0, 6) === 'Exif\x00\x00';
+  const loadInput = hasPrefix ? raw.toString('binary') : 'Exif\x00\x00' + raw.toString('binary');
+
+  let exifDict;
+  try {
+    exifDict = piexif.load(loadInput);
+  } catch (err) {
+    // 파싱 불가한 EXIF 청크 — 재인코딩·손상 위험을 감수하지 않고 원본을 그대로 둔다
+    // (047의 "처리 못 하면 원본 유지" 원칙과 동일).
+    return { buffer, applied: false, reason: `webp_exif_unparseable:${err.message}` };
+  }
+
+  const orientation = exifDict['0th'] ? exifDict['0th'][piexif.ImageIFD.Orientation] : undefined;
+  const newZeroth = {};
+  if (orientation !== undefined) newZeroth[piexif.ImageIFD.Orientation] = orientation;
+
+  const sanitizedDict = { '0th': newZeroth, Exif: {}, GPS: {}, Interop: {}, '1st': {}, thumbnail: null };
+  const dumpedBinary = piexif.dump(sanitizedDict); // 항상 "Exif\x00\x00" + TIFF로 시작(piexifjs 고정 헤더).
+  const newPayload = Buffer.from(hasPrefix ? dumpedBinary : dumpedBinary.slice(6), 'binary');
+
+  const newChunks = chunks.slice();
+  newChunks[exifIndex] = { fourCC: 'EXIF', data: newPayload };
+  return { buffer: buildWebpBuffer(newChunks), applied: true };
+}
+
+/**
  * Step3 디스패처 — 지원 포맷이면 세그먼트/청크 단위로 제거, 아니면 원본을 그대로 반환한다
  * (재인코딩 안 함 — team-lead 지시).
  * @param {Buffer} buffer
@@ -108,6 +235,9 @@ function stripExif(buffer, detectedMime) {
   }
   if (detectedMime === 'image/png') {
     return { buffer: stripPngExif(buffer), applied: true };
+  }
+  if (detectedMime === 'image/webp') {
+    return stripWebpExif(buffer);
   }
   return { buffer, applied: false, reason: `unsupported_format:${detectedMime || 'unknown'}` };
 }
@@ -157,8 +287,12 @@ module.exports = {
   stripExif,
   stripJpegExif,
   stripPngExif,
+  stripWebpExif,
+  parseWebpChunks,
+  buildWebpBuffer,
   generateImageThumbnail,
   generateVideoPoster,
   EXIF_STRIPPABLE_MIME_TYPES,
   PNG_METADATA_CHUNK_TYPES,
+  ALLOWED_IMAGE_MIME_TYPES,
 };
