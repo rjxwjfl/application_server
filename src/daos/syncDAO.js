@@ -209,9 +209,18 @@ class SyncDAO {
     // 건다(RLY-20260806-025 방어선) — 델타/tombstone 브랜치(첫 SELECT, oldDIds 스코프)에 걸면 캘린더
     // cascade로 e.deleted_at이 막 세팅된 이벤트 자체가 tombstone으로 못 나간다(다른 멤버가 삭제를
     // 통보받지 못함). 캘린더가 삭제됐다는 사실은 이벤트 자신의 deleted_at 필드로 이미 실린다.
+    //
+    // es.deleted_at IS NULL(LEFT JOIN의 ON절)은 반대로 두 브랜치 모두에 건다 — 이건 "행을 숨기는"
+    // 필터가 아니라 "이 이벤트에 어떤 section_id를 붙일지" 결정하는 필터라 델타/스냅샷 구분이 없다.
+    // WHERE가 아니라 ON에 두는 이유: WHERE에 두면 LEFT JOIN이 사실상 INNER JOIN이 되어 섹션에 안
+    // 붙은 이벤트(es 매칭 자체가 없는 행)가 결과에서 통째로 사라진다 — ON에 두면 event_sections에
+    // 삭제된 링크만 있어도(또는 아예 없어도) 이벤트 행 자체는 살아있고 section_id만 NULL이 된다
+    // (RLY-20260806-025 후속 — RLY-20260806-029가 EventDAO.removeSection을 hard DELETE에서 soft
+    // UPDATE로 바꾸면서 이 경로에 실제로 삭제된 event_sections 행이 생기기 시작한다. 지금은
+    // removeSection 호출부가 0건이라 무해했다).
     const query = `
       SELECT e.*, es.section_id FROM events e
-      LEFT JOIN event_sections es ON es.event_id = e.id
+      LEFT JOIN event_sections es ON es.event_id = e.id AND es.deleted_at IS NULL
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (c.binder_id = ANY($1::uuid[]) OR e.calendar_id = ANY($2::uuid[]))
         AND e.updated_at > $3
@@ -219,7 +228,7 @@ class SyncDAO {
       UNION ALL
 
       SELECT e.*, es.section_id FROM events e
-      LEFT JOIN event_sections es ON es.event_id = e.id
+      LEFT JOIN event_sections es ON es.event_id = e.id AND es.deleted_at IS NULL
       JOIN calendars c ON e.calendar_id = c.id
       WHERE (c.binder_id = ANY($4::uuid[]) OR e.calendar_id = ANY($5::uuid[]))
         AND e.deleted_at IS NULL

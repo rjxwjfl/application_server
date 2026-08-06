@@ -448,6 +448,91 @@ async function testTombstoneDeliveredToOtherMember() {
 
   check('③ 삭제된 이벤트가 다른(여전히 멤버인) 멤버 payload에 deleted_at 실린 채 도착', eventRows.some((r) => r.id === 'evDeleted' && !!r.deleted_at));
   check('③ 삭제된 태스크가 다른(여전히 멤버인) 멤버 payload에 deleted_at 실린 채 도착', taskRows.some((r) => r.id === 'tkDeleted' && !!r.deleted_at));
+
+  // ⚠️ 범위 밖(레드로 남기지 않음, 주석으로만 경계 표시 — team-lead 판정, RLY-20260806-025 후속):
+  // 위 ③은 "그 바인더 멤버십을 여전히 유지 중인 다른 멤버"(oldDIds에 이 바인더가 남아있는 경우)만
+  // 검증한다. "삭제·강퇴로 이 바인더 멤버십을 동시에 잃은 사람"에게는 이 델타 브랜치 자체가 스코프
+  // 밖이라(ctx.oldDIds = prevToken.d_ids ∩ currDIds라서 탈락한 바인더는 oldDIds에서도 빠짐) 자식
+  // tombstone이 전달되지 않는다 — 삭제(deleteBinder)뿐 아니라 강퇴(kickBinderMember)도 동일하게
+  // 영향받는다. section의 purge_section_ids와 대칭되는 새 reconciliation 파이프라인이 필요한 별건
+  // 결손이라 이 스위트에 실패하는 단언으로 남기지 않는다 — 후속 Task 설계 시 이 자리에 테스트를
+  // 추가하면 된다.
+}
+
+// ── event_sections LEFT JOIN deleted_at 방어 (RLY-20260806-025 후속, 029 연동) ──────────────
+// EventDAO.removeSection이 hard DELETE→soft UPDATE로 바뀌면(RLY-20260806-029) event_sections에
+// 삭제된 링크 행이 실제로 생기기 시작한다. getEventsDeltaFull의 LEFT JOIN이 es.deleted_at을
+// 확인 안 하면(ON절이든 WHERE절이든 아예 없으면) 옛 section_id가 계속 실려 나간다 — 그리고 만약
+// 실수로 WHERE절에 넣으면 LEFT JOIN이 사실상 INNER JOIN이 되어 "링크가 있었다가 지워진" 이벤트
+// 자체가 델타에서 통째로 사라진다(둘 다 실제로 만든 뒤 검증했다 — 구현 보고서 참조).
+async function testEventSectionsLeftJoinExcludesDeletedLink() {
+  const NOW = new Date();
+  const calendars = { cal1: { id: 'cal1', binder_id: 'b1', deleted_at: null } };
+  const events = [
+    // 예전엔 secOld에 연결돼 있었지만 그 링크가 soft-delete됨(029가 만들 상태) — 다른 활성 링크 없음.
+    { id: 'evUnlinked', calendar_id: 'cal1', deleted_at: null, updated_at: NOW, created_at: NOW },
+    // 한 번도 섹션에 연결된 적 없음.
+    { id: 'evNeverLinked', calendar_id: 'cal1', deleted_at: null, updated_at: NOW, created_at: NOW },
+    // 지금도 살아있는 링크를 가짐(양성 대조).
+    { id: 'evActiveLinked', calendar_id: 'cal1', deleted_at: null, updated_at: NOW, created_at: NOW },
+  ];
+  const eventSections = [
+    { event_id: 'evUnlinked', section_id: 'secOld', deleted_at: 'T_REMOVED' },
+    { event_id: 'evActiveLinked', section_id: 'secNew', deleted_at: null },
+  ];
+
+  // LEFT JOIN + 그 뒤 JOIN calendars + WHERE를 실제 SQL 텍스트에서 그대로 재현한다 — ON절에
+  // es.deleted_at IS NULL이 있는지, WHERE절에 있는지를 각각 실제 텍스트 위치로 판정한다.
+  function makePool() {
+    return {
+      async query(sql, params) {
+        const s = norm(sql);
+        const branches = s.split('UNION ALL');
+        const [oldDIds, oldCIds, oldTs, newDIds, newCIds, calWindowFrom] = params;
+
+        function evalBranch(branchText, binderIds, calIds) {
+          const joinToWhere = branchText.split('JOIN calendars c ON e.calendar_id = c.id');
+          const onClause = joinToWhere[0]; // "LEFT JOIN event_sections es ON ..." 부분
+          const whereClause = joinToWhere[1] || '';
+          const onHasGuard = onClause.includes('es.deleted_at IS NULL');
+          const whereHasGuard = whereClause.includes('es.deleted_at IS NULL');
+
+          return events
+            .filter((e) => calendars[e.calendar_id] && binderIds.includes(calendars[e.calendar_id].binder_id))
+            .map((e) => {
+              const links = eventSections.filter((es) => es.event_id === e.id);
+              let joined; // 실제로 매치된 es 행(없으면 undefined = NULL-fallback)
+              if (onHasGuard) {
+                joined = links.find((l) => !l.deleted_at);
+              } else {
+                joined = links[0]; // ON절에 필터가 없으면 첫 매치(soft-delete 여부 무관)가 그대로 join된다
+              }
+              if (whereHasGuard && joined && joined.deleted_at) {
+                return null; // 매치된 행이 WHERE에서 걸러짐 — LEFT JOIN이어도 이 이벤트 행 자체가 사라진다
+              }
+              return { id: e.id, section_id: joined ? joined.section_id : null };
+            })
+            .filter(Boolean);
+        }
+
+        const deltaRows = evalBranch(branches[0], oldDIds, oldCIds);
+        const snapshotRows = branches[1] ? evalBranch(branches[1], newDIds, newCIds) : [];
+        return { rows: [...deltaRows, ...snapshotRows] };
+      },
+    };
+  }
+
+  const ctx = {
+    oldDIds: ['b1'], oldCIds: [], oldTs: new Date(NOW.getTime() - 60000),
+    newDIds: [], newCIds: [], calWindowFrom: new Date(0),
+  };
+  const rows = await SyncDAO.getEventsDeltaFull(makePool(), ctx);
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+
+  check('⑨ 링크가 삭제된 이벤트(evUnlinked)는 델타에 남아있음(사라지지 않음)', !!byId.evUnlinked);
+  check('⑨ 링크가 삭제된 이벤트(evUnlinked)는 옛 section_id(secOld)를 싣지 않음', byId.evUnlinked && byId.evUnlinked.section_id === null);
+  check('⑩ 한 번도 연결 안 된 이벤트(evNeverLinked)는 델타에서 사라지지 않음', !!byId.evNeverLinked);
+  check('⑨ 활성 링크가 있는 이벤트(evActiveLinked)는 그 section_id(secNew)를 정상적으로 실음(양성 대조)', byId.evActiveLinked && byId.evActiveLinked.section_id === 'secNew');
 }
 
 // ── ⑧ 태스크 델타(신규 접근 스냅샷 브랜치)가 캘린더의 deleted_at을 확인한다 ─────
@@ -500,6 +585,7 @@ async function run() {
   await testBulkInstancesProcessedAsSet();
   await testSyncExcludesDeletedBinder();
   await testTombstoneDeliveredToOtherMember();
+  await testEventSectionsLeftJoinExcludesDeletedLink();
   await testTaskSnapshotChecksCalendarDeletedAt();
 
   console.log(`\n[deleteCascadeRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
