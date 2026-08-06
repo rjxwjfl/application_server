@@ -283,7 +283,10 @@ class EventService {
         throw new ForbiddenError('편집자 이상만 타인을 추가할 수 있습니다');
       const target = await BinderDAO.getMember(client, instance.binder_id, user_id);
       if (!target || target.deleted_at) throw new BadRequestError('바인더 멤버만 추가할 수 있습니다');
-      const result = await EventDAO.addParticipant(client, instance_id, user_id, context.sender_id);
+      // RLY-20260806-031 — event_participants에 inviter_id가 없어(2026-07-20 결정) DAO
+      // 시그니처에서 뺐다. "누가 초대했는지"는 audit_logs/activity_feeds의 actor_id가 이미
+      // 담당한다(이 함수 하단 eventBus emit의 sender_id).
+      const result = await EventDAO.addParticipant(client, instance_id, user_id);
       return { result, binder_id: instance.binder_id };
     });
 

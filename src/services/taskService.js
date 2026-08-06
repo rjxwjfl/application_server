@@ -222,7 +222,8 @@ class TaskService {
         throw new ForbiddenError('편집자 이상만 타인을 추가할 수 있습니다');
       const target = await BinderDAO.getMember(client, instance.binder_id, data.user_id);
       if (!target || target.deleted_at) throw new BadRequestError('바인더 멤버만 추가할 수 있습니다');
-      const participant = await TaskDAO.addParticipant(client, instanceId, data.user_id, context.sender_id);
+      // RLY-20260806-031 — eventService.addParticipant와 동일 사유(inviter_id 컬럼 없음).
+      const participant = await TaskDAO.addParticipant(client, instanceId, data.user_id);
       await TaskDAO.reevaluateInstanceCompletion(client, instanceId);
       return { participant, binder_id: instance.binder_id };
     });

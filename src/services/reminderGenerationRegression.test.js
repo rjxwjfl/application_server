@@ -134,6 +134,30 @@ assertColumnsExist('TaskDAO.createTask/updateTask', 'tasks', ['reminder_offsets'
   );
 })();
 
+// event_participants·task_participants — RLY-20260806-031 결함 1: inviter_id는 실 컬럼이
+// 아니다(2026-07-20 결정, schema.md changelog — "참가자 테이블의 초대자 추적은 원 설계에
+// 없던 오염"). DAO가 그 컬럼을 INSERT/UPDATE/RETURNING에서 참조하면 참가자를 포함한
+// 일정·할일 생성이 전부 SQL 에러다(이 결함이 여기까지 온 이유이기도 하다 — mock DB는 컬럼
+// 존재를 검증 못 한다). binder_invitations.inviter_id(초대 링크 생성자)는 별개 엔티티라 대상이
+// 아니다. src/daos/allDaoSchemaColumnRegression.test.js(RLY-20260806-035)도 이 두 파일을
+// EXCLUDED_FILES로 잡아 두고 이 결함을 알고 있다 — 이 fix가 병합되면 그 목록에서 빠진다.
+assertColumnsExist('EventDAO 참가자', 'event_participants', [
+  'instance_id', 'user_id', 'state', 'memo', 'created_at', 'updated_at', 'deleted_at',
+]);
+assertColumnsAbsent('EventDAO 참가자', 'event_participants', ['inviter_id']);
+assertSourceDoesNotReference('EventDAO', 'src/daos/eventDao.js', ['inviter_id']);
+
+assertColumnsExist('TaskDAO 참가자', 'task_participants', [
+  'instance_id', 'user_id', 'state', 'memo', 'completed_at', 'created_at', 'updated_at', 'deleted_at',
+]);
+assertColumnsAbsent('TaskDAO 참가자', 'task_participants', ['inviter_id']);
+assertSourceDoesNotReference('TaskDAO', 'src/daos/taskDAO.js', ['inviter_id']);
+
+// 서비스 레이어도 함께 확인 — eventService.js·taskService.js가 DAO에 inviter_id를 실어
+// 넘기던 구 호출부(context.sender_id를 invitedBy로 전달)를 정리했는지.
+assertSourceDoesNotReference('EventService', 'src/services/eventService.js', ['inviter_id']);
+assertSourceDoesNotReference('TaskService', 'src/services/taskService.js', ['inviter_id']);
+
 // ════════════════════════════════════════════════════════════════════════
 // 서비스 레이어 — mock DB로 실제 코드 구동
 // ════════════════════════════════════════════════════════════════════════
@@ -144,11 +168,16 @@ const NOW = new Date().toISOString();
 const db = {
   binders: { b1: { id: 'b1', name: 'B', description: null, image_url: null, thumbnail_url: null, member_count: 1, last_activity_at: NOW, created_at: NOW, updated_at: NOW, deleted_at: null } },
   calendars: { cal1: { id: 'cal1', binder_id: 'b1', title: 'C', description: null, color: 0, is_public: false, created_at: NOW, updated_at: NOW, deleted_at: null } },
-  binder_members: { 'b1:author1': { binder_id: 'b1', user_id: 'author1', role: 0, notification_level: 1, nickname_in_binder: null, joined_at: NOW, deleted_at: null } },
+  binder_members: {
+    'b1:author1': { binder_id: 'b1', user_id: 'author1', role: 0, notification_level: 1, nickname_in_binder: null, joined_at: NOW, deleted_at: null },
+    'b1:user2': { binder_id: 'b1', user_id: 'user2', role: 3, notification_level: 1, nickname_in_binder: null, joined_at: NOW, deleted_at: null },
+  },
   events: {},
   event_instances: {},
+  event_participants: {}, // key: `${instance_id}:${user_id}` — RLY-20260806-031
   tasks: {},
   task_instances: {},
+  task_participants: {}, // key: `${instance_id}:${user_id}` — RLY-20260806-031
   special_days: {},
   reminders: {}, // key: id
   user_settings: { author1: { user_id: 'author1', timezone: 'Asia/Seoul' } },
@@ -235,6 +264,38 @@ async function mockQuery(sql, params = []) {
     if (!inst || inst.event_id !== eventId || inst.deleted_at || !ev || ev.deleted_at || !cal || cal.deleted_at) return { rows: [] };
     return { rows: [{ id: inst.id, deleted_at: inst.deleted_at, calendar_id: ev.calendar_id, author_id: ev.author_id, binder_id: cal.binder_id, reminder_offsets: ev.reminder_offsets }] };
   }
+  // EventDAO.findInstanceById — updateParticipantState 경로용(join 없는 단독 조회).
+  if (s.startsWith('SELECT id, event_id, instance_type, parent_id') && s.includes('FROM event_instances')) {
+    const row = db.event_instances[params[0]];
+    return { rows: row && !row.deleted_at ? [row] : [] };
+  }
+
+  // event_participants — RLY-20260806-031 결함 1 회귀용(inviter_id 컬럼 없음).
+  // addParticipantRaw: INSERT INTO event_participants (instance_id, user_id, state, memo, ...)
+  if (s.startsWith('INSERT INTO event_participants (instance_id, user_id, state, memo')) {
+    const [instance_id, user_id, state, memo] = params;
+    const key = `${instance_id}:${user_id}`;
+    db.event_participants[key] = { instance_id, user_id, state, memo, deleted_at: null };
+    return { rows: [] };
+  }
+  // addParticipant: INSERT INTO event_participants (instance_id, user_id, state, created_at, ...) VALUES ($1,$2,1,...)
+  if (s.startsWith('INSERT INTO event_participants (instance_id, user_id, state, created_at')) {
+    const [instance_id, user_id] = params;
+    const key = `${instance_id}:${user_id}`;
+    db.event_participants[key] = { instance_id, user_id, state: 1, memo: null, deleted_at: null };
+    return { rows: [{ instance_id, user_id, state: 1 }] };
+  }
+  if (s.startsWith('SELECT instance_id, user_id, state, memo, created_at, updated_at, deleted_at') && s.includes('FROM event_participants')) {
+    const [instanceId, userId] = params;
+    const row = db.event_participants[`${instanceId}:${userId}`];
+    return { rows: row && !row.deleted_at ? [row] : [] };
+  }
+  if (s.startsWith('UPDATE event_participants') && s.includes('SET state = $1')) {
+    const [state, instanceId, userId] = params;
+    const row = db.event_participants[`${instanceId}:${userId}`];
+    if (row) { row.state = state; row.updated_at = NOW; }
+    return { rows: [] };
+  }
   if (s.startsWith('UPDATE event_instances') && s.includes('SET summary')) {
     const [summary, description, color, locations, is_all_day, start_date, end_date, instanceId] = params;
     const row = db.event_instances[instanceId];
@@ -302,6 +363,45 @@ async function mockQuery(sql, params = []) {
     if (!inst || inst.task_id !== taskId || inst.deleted_at || !tk || tk.deleted_at || !cal || cal.deleted_at) return { rows: [] };
     return { rows: [{ id: inst.id, completion_rule: inst.completion_rule, deleted_at: inst.deleted_at, calendar_id: tk.calendar_id, author_id: tk.author_id, binder_id: cal.binder_id, reminder_offsets: tk.reminder_offsets }] };
   }
+
+  // task_participants — RLY-20260806-031 결함 1 회귀용(inviter_id 컬럼 없음).
+  // addParticipantRaw: INSERT INTO task_participants (instance_id, user_id, state, created_at, ...) VALUES ($1,$2,$3,...)
+  if (s.startsWith('INSERT INTO task_participants') && s.includes('VALUES ($1, $2, $3,')) {
+    const [instance_id, user_id, state] = params;
+    const key = `${instance_id}:${user_id}`;
+    db.task_participants[key] = { instance_id, user_id, state, memo: null, completed_at: null, deleted_at: null };
+    return { rows: [] };
+  }
+  // addParticipant: INSERT INTO task_participants (instance_id, user_id, state, created_at, ...) VALUES ($1,$2,0,...)
+  if (s.startsWith('INSERT INTO task_participants') && s.includes('VALUES ($1, $2, 0,')) {
+    const [instance_id, user_id] = params;
+    const key = `${instance_id}:${user_id}`;
+    const row = { instance_id, user_id, state: 0, memo: null, completed_at: null, deleted_at: null };
+    db.task_participants[key] = row;
+    return { rows: [row] };
+  }
+  if (s.startsWith('SELECT instance_id, user_id, state, memo, completed_at, deleted_at') && s.includes('FROM task_participants')) {
+    const [instanceId, userId] = params;
+    const row = db.task_participants[`${instanceId}:${userId}`];
+    return { rows: row ? [row] : [] };
+  }
+  if (s.startsWith('UPDATE task_participants') && s.includes('SET state = $3')) {
+    const [instanceId, userId, state, memo] = params;
+    const row = db.task_participants[`${instanceId}:${userId}`];
+    if (row) {
+      row.state = state;
+      row.memo = memo;
+      row.completed_at = state === 3 ? NOW : null;
+      row.updated_at = NOW;
+    }
+    return { rows: row ? [row] : [] };
+  }
+  // TaskDAO.reevaluateInstanceCompletion — 이 회귀의 관심사가 아니므로(참가자 CRUD만 검증)
+  // no-op으로 흡수한다.
+  if (s.startsWith('WITH counts AS')) {
+    return { rows: [{ completed_at: null }] };
+  }
+
   if (s.startsWith('UPDATE task_instances') && s.includes('SET summary')) {
     const [summary, description, priority, locations, is_all_day, completion_rule, start_date, due_date, instanceId] = params;
     const row = db.task_instances[instanceId];
@@ -545,6 +645,57 @@ async function run() {
     reminder_offsets: [],
   }, ctx));
   check('빈 reminder_offsets는 리마인더 0건', findReminders(2, sd2.id).length === 0);
+
+  // ======================= RLY-20260806-031 (결함 1 — 참가자 inviter_id) =======================
+
+  // ⑦ 참가자를 포함한 이벤트 생성이 성공한다 — 존재하지 않는 inviter_id 컬럼 INSERT로
+  //   참가자 포함 생성이 전부 SQL 에러였던 결함의 직접 재현.
+  const evWithParticipant = await expectOk('⑦ 참가자 포함 이벤트 생성', () => EventService.createEvent({
+    id: 'ev-p1', calendar_id: 'cal1', author_id: 'author1', summary: '기획 회의',
+    instances: [
+      {
+        id: 'evi-p1', original_date: '2026-09-10T05:00:00Z', start_date: '2026-09-10T05:00:00Z', end_date: '2026-09-10T06:00:00Z',
+        participants: [{ user_id: 'author1', state: 0 }, { user_id: 'user2', state: 1 }],
+      },
+    ],
+  }, ctx));
+  check('⑦ 이벤트 생성 성공(과거: inviter_id 컬럼 없음 SQL 에러)', !!evWithParticipant);
+  check('⑦ 참가자 2명이 저장됨', !!db.event_participants['evi-p1:author1'] && !!db.event_participants['evi-p1:user2']);
+
+  // ⑧ 태스크도 동일하게 참가자 포함 생성이 성공한다.
+  const tkWithParticipant = await expectOk('⑧ 참가자 포함 태스크 생성', () => TaskService.createTask({
+    id: 'tk-p1', calendar_id: 'cal1', summary: '검수',
+    instances: [
+      {
+        id: 'tki-p1', original_date: '2026-09-11T09:00:00Z', due_date: '2026-09-11T09:00:00Z',
+        participants: [{ user_id: 'author1', state: 0 }],
+      },
+    ],
+  }, ctx));
+  check('⑧ 태스크 생성 성공', !!tkWithParticipant);
+  check('⑧ 참가자 1명이 저장됨', !!db.task_participants['tki-p1:author1']);
+
+  // ⑨ 참가자 상태 갱신이 성공한다(생성 → 단건 추가 → 본인 RSVP/상태 전이 왕복).
+  const evForState = await expectOk('⑨ 상태 갱신용 이벤트 생성(참가자 없이)', () => EventService.createEvent({
+    id: 'ev-p2', calendar_id: 'cal1', author_id: 'author1', summary: '워크숍',
+    instances: [{ id: 'evi-p2', original_date: '2026-09-12T05:00:00Z', start_date: '2026-09-12T05:00:00Z', end_date: '2026-09-12T06:00:00Z' }],
+  }, ctx));
+  check('⑨ 이벤트 생성 성공', !!evForState);
+  await expectOk('⑨ 이벤트 참가자 추가(user2, invite)', () => EventService.addParticipant('ev-p2', 'evi-p2', { user_id: 'user2' }, ctx));
+  check('⑨ 추가 직후 상태는 invite(1)', db.event_participants['evi-p2:user2']?.state === 1);
+  const ctxUser2 = { sender_id: 'user2', device_uuid: 'dev1' };
+  await expectOk('⑨ 본인 RSVP: invite → accept', () => EventService.updateParticipantState('evi-p2', 'user2', { state: 3 }, ctxUser2));
+  check('⑨ 상태 갱신 반영됨(accept=3)', db.event_participants['evi-p2:user2']?.state === 3);
+
+  const tkForState = await expectOk('⑨ 상태 갱신용 태스크 생성(참가자 없이)', () => TaskService.createTask({
+    id: 'tk-p2', calendar_id: 'cal1', summary: '검토',
+    instances: [{ id: 'tki-p2', original_date: '2026-09-13T09:00:00Z', due_date: '2026-09-13T09:00:00Z' }],
+  }, ctx));
+  check('⑨ 태스크 생성 성공', !!tkForState);
+  await expectOk('⑨ 태스크 참가자 추가(user2, ready)', () => TaskService.addParticipant('tk-p2', 'tki-p2', { user_id: 'user2' }, ctx));
+  check('⑨ 추가 직후 상태는 ready(0)', db.task_participants['tki-p2:user2']?.state === 0);
+  await expectOk('⑨ 본인 상태 전이: ready → inProgress', () => TaskService.updateParticipantState('tk-p2', 'tki-p2', 'user2', { state: 1 }, ctxUser2));
+  check('⑨ 상태 갱신 반영됨(inProgress=1)', db.task_participants['tki-p2:user2']?.state === 1);
 
   console.log(`\n[reminderGenerationRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
   if (failures.length) {
