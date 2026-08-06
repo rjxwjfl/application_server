@@ -1,14 +1,21 @@
 const { TaskDAO } = require('../daos/taskDAO');
 const { BinderDAO } = require('../daos/binderDAO');
 const { ReminderDAO } = require('../daos/reminderDAO');
-const { REMINDER_TARGET_TYPE } = require('../daos/deleteCascadeHelpers');
+const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('../daos/deleteCascadeHelpers');
+const { adjustRuleCount } = require('../utils/recurrenceRule');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
-const { BadRequestError, NotFoundError, ForbiddenError } = require('../core/errors');
+const { BadRequestError, NotFoundError, ForbiddenError, ConflictError } = require('../core/errors');
 const { requireBinderMemberByCalendarId, requireBinderMember } = require('../core/authz');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 const pool = require('../../config/db');
+
+// reminders.target_type: 0=event_instance 1=task_instance 2=special_day (schema.md §10-4)
+const TASK_INSTANCE_TARGET_TYPE = 1;
+
+// domain.md §3-13 · system.md §4-7 — 회차 상한. 서버가 강제한다.
+const MAX_OCCURRENCES = 365;
 
 // 캘린더 항목(Task) 편집·삭제 권한 (domain.md §(12) [확정], api.md DELETE /tasks/:taskId와 동일 축):
 // 작성자는 항상 가능, 그 외는 Binder 편집자(editor, role<=2) 이상. Event 쪽 assertCanEditItem과
@@ -72,7 +79,12 @@ class TaskService {
     return task;
   }
 
+  // scope 유무로 갈린다 — EventService.updateEvent와 동일 계약(api.md §8, 8-A).
   async updateTask(taskId, updateData, context) {
+    if (updateData.scope) {
+      return this.applyRecurrenceScope(taskId, updateData, context);
+    }
+
     const { result, binder_id } = await withTransaction(async (client) => {
       const task = await TaskDAO.findById(client, taskId);
       if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
@@ -103,6 +115,147 @@ class TaskService {
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.TASK, target_id: taskId,
+    });
+
+    return result;
+  }
+
+  // ============================================================================================
+  // 범위 편집(fork) — RLY-20260806-034. EventService.applyRecurrenceScope와 대칭 구현(대칭 이유는
+  // eventService.js 주석 참조 — Event/Task는 스키마가 달라 완전한 함수 공유는 하지 않되, 각
+  // 도메인 내부에서는 split·PATCH scope가 반드시 이 함수 하나로 수렴한다).
+  // ============================================================================================
+  async applyRecurrenceScope(taskId, opts, context) {
+    const {
+      scope, boundary_instance_id: boundaryInstanceId, instances,
+      new_task_id: newTaskId, expected_updated_at: expectedUpdatedAt,
+      ...patch
+    } = opts;
+
+    if (scope !== 'this_and_future' && scope !== 'all_upcoming') {
+      throw new BadRequestError('지원하지 않는 scope입니다', 'unsupported_scope');
+    }
+
+    const { result, binder_id } = await withTransaction(async (client) => {
+      const origin = await TaskDAO.findByIdForUpdate(client, taskId);
+      if (!origin) throw new NotFoundError('할 일을 찾을 수 없습니다');
+      const { calendar, member } = await requireBinderMemberByCalendarId(client, origin.calendar_id, context.sender_id);
+      assertCanEditItem(origin.author_id, context.sender_id, member);
+
+      if (expectedUpdatedAt) {
+        const expectedMs = new Date(expectedUpdatedAt).getTime();
+        const actualMs = new Date(origin.updated_at).getTime();
+        if (Number.isNaN(expectedMs) || expectedMs !== actualMs) {
+          throw new ConflictError('편집 대상이 이미 변경되었습니다', 'stale_revision');
+        }
+      }
+
+      let boundaryDate;
+      if (scope === 'this_and_future') {
+        if (boundaryInstanceId) {
+          const boundaryInstance = await TaskDAO.findInstanceById(client, boundaryInstanceId);
+          if (!boundaryInstance || boundaryInstance.task_id !== taskId) {
+            throw new ConflictError('선택한 회차가 이 할 일에 속하지 않습니다', 'instance_not_in_event');
+          }
+          boundaryDate = new Date(boundaryInstance.original_date);
+        } else if (Array.isArray(instances) && instances.length > 0) {
+          boundaryDate = new Date(instances[0].original_date);
+        } else {
+          throw new BadRequestError('경계 회차를 판정할 수 없습니다(instance_id 또는 instances[0] 필요)');
+        }
+        if (!newTaskId) throw new BadRequestError('new_task_id가 필요합니다');
+      } else {
+        boundaryDate = new Date();
+      }
+
+      const now = new Date();
+      const effectiveBoundary = boundaryDate > now ? boundaryDate : now;
+
+      const submitted = Array.isArray(instances) ? instances : [];
+      const toCreate = submitted.filter((inst) => new Date(inst.original_date) >= effectiveBoundary);
+      const skippedPastCount = submitted.length - toCreate.length;
+
+      if (toCreate.length > MAX_OCCURRENCES) {
+        throw new BadRequestError(`회차는 최대 ${MAX_OCCURRENCES}개까지 생성할 수 있습니다`, 'occurrence_limit_exceeded');
+      }
+
+      const deletedInstanceIds = await TaskDAO.deleteInstancesFromBoundary(client, taskId, effectiveBoundary);
+      await cascadeDeleteInstanceChildren(client, {
+        participantTable: 'task_participants',
+        reminderTargetType: REMINDER_TARGET_TYPE.TASK_INSTANCE,
+        instanceIds: deletedInstanceIds,
+      });
+
+      if (deletedInstanceIds.length === 0 && toCreate.length === 0) {
+        throw new ConflictError('영향받는 회차가 없습니다(이미 다른 분리가 가져갔거나 전부 과거 회차입니다)', 'no_occurrences_moved');
+      }
+
+      let targetTaskId = taskId;
+      let forkTask = null;
+
+      if (scope === 'this_and_future') {
+        forkTask = await TaskDAO.createForkTask(client, {
+          id: newTaskId,
+          calendar_id: origin.calendar_id,
+          author_id: origin.author_id,
+          task_type: origin.task_type,
+          forked_from: taskId,
+          summary: patch.summary !== undefined && patch.summary !== null ? patch.summary : origin.summary,
+          description: patch.description !== undefined ? patch.description : origin.description,
+          priority: patch.priority !== undefined && patch.priority !== null ? patch.priority : origin.priority,
+          r_rule: patch.r_rule !== undefined ? patch.r_rule : origin.r_rule,
+          locations: patch.locations !== undefined ? patch.locations : origin.locations,
+          recurrence_timezone: Object.prototype.hasOwnProperty.call(patch, 'recurrence_timezone')
+            ? patch.recurrence_timezone : origin.recurrence_timezone,
+          // 알림 오프셋은 owner 행에 안 남는다(findByIdForUpdate 주석 참조) — 아래 리마인더
+          // 파생은 patch.reminder_offsets를 직접 읽는다(origin 폴백 없음, createTask와 동일 한계).
+        });
+        targetTaskId = forkTask.id;
+
+        const remainingCount = await TaskDAO.countActiveInstances(client, taskId);
+        const adjustedRRule = adjustRuleCount(origin.r_rule, remainingCount);
+        if (adjustedRRule !== origin.r_rule) {
+          await TaskDAO.updateTask(client, taskId, { r_rule: adjustedRRule });
+        }
+      } else {
+        await TaskDAO.updateTask(client, taskId, patch);
+      }
+
+      const createdInstances = await TaskDAO.insertInstancesBulk(client, targetTaskId, toCreate);
+
+      // domain.md §3-13 Task 표 — "회차 생성마다 reevaluateInstanceCompletion 호출 필수". 명단이
+      // 비어 있어(결정 64) 실질적으로 completed_at=NULL 유지지만, 계약을 그대로 지킨다.
+      for (const inst of createdInstances) {
+        await ReminderDAO.syncTarget(client, {
+          targetType: TASK_INSTANCE_TARGET_TYPE,
+          targetId: inst.id,
+          baseTime: inst.due_date,
+          offsets: patch.reminder_offsets,
+          timezone: null,
+        });
+        await TaskDAO.reevaluateInstanceCompletion(client, inst.id);
+      }
+
+      return {
+        binder_id: calendar.binder_id,
+        result: {
+          task_id: targetTaskId,
+          original_task_id: taskId,
+          new_task_id: scope === 'this_and_future' ? targetTaskId : null,
+          created_instance_count: createdInstances.length,
+          deleted_instance_count: deletedInstanceIds.length,
+          skipped_past_count: skippedPastCount,
+        },
+      };
+    });
+
+    eventBus.emit('sync', {
+      binder_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: scope === 'this_and_future' ? ActionType.CREATE : ActionType.UPDATE,
+      target_type: TargetType.TASK,
+      target_id: result.task_id,
     });
 
     return result;
@@ -141,38 +294,19 @@ class TaskService {
     return result;
   }
 
+  // 【결정 64】 POST .../split은 호환용 alias — 처리는 scope=this_and_future와 같은 함수로
+  // 수렴한다(EventService.splitEvent와 동일 계약).
   async splitTask(splitData, context) {
-    // controller가 { task_id, instance_id, ...req.body }로 넘긴다(taskController.splitTask) —
-    // 기존에 camelCase(taskId/instanceId)로 구조분해해 항상 undefined였던 버그를 함께 고친다
-    // (Event 쪽 splitEvent는 이미 snake_case로 일치했다 — "구조가 같은데 한쪽만 고쳐졌다" 반복 방지).
-    const { task_id: taskId, instance_id: instanceId } = splitData;
+    // controller가 { task_id, instance_id, ...req.body }로 넘긴다(taskController.splitTask).
+    const { task_id: taskId, instance_id: instanceId, ...rest } = splitData;
     if (!taskId || !instanceId) {
       throw new BadRequestError('taskId와 instanceId가 필요합니다');
     }
-
-    const newTaskId = generateUUID();
-
-    const { result, binder_id } = await withTransaction(async (client) => {
-      const task = await TaskDAO.findById(client, taskId);
-      if (!task) throw new NotFoundError('할 일을 찾을 수 없습니다');
-      const { calendar, member } = await requireBinderMemberByCalendarId(client, task.calendar_id, context.sender_id);
-      assertCanEditItem(task.author_id, context.sender_id, member);
-
-      const instance = await TaskDAO.findInstanceContext(client, taskId, instanceId);
-      if (!instance) throw new NotFoundError('할 일 인스턴스를 찾을 수 없습니다');
-
-      const result = await TaskDAO.splitTask(client, taskId, instanceId, newTaskId);
-      return { result, binder_id: calendar.binder_id };
-    });
-
-    eventBus.emit('sync', {
-      binder_id,
-      sender_id: context.sender_id,
-      device_uuid: context.device_uuid,
-      action: ActionType.CREATE, target_type: TargetType.TASK, target_id: newTaskId,
-    });
-
-    return result;
+    return this.applyRecurrenceScope(taskId, {
+      ...rest,
+      scope: 'this_and_future',
+      boundary_instance_id: instanceId,
+    }, context);
   }
 
   async deleteTask(taskId, context) {
