@@ -116,14 +116,21 @@ assertColumnsExist('TaskDAO 범위 편집(fork)', 'task_instances', [
   'is_all_day', 'completion_rule', 'original_date', 'start_date', 'due_date', 'created_at', 'updated_at', 'deleted_at',
 ]);
 
-// ⚠️ 026/027 경계 — 알림 오프셋 컬럼을 eventDao.js·taskDAO.js 소스에 아직 안 쓴다는 사실을
-// (reminderGenerationRegression.test.js와 같은 방식으로) 여기서도 고정해 둔다 — 이번 Task가
-// 그 컬럼을 참조할 뻔했다가(자가 검증 중 직접 발견·제거) 026 경계를 넘을 뻔했다.
-(function assertRecurrenceScopeDaoDoesNotCrossReminderBoundary() {
+// ⚠️ 026/027 경계 — 이 Task(034) 최초 구현 시점엔 eventDao.js·taskDAO.js가 알림 오프셋 컬럼을
+// 안 썼다(그때는 "안 쓴다"를 고정했다). RLY-20260806-026 후속(8216884)이 createEvent/updateEvent/
+// createTask/updateTask에 그 컬럼을 배선해 owner row에 저장하고 GET 응답에 싣는다 — 이제 "쓴다"가
+// 참이다. 단언을 지우지 않고 방향만 뒤집는다(team-lead 지시) — 이 배선이 나중에(리팩터 등으로)
+// 사라지면 그것도 이 회귀가 잡아야 한다.
+//
+// 내 새 메서드(findByIdForUpdate·createForkEvent·insertInstancesBulk)는 여전히 그 컬럼을 직접
+// 다루지 않는다(fork 시 알림은 patch.reminder_offsets를 그대로 파생하지 origin에서 물려받지
+// 않는다 — 구현보고서 후속 섹션에 "origin 상속 미구현" 후속 과제로 명시했다). 이 단언은 "파일
+// 전체에 그 식별자가 있는가"만 보므로 createEvent/updateEvent 쪽 배선만으로도 참이 된다.
+(function assertReminderOffsetsWiredIntoOwnerRow() {
   const eventDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/eventDao.js'), 'utf8');
   const taskDaoSrc = fs.readFileSync(path.join(__dirname, '../daos/taskDAO.js'), 'utf8');
-  check('⑨ eventDao.js가 알림 오프셋 컬럼을 안 씀(027 경계)', !/reminder_offsets/.test(eventDaoSrc));
-  check('⑨ taskDAO.js가 알림 오프셋 컬럼을 안 씀(027 경계)', !/reminder_offsets/.test(taskDaoSrc));
+  check('⑨ eventDao.js가 알림 오프셋 컬럼을 씀(026 후속 배선)', /reminder_offsets/.test(eventDaoSrc));
+  check('⑨ taskDAO.js가 알림 오프셋 컬럼을 씀(026 후속 배선)', /reminder_offsets/.test(taskDaoSrc));
 })();
 
 async function expectOk(desc, fn) {
@@ -219,7 +226,11 @@ async function mockQuery(sql, params = []) {
     return { rows: created };
   }
   if (s.startsWith('UPDATE events') && s.includes('SET summary')) {
-    const [summary, description, color, r_rule, locations, hasTz, tz, eventId] = params;
+    // RLY-20260806-026 후속(8216884)이 reminder_offsets 컬럼을 이 UPDATE의 SET 목록에 추가하며
+    // 파라미터가 8→9개로 늘었다 — id는 항상 마지막 파라미터라는 불변만 믿고 위치를 고정하지 않는다
+    // (다음에 컬럼이 또 늘어도 이 mock이 안 깨지게).
+    const [summary, description, color, r_rule, locations, hasTz, tz] = params;
+    const eventId = params[params.length - 1];
     const row = db.events[eventId];
     if (row && !row.deleted_at) {
       if (summary !== null && summary !== undefined) row.summary = summary;
@@ -295,7 +306,9 @@ async function mockQuery(sql, params = []) {
     return { rows: created };
   }
   if (s.startsWith('UPDATE tasks') && s.includes('SET summary')) {
-    const [summary, description, priority, locations, r_rule, hasTz, tz, taskId] = params;
+    // RLY-20260806-026 후속과 동일 사유(위 UPDATE events 분기 주석 참조) — id는 마지막 파라미터로 읽는다.
+    const [summary, description, priority, locations, r_rule, hasTz, tz] = params;
+    const taskId = params[params.length - 1];
     const row = db.tasks[taskId];
     if (row && !row.deleted_at) {
       if (summary !== null && summary !== undefined) row.summary = summary;
