@@ -14,14 +14,17 @@ const { requireBinderMember, requireBinderMemberByCalendarId } = require('../cor
 const { ALLOWED_IMAGE_MIME_TYPES } = require('../utils/mediaPipeline');
 
 // RLY-20260806-072 — media.md §3-1(단일 파일 최대 크기) 이미지 행. 조사 결과 파일 1건당
-// 상한이 서버 어디에도 없었다(바인더 총량 한도(F-S9)만 있었다) — 이 중 이미지만 우선 배선한다.
-// 오디오·비디오·문서·기타는 RLY-20260806-056이 그은 것과 같은 경계로 이번에도 미룬다:
-// 이미지 외 content_type은 아직 MIME 허용 목록조차 없어(presign의 위 §3-3-1 검사가
-// `image/`로 시작할 때만 대조) content_type 자체를 신뢰할 근거가 없다 — "판단이 안 서면
-// 넣지 않는다"(team-lead 지시, mediaPipeline.js 주석과 동일 원칙). image·audio·video는
-// content_type prefix만으로 모호함 없이 분류되지만 document·other는 그렇지 않다
-// (예: application/pdf vs application/zip — 둘 다 'application/'이라 목록 없이는 못 가른다).
+// 상한이 서버 어디에도 없었다(바인더 총량 한도(F-S9)만 있었다).
+// RLY-20260806-075 — User 판정(2026-08-07)으로 오디오·비디오도 같이 건다. image·audio·video는
+// content_type prefix만으로 모호함 없이 분류된다. document·other는 여전히 보류다 — 둘 다
+// `application/*` 등으로 겹칠 수 있어(예: application/pdf vs application/zip) prefix로 못
+// 가르고, 그 구분 목록 자체가 문서 어디에도 없다. 게다가 이미지 외 content_type은 아직 MIME
+// 허용 목록조차 없어(presign의 §3-3-1 검사가 `image/`로 시작할 때만 대조) 크기만 막는 건
+// 반쪽 방어다 — "판단이 안 서면 넣지 않는다"(team-lead 지시, mediaPipeline.js 주석과 동일
+// 원칙). 허용 목록이 갖춰질 때 document·other를 한 번에 판정한다(User 판정).
 const IMAGE_FILE_SIZE_LIMIT_BYTES = [20, 50, 100].map((mb) => mb * 1024 * 1024); // Free/Lite/Plus
+const AUDIO_FILE_SIZE_LIMIT_BYTES = [20, 100, 300].map((mb) => mb * 1024 * 1024); // Free/Lite/Plus
+const VIDEO_FILE_SIZE_LIMIT_BYTES = [200, 1024, 5120].map((mb) => mb * 1024 * 1024); // Free/Lite/Plus (1GB·5GB)
 const TIER_NAMES = ['free', 'lite', 'plus'];
 
 const storage = new Storage();
@@ -116,6 +119,30 @@ class MediaService {
           const limitMb = Math.round(imageLimitBytes / (1024 * 1024));
           throw new PayloadTooLargeError(
             `이미지 파일은 ${limitMb}MB를 초과할 수 없습니다 (${TIER_NAMES[tier] ?? 'free'} tier)`
+          );
+        }
+      }
+
+      // RLY-20260806-075 — media.md §3-1 오디오 행. User 판정(2026-08-07)으로 이미지 옆에
+      // 그대로 추가한다(공통 함수로 묶지 않는다 — team-lead 지시, 방금 병합된 이미지 분기의
+      // 회귀를 건드리지 않기 위해).
+      if (content_type && content_type.toLowerCase().startsWith('audio/')) {
+        const audioLimitBytes = AUDIO_FILE_SIZE_LIMIT_BYTES[tier] ?? AUDIO_FILE_SIZE_LIMIT_BYTES[0];
+        if (declaredSize > audioLimitBytes) {
+          const limitMb = Math.round(audioLimitBytes / (1024 * 1024));
+          throw new PayloadTooLargeError(
+            `오디오 파일은 ${limitMb}MB를 초과할 수 없습니다 (${TIER_NAMES[tier] ?? 'free'} tier)`
+          );
+        }
+      }
+
+      // RLY-20260806-075 — media.md §3-1 비디오 행. 위 오디오와 동일 이유로 나란히 둔다.
+      if (content_type && content_type.toLowerCase().startsWith('video/')) {
+        const videoLimitBytes = VIDEO_FILE_SIZE_LIMIT_BYTES[tier] ?? VIDEO_FILE_SIZE_LIMIT_BYTES[0];
+        if (declaredSize > videoLimitBytes) {
+          const limitMb = Math.round(videoLimitBytes / (1024 * 1024));
+          throw new PayloadTooLargeError(
+            `비디오 파일은 ${limitMb}MB를 초과할 수 없습니다 (${TIER_NAMES[tier] ?? 'free'} tier)`
           );
         }
       }

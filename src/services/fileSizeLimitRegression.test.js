@@ -1,19 +1,24 @@
 /**
  * src/services/fileSizeLimitRegression.test.js
  * =========================================
- * RLY-20260806-072 — media.md §3-1(단일 파일 최대 크기, 이미지 행)이 문서화한 파일 1건당
- * 상한이 서버 어디에도 배선돼 있지 않던 결손의 회귀. 조사(구현 보고서 §1)로 확인된
- * 사실: presign은 바인더 총 저장 한도(F-S9)만 검사했고 개별 파일 크기는 전혀 보지
- * 않았다 — 5GB 한도 안에만 들면 4.9GB짜리 "이미지" 파일도 통과했다.
+ * RLY-20260806-072 — media.md §3-1(단일 파일 최대 크기)이 문서화한 파일 1건당 상한이 서버
+ * 어디에도 배선돼 있지 않던 결손의 회귀. 조사(구현 보고서 §1)로 확인된 사실: presign은
+ * 바인더 총 저장 한도(F-S9)만 검사했고 개별 파일 크기는 전혀 보지 않았다 — 5GB 한도
+ * 안에만 들면 4.9GB짜리 "이미지" 파일도 통과했다.
  *
- * 이번 수리는 이미지만 배선한다(§1 설계 원칙 주석 참조 — audio/video/document/other는
- * MIME 허용 목록 자체가 아직 없어 content_type을 신뢰할 근거가 없다. team-lead 선례).
+ * 072는 이미지만 배선했다. RLY-20260806-075(User 판정 2026-08-07)로 오디오·비디오를
+ * 같이 걸었다 — 이미지 분기 옆에 나란히 추가한 것이라(공통 함수로 묶지 않음, team-lead
+ * 지시) 이 스위트도 세 타입을 나란한 절로 검증한다.
+ *
+ * document·other는 여전히 보류다(§1 설계 원칙 주석 참조 — MIME 허용 목록 자체가 없어
+ * content_type을 신뢰할 근거가 없고, document/other는 prefix만으로 못 가른다). ⑤가 이
+ * 보류를 회귀로 고정한다.
  *
  * 이 저장소엔 테스트 프레임워크가 없다 — storageQuotaRegression.test.js와 동일 관행:
  * plain assert + `node <file>.js` 직접 실행, 가짜 DB·GCS로 실제 서비스 코드를 구동한다.
  * 이 스위트는 F-S9 회계(binder_storage_usage 증감)를 다시 검증하지 않는다 —
  * storageQuotaRegression.test.js가 이미 담당한다. 여기서는 presign의 파일 1건당
- * 상한 분기 하나만 좁게 구동한다.
+ * 상한 분기만 좁게 구동한다.
  *
  * 실행: node src/services/fileSizeLimitRegression.test.js
  */
@@ -184,12 +189,75 @@ async function run() {
     )
   );
 
-  // ============ ⑤ 비이미지 content_type — 이번 수리 범위 밖, 아무리 커도 이 검사는 안 걸림 ============
-  // (MIME 허용 목록 자체가 없는 타입이라 이 Task는 손대지 않는다 — 구현 보고서 §1·§5)
-  await expectResolved(
-    '비디오는 이미지 상한(20MB)을 훌쩍 넘어도 이 검사에 걸리지 않는다(범위 밖 — 별도 Task)',
+  // ============ ⑤ 오디오 — 이미지와 나란한 상한(Free 20MB·Lite 100MB·Plus 300MB) ============
+  await expectRejected(
+    'Free 바인더 — 오디오 20MB+1B는 413 FILE_TOO_LARGE로 거부',
     () => MediaService.presign(
-      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-free', filename: 'x.mp4', content_type: 'video/mp4', file_size: 500 * MB },
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-free', filename: 'x.mp3', content_type: 'audio/mpeg', file_size: 20 * MB + 1 },
+      ctx('u1')
+    ),
+    { statusCode: 413, errorCode: 'FILE_TOO_LARGE' }
+  );
+  await expectResolved(
+    'Free 바인더 — 오디오 정확히 20MB는 통과(경계값, 초과 아님)',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-free', filename: 'x.mp3', content_type: 'audio/mpeg', file_size: 20 * MB },
+      ctx('u1')
+    )
+  );
+  await expectResolved(
+    'Lite 바인더 — 오디오 90MB(Free라면 413)는 Lite(100MB) 한도로 통과',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-lite', filename: 'x.mp3', content_type: 'audio/mpeg', file_size: 90 * MB },
+      ctx('u1')
+    )
+  );
+  await expectRejected(
+    'Plus 바인더 — 오디오 300MB+1B는 여전히 413(Plus 한도도 초과)',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-plus', filename: 'x.mp3', content_type: 'audio/mpeg', file_size: 300 * MB + 1 },
+      ctx('u1')
+    ),
+    { statusCode: 413, errorCode: 'FILE_TOO_LARGE' }
+  );
+
+  // ============ ⑥ 비디오 — Free 200MB·Lite 1GB·Plus 5GB ============
+  await expectRejected(
+    'Free 바인더 — 비디오 200MB+1B는 413 FILE_TOO_LARGE로 거부',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-free', filename: 'x.mp4', content_type: 'video/mp4', file_size: 200 * MB + 1 },
+      ctx('u1')
+    ),
+    { statusCode: 413, errorCode: 'FILE_TOO_LARGE' }
+  );
+  await expectResolved(
+    'Free 바인더 — 비디오 정확히 200MB는 통과(경계값, 초과 아님)',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-free', filename: 'x.mp4', content_type: 'video/mp4', file_size: 200 * MB },
+      ctx('u1')
+    )
+  );
+  await expectResolved(
+    'Lite 바인더 — 비디오 500MB(Free라면 413)는 Lite(1GB) 한도로 통과',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-lite', filename: 'x.mp4', content_type: 'video/mp4', file_size: 500 * MB },
+      ctx('u1')
+    )
+  );
+  await expectResolved(
+    'Plus 바인더 — 비디오 2GB(Lite라면 413)는 Plus(5GB) 한도로 통과',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-plus', filename: 'x.mp4', content_type: 'video/mp4', file_size: 2 * 1024 * MB },
+      ctx('u1')
+    )
+  );
+
+  // ============ ⑦ document·other — 보류. 아무리 커도 이 검사는 안 걸림(User 판정) ============
+  // MIME 허용 목록 자체가 없는 타입이라 이 Task는 손대지 않는다 — 구현 보고서 §3-1·§1.
+  await expectResolved(
+    'ZIP(기타)은 상한이 없다 — 크기가 얼마든 이 검사에 걸리지 않는다(User 판정으로 보류)',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b-free', filename: 'x.zip', content_type: 'application/zip', file_size: 500 * MB },
       ctx('u1')
     )
   );
