@@ -46,11 +46,15 @@ function buildStorageKey(binderId, attachmentId, filename) {
 class MediaService {
   /**
    * context_type: SECTION_MESSAGE | EVENT | TASK | POST | CAST | avatar | cover
-   * context_id: UUID of the context entity
+   * context_id: UUID of the context entity (avatar/cover: the entity being pictured — see entity_type)
    * binder_id: UUID — required for non-avatar/cover contexts
+   * entity_type: avatar/cover 전용 — 'avatar'는 'user'|'binder', 'cover'는 'binder'|'cast'.
+   *   media.md §4-1(entity_type 필드)이 문서화한 값이나 코드에 미배선 상태였다(RLY-20260806-052
+   *   조사 보고). avatar는 클라 유일 실사용 경로(user)와의 하위호환을 위해 생략 시 'user'로 기본값.
+   *   cover는 binder/cast 중 무엇을 가리키는지 구분할 방법이 없어 생략을 허용하지 않는다.
    */
   async presign(data, context) {
-    const { filename, content_type, file_size, context_type, context_id, binder_id } = data;
+    const { filename, content_type, file_size, context_type, context_id, binder_id, entity_type } = data;
     const id = generateUUID();
 
     if (context_type === 'SECTION_MESSAGE') {
@@ -58,7 +62,13 @@ class MediaService {
       if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, context.sender_id))) {
         throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
       }
-    } else if (context_type !== 'avatar' && context_type !== 'cover') {
+    } else if (context_type === 'avatar') {
+      // RLY-20260806-052 — 이전엔 avatar/cover가 이 if/else 사슬에서 통째로 빠져 있어
+      // 인가 검사가 전혀 없었다(임의 유저가 남의 user_id/binder_id/cast_id로 presign 가능).
+      await this._authorizeAvatarPresign(context_id, entity_type, context);
+    } else if (context_type === 'cover') {
+      await this._authorizeCoverPresign(context_id, entity_type, context);
+    } else {
       // EVENT · TASK · POST · CAST 등 binder 소속 첨부 업로드 — getSignedUrl과 같은 갭이었다.
       // 업로드(쓰기)이므로 공개 캘린더라도 비멤버는 허용하지 않는다(공개 읽기 예외는 조회 전용).
       if (!binder_id) throw new BadRequestError('binder_id required for attachment contexts');
@@ -114,6 +124,97 @@ class MediaService {
     }
 
     return { id, upload_url: uploadUrl, storage_key };
+  }
+
+  /**
+   * RLY-20260806-052 — avatar presign 인가. entity_type 생략 시 'user'(클라 유일 실사용 경로,
+   * storage_repository.dart:83-88 — contextType:'avatar', entityType 미전송)로 취급한다.
+   */
+  async _authorizeAvatarPresign(contextId, entityType, context) {
+    if (!contextId) throw new BadRequestError('context_id required for avatar contexts');
+    const type = entityType || 'user';
+
+    if (type === 'user') {
+      if (contextId !== context.sender_id) {
+        throw new ForbiddenError('본인 프로필 사진만 업로드할 수 있습니다', 'AVATAR_FORBIDDEN');
+      }
+      return;
+    }
+    if (type === 'binder') {
+      // binderService.updateBinder와 동일 기준 — master(role 0)만(binderService.js:227).
+      // 실제로 이 storage_key를 소비하는 유일한 필드는 binders.image_url(PATCH /binders/:id)이며
+      // 그 엔드포인트가 이미 master 전용이다 — presign 단계 인가를 그 기준에 맞춘다.
+      await requireBinderMember(pool, contextId, context.sender_id, { minRole: 0 });
+      return;
+    }
+    throw new BadRequestError('지원하지 않는 entity_type입니다', 'UNSUPPORTED_ENTITY_TYPE');
+  }
+
+  /**
+   * RLY-20260806-052 — cover presign 인가. avatar와 달리 entity_type을 생략할 수 없다 —
+   * context_id 하나만으로는 binder_id인지 cast_id인지 구분할 방법이 없다(둘 다 UUID).
+   */
+  async _authorizeCoverPresign(contextId, entityType, context) {
+    if (!contextId) throw new BadRequestError('context_id required for cover contexts');
+    if (entityType === 'binder') {
+      // 위 avatar/binder와 동일 기준(master만) — binders 테이블엔 avatar·cover 구분 컬럼이
+      // 없고 image_url 하나뿐이라 실질적으로 avatar/binder와 같은 문지기를 공유한다.
+      await requireBinderMember(pool, contextId, context.sender_id, { minRole: 0 });
+      return;
+    }
+    if (entityType === 'cast') {
+      // castService.update(:73-80)와 동일한 판정을 그대로 재사용한다 — 작성자 본인이거나
+      // master/manager(role<=1)여야 한다. 새 헬퍼를 만들지 않고 기존 패턴을 인라인 복제한다.
+      const cast = await CastDAO.findById(pool, contextId);
+      if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
+      const { member } = await requireBinderMemberByCalendarId(pool, cast.calendar_id, context.sender_id);
+      if (member.role > 1 && cast.author_id !== context.sender_id) {
+        throw new ForbiddenError('권한이 없습니다');
+      }
+      return;
+    }
+    throw new BadRequestError('cover 업로드에는 entity_type(binder|cast)이 필요합니다', 'ENTITY_TYPE_REQUIRED');
+  }
+
+  /**
+   * RLY-20260806-052 — PATCH 계열 엔드포인트(users/:id, binders/:binderId, casts/:castId)가
+   * 클라 선언 image_url·thumbnail_url·cover_image_url을 검증 없이 그대로 DB에 쓰던 결함의 수리.
+   *
+   * avatar/cover는 attachments 행이 없어(media.md §4-1, 설계상 의도) 행 참조로 검증할 수 없다 —
+   * 대신 storage_key 자체가 이미 신뢰의 근거다: presign이 `{prefix}/{entityId}/{uuid}.ext` 형태로
+   * 결정적으로 키를 생성하고(mediaService.presign:96), 그 키를 발급받으려면 위 _authorize*Presign이
+   * 이미 이 entityId에 대한 쓰기 권한을 확인했다. 따라서 "제출된 값이 이 entityId 접두사와 정확히
+   * 일치하는 storage_key인가 + GCS에 실제로 그 객체가 존재하는가"만 확인하면 별도 상태 저장 없이
+   * (attachments 행도, 새 테이블도 없이) 위조 URL을 배제할 수 있다 — 가장 단순한 방법(팀리드 지시).
+   *
+   * ⚠️ 이 메서드는 URL 위조·타인 참조만 막는다. MIME 위변조 검사·EXIF 파기는 하지 않는다
+   * (①이 보류돼 avatar/cover엔 Worker 파이프라인이 없다 — 보고서 참조).
+   *
+   * @param {string|null|undefined} value - 미제공(undefined)이면 기존 값 유지(DAO의 COALESCE와
+   *   동일 의미) — 검증하지 않고 통과시킨다. null은 기존 COALESCE 동작(무시 — 지우지 않음)을
+   *   그대로 둔다 — 이 메서드가 그 동작을 바꾸지 않는다(별도 결함, 이번 Task 범위 아님).
+   * @param {object} params
+   * @param {string} params.prefix - 'avatars' | 'covers'
+   * @param {string} params.entityId - 이 값을 갱신하는 대상 엔티티의 실제 id(user/binder/cast)
+   */
+  async assertOwnedMediaReference(value, { prefix, entityId }) {
+    if (value === undefined || value === null) return;
+    if (typeof value !== 'string') {
+      throw new BadRequestError('허용되지 않은 이미지 참조입니다', 'INVALID_IMAGE_REFERENCE');
+    }
+
+    const wantPrefix = `${prefix}/${entityId}/`;
+    const rest = value.startsWith(wantPrefix) ? value.slice(wantPrefix.length) : null;
+    const isOwnedKey = !!rest && rest.length > 0 && !rest.includes('/') && !rest.includes('..');
+    if (!isOwnedKey) {
+      throw new BadRequestError('허용되지 않은 이미지 참조입니다', 'INVALID_IMAGE_REFERENCE');
+    }
+
+    const bucket = storage.bucket(getMediaBucket());
+    const [exists] = await bucket.file(value).exists();
+    if (!exists) {
+      throw new BadRequestError('업로드된 파일을 찾을 수 없습니다', 'IMAGE_REFERENCE_NOT_FOUND');
+    }
   }
 
   async confirm(attachmentId, context) {

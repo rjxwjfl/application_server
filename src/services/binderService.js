@@ -1,4 +1,5 @@
 const { BinderDAO, SectionDAO, CalendarDAO } = require('../daos');
+const { MediaService } = require('./mediaService');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const crypto = require('crypto');
@@ -225,6 +226,16 @@ class BinderService {
     const result = await withTransaction(async (client) => {
       const member = await BinderDAO.getMember(client, binderId, userId);
       if (!member || member.role !== 0) throw new ForbiddenError('권한이 없습니다');
+
+      // RLY-20260806-052 — image_url·thumbnail_url 소유권 검증(binders 테이블엔 avatar/cover
+      // 구분 컬럼이 없어 둘 다 'avatars' prefix 하나로 검증한다 — mediaService._authorizeAvatarPresign
+      // 의 binder 분기와 같은 근거).
+      if (updateData.image_url !== undefined) {
+        await MediaService.assertOwnedMediaReference(updateData.image_url, { prefix: 'avatars', entityId: binderId });
+      }
+      if (updateData.thumbnail_url !== undefined) {
+        await MediaService.assertOwnedMediaReference(updateData.thumbnail_url, { prefix: 'avatars', entityId: binderId });
+      }
 
       const binder = await BinderDAO.update(client, binderId, updateData);
       const settings = await BinderDAO.updateSettings(client, binderId, updateData);
