@@ -78,6 +78,15 @@ class UnsupportedMediaTypeError extends AppError {
   }
 }
 
+// RLY-20260806-072 — api.md:2394가 이미 문서화한 계약(`POST /attachments/presign` 413
+// `FILE_TOO_LARGE`)을 처음 구현에 배선한다. 415(UnsupportedMediaTypeError)와 같은 선례 —
+// 새 오류 개념이 아니라 문서에 있던 계약.
+class PayloadTooLargeError extends AppError {
+  constructor(message = '파일 크기가 허용 한도를 초과했습니다', errorCode = 'FILE_TOO_LARGE') {
+    super(message, 413, errorCode);
+  }
+}
+
 module.exports = {
   AppError,
   BadRequestError,
@@ -91,4 +100,5 @@ module.exports = {
   UnprocessableEntityError,
   ServiceUnavailableError,
   UnsupportedMediaTypeError,
+  PayloadTooLargeError,
 };

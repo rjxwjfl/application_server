@@ -331,10 +331,13 @@ class AttachmentDAO {
   }
 
   /**
-   * binder의 저장 한도(bytes) — binder_boosts.tier(활성 구독만) 기준, 없으면 Free(0).
+   * binder의 tier(SMALLINT 0=free 1=lite 2=plus) — binder_boosts.tier(활성 구독만) 기준,
+   * 없으면 Free(0). RLY-20260806-072 — getStorageLimitBytes(바인더 총량 한도)와
+   * presign의 파일 1건당 상한(media.md §3-1) 검사가 같은 tier 조회를 공유하도록 분리했다
+   * (기존 getStorageLimitBytes의 쿼리를 그대로 옮긴 것 — SQL 텍스트 불변).
    * ⛔ Boost 구매 흐름은 별도 Task(출시 후 오픈) — 여기서는 한도 판정을 위해 tier만 읽는다.
    */
-  async getStorageLimitBytes(conn, binderId) {
+  async getTier(conn, binderId) {
     const result = await conn.query(
       `SELECT COALESCE(bb.tier, 0) AS tier
        FROM binders b
@@ -342,7 +345,14 @@ class AttachmentDAO {
        WHERE b.id = $1`,
       [binderId]
     );
-    const tier = result.rows[0] ? result.rows[0].tier : 0;
+    return result.rows[0] ? result.rows[0].tier : 0;
+  }
+
+  /**
+   * binder의 저장 한도(bytes) — getTier 기준.
+   */
+  async getStorageLimitBytes(conn, binderId) {
+    const tier = await this.getTier(conn, binderId);
     return TIER_STORAGE_LIMIT_BYTES[tier] ?? TIER_STORAGE_LIMIT_BYTES[0];
   }
 }

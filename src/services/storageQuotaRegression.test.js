@@ -456,6 +456,25 @@ async function run() {
     assert.ok(result.id);
   });
 
+  // RLY-20260806-072 — AC②(정확히 한도일 때의 동작). bytes_used(FREE_LIMIT-100) + file_size(100)
+  // 가 정확히 한도와 같다 — "초과"가 아니므로 거부하지 않는다(비교 연산자는 `>`, `>=`가 아니다).
+  await check('AC-S9-8 경계 — bytes_used + file_size가 정확히 한도와 같으면 통과(초과 아님)', async () => {
+    const result = await MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b1', filename: 'exact.mp4', content_type: 'video/mp4', file_size: 100 },
+      ctx('u1')
+    );
+    assert.ok(result.id && result.upload_url);
+  });
+  await expectStatus(
+    'AC-S9-8 경계 — 한도보다 1바이트만 더 커도(101) 여전히 402',
+    () => MediaService.presign(
+      { context_type: 'EVENT', context_id: 'e1', binder_id: 'b1', filename: 'exact-plus1.mp4', content_type: 'video/mp4', file_size: 101 },
+      ctx('u1')
+    ),
+    402,
+    'BOOST_STORAGE_LIMIT'
+  );
+
   // ═══════════════════════════════════════════════════════════════
   // RLY-20260806-015 — confirm 실제 크기 서버 재확인
   // ═══════════════════════════════════════════════════════════════
