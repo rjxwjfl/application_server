@@ -295,23 +295,29 @@ class BinderService {
     const result = {};
 
     if (types.includes('events')) {
+      // events·event_instances에는 binder_id·title 컬럼이 없다(schema.sql) — events는
+      // calendar_id로만 binder에 연결되고(calendars.binder_id를 거쳐야 함), 제목 컬럼명은
+      // summary·시각 컬럼명은 start_date/end_date다.
       const rows = await pool.query(
-        `SELECT ei.id, ei.event_id, ei.title, ei.start_time, ei.end_time, ei.is_all_day
+        `SELECT ei.id, ei.event_id, ei.summary, ei.start_date, ei.end_date, ei.is_all_day
          FROM event_instances ei
          JOIN events e ON e.id = ei.event_id
-         WHERE e.binder_id = $1 AND ei.deleted_at IS NULL AND ei.title ILIKE $2
-         ORDER BY ei.start_time ASC LIMIT $3`,
+         JOIN calendars c ON c.id = e.calendar_id
+         WHERE c.binder_id = $1 AND ei.deleted_at IS NULL AND ei.summary ILIKE $2
+         ORDER BY ei.start_date ASC LIMIT $3`,
         [binderId, pattern, lim]
       );
       result.events = rows.rows;
     }
 
     if (types.includes('tasks')) {
+      // tasks·task_instances도 동일 사유(binder_id 없음·title이 아니라 summary) — calendars 경유.
       const rows = await pool.query(
-        `SELECT ti.id, ti.task_id, ti.title, ti.due_date, ti.priority
+        `SELECT ti.id, ti.task_id, ti.summary, ti.due_date, ti.priority
          FROM task_instances ti
          JOIN tasks t ON t.id = ti.task_id
-         WHERE t.binder_id = $1 AND ti.deleted_at IS NULL AND ti.title ILIKE $2
+         JOIN calendars c ON c.id = t.calendar_id
+         WHERE c.binder_id = $1 AND ti.deleted_at IS NULL AND ti.summary ILIKE $2
          ORDER BY ti.due_date ASC NULLS LAST LIMIT $3`,
         [binderId, pattern, lim]
       );
@@ -319,11 +325,12 @@ class BinderService {
     }
 
     if (types.includes('posts')) {
+      // posts에는 content 컬럼이 없다 — 본문 컬럼명은 body_markdown(schema.sql).
       const rows = await pool.query(
-        `SELECT p.id, p.content, p.created_at, ui.display_name AS author_name
+        `SELECT p.id, p.body_markdown, p.created_at, ui.display_name AS author_name
          FROM posts p
          LEFT JOIN user_infos ui ON p.author_id = ui.user_id
-         WHERE p.binder_id = $1 AND p.deleted_at IS NULL AND p.content ILIKE $2
+         WHERE p.binder_id = $1 AND p.deleted_at IS NULL AND p.body_markdown ILIKE $2
          ORDER BY p.created_at DESC LIMIT $3`,
         [binderId, pattern, lim]
       );

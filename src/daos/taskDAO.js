@@ -9,7 +9,7 @@ class TaskDAO {
     const query = `
       SELECT id, calendar_id, author_id, task_type,
              summary, description, priority, locations,
-             r_rule, recurrence_timezone, forked_from,
+             r_rule, recurrence_timezone, reminder_offsets, forked_from,
              created_at, updated_at, deleted_at
       FROM tasks
       WHERE id = $1 AND deleted_at IS NULL
@@ -18,14 +18,24 @@ class TaskDAO {
     return result.rows[0] || null;
   }
 
+  // 회차 목록(id·due_date)만 필요한 호출부용 — EventDAO.findInstancesByEventId와 동형
+  // (RLY-20260806-026 컬럼 배선).
+  async findInstancesByTaskId(conn, taskId) {
+    const result = await conn.query(
+      `SELECT id, due_date FROM task_instances WHERE task_id = $1 AND deleted_at IS NULL`,
+      [taskId]
+    );
+    return result.rows;
+  }
+
   async createTask(conn, data) {
     const taskQuery = `
       INSERT INTO tasks (
         id, calendar_id, author_id, task_type,
         summary, description, priority, locations,
-        r_rule, forked_from, recurrence_timezone, created_at, updated_at
+        r_rule, forked_from, recurrence_timezone, reminder_offsets, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
       )
       RETURNING *
     `;
@@ -40,7 +50,9 @@ class TaskDAO {
       data.locations ? JSON.stringify(data.locations) : null,
       data.r_rule || null,
       data.forked_from || null,
-      data.recurrence_timezone || null
+      data.recurrence_timezone || null,
+      // RLY-20260806-026 — Event와 동일 계약(SC-reminder §7-1).
+      data.reminder_offsets ?? null,
     ]);
 
     if (data.instances && data.instances.length > 0) {
@@ -62,10 +74,11 @@ class TaskDAO {
   }
 
   async updateTask(conn, taskId, updateData) {
-    const { summary, description, priority, locations, r_rule, recurrence_timezone } = updateData;
+    const { summary, description, priority, locations, r_rule, recurrence_timezone, reminder_offsets } = updateData;
     // recurrence_timezone은 COALESCE가 아니라 hasOwnProperty 기반 CASE WHEN을 쓴다 —
     // eventDAO.updateEvent와 동일 사유·동일 관례(postDAO.js/groupDAO.js). 다른 컬럼은
     // COALESCE 유지 — 통일하지 말 것(RLY-20260806-019, eventDAO.js 주석 참조).
+    // reminder_offsets는 COALESCE로 충분하다 — eventDAO.updateEvent와 동일 사유(SC-reminder §7-1).
     const hasRecurrenceTimezone = Object.prototype.hasOwnProperty.call(updateData, 'recurrence_timezone');
     const query = `
       UPDATE tasks
@@ -75,8 +88,9 @@ class TaskDAO {
           locations = COALESCE($4, locations),
           r_rule = COALESCE($5, r_rule),
           recurrence_timezone = CASE WHEN $6 THEN $7 ELSE recurrence_timezone END,
+          reminder_offsets = COALESCE($8, reminder_offsets),
           updated_at = now()
-      WHERE id = $8 AND deleted_at IS NULL
+      WHERE id = $9 AND deleted_at IS NULL
       RETURNING *
     `;
     const result = await conn.query(query, [
@@ -84,6 +98,7 @@ class TaskDAO {
       locations ? JSON.stringify(locations) : null,
       r_rule,
       hasRecurrenceTimezone, recurrence_timezone,
+      reminder_offsets ?? null,
       taskId
     ]);
     return result.rows[0];
@@ -341,9 +356,11 @@ class TaskDAO {
   // Task Instance Participants 테이블
   // ============================================
 
+  // t.reminder_offsets도 함께 실어 온다 — RLY-20260806-026: 회차 마감일만 바뀌는 갱신에서
+  // 리마인더를 재파생할 때 이 값이 유일한 오프셋 출처다(역산 경로 없음, eventDao.js와 동일).
   async findInstanceContext(conn, taskId, instanceId) {
     const result = await conn.query(`
-      SELECT ti.id, ti.completion_rule, ti.deleted_at, t.calendar_id, t.author_id, c.binder_id
+      SELECT ti.id, ti.completion_rule, ti.deleted_at, t.calendar_id, t.author_id, c.binder_id, t.reminder_offsets
       FROM task_instances ti
       JOIN tasks t ON t.id = ti.task_id
       JOIN calendars c ON c.id = t.calendar_id

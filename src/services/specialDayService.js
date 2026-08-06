@@ -8,6 +8,7 @@ const withTransaction = require('../core/withTransaction');
 const pool = require('../../config/db');
 const { NotFoundError, ForbiddenError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
+const { localNineAmUtc } = require('../utils/localTime');
 
 // reminders.target_type: 0=event_instance 1=task_instance 2=special_day (schema.md §10-4)
 const SPECIAL_DAY_TARGET_TYPE = 2;
@@ -17,61 +18,18 @@ const SPECIAL_DAY_TARGET_TYPE = 2;
 // (user_settings.timezone, system.md §10-12)을 그대로 재사용한다 — 신규 컬럼 없음.
 // ⚠️ 이 함수는 저장 시점 값을 **해석하지 않고 그대로 반환**한다 — 기본값 'system'인 계정은
 // 'system' 문자열이 그대로 reminders.timezone에 저장된다. 'system'을 실제 IANA 타임존으로
-// 해석하는 로직은 2단계(발송 dispatch)의 몫이다(이번 Task는 저장 계약까지만).
+// 해석하는 로직(비-IANA 값의 UTC 대체)은 `utils/localTime.js`가 trigger_at **계산**에 한해서만
+// 담당한다 — 저장되는 timezone 컬럼 값 자체는 영향받지 않는다.
 async function resolveOwnerTimezone(conn, authorId) {
   const { rows } = await conn.query('SELECT timezone FROM user_settings WHERE user_id = $1', [authorId]);
   return rows[0]?.timezone || 'UTC';
 }
 
-function isValidIanaTimeZone(tz) {
-  try {
-    // eslint-disable-next-line no-new
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// base_date(DATE, 시각 없음) 를 그 날 09:00 로컬(timezone)의 UTC 순간으로 변환한다(SC-reminder §1
-// "SpecialDay: base_date @ 09:00 로컬"). timezone이 유효한 IANA 식별자가 아니면(예: 위 'system'
-// sentinel) 이 **계산에 한해서만** UTC로 대체한다 — reminders.timezone 컬럼에 저장되는 값 자체는
-// resolveOwnerTimezone이 반환한 원본 그대로다(해석은 여기서 trigger_at 산출에만 쓰인다).
-//
-// ⚠️ 범위: 이 함수는 저장된 base_date를 그대로 쓸 뿐, "이미 지난 날짜면 내년으로" 굴리는 롤링이나
-// 음력→양력 변환(is_lunar=true)은 하지 않는다. 그 계산(§5A "다음 해 trigger_at 계산", 서버 npm
-// `korean-lunar-calendar`)은 2단계 dispatch가 매 tick마다 수행하는 몫으로 문서에 명시돼 있고,
-// 이 라이브러리는 현재 package.json에 없다(신규 프로덕션 의존성은 User 승인 필요 — 이번 Task는
-// 추가하지 않는다). is_lunar=true인 기념일도 지금은 저장된 solar base_date로만 계산한다.
-function localNineAmUtc(baseDate, timeZone) {
-  const zone = isValidIanaTimeZone(timeZone) ? timeZone : 'UTC';
-  const d = new Date(baseDate);
-  const year = d.getUTCFullYear();
-  const month = d.getUTCMonth();
-  const day = d.getUTCDate();
-  const desired = Date.UTC(year, month, day, 9, 0, 0);
-
-  // 벽시계 09:00을 UTC로 취급한 최초 추정치를, 그 zone에서 실제로 몇 시로 읽히는지 보고 보정한다
-  // (DST 등 고정 오프셋이 아닌 zone도 다룬다). 2회 반복이면 실질적으로 수렴한다 — 09:00 부근에서
-  // DST 전환이 겹치는 zone은 존재하나 극히 드물고, 그 경계 처리는 이번 스코프가 아니다.
-  let guess = desired;
-  for (let i = 0; i < 2; i += 1) {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: zone,
-      hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(new Date(guess));
-    const map = {};
-    parts.forEach((p) => { map[p.type] = p.value; });
-    const observed = Date.UTC(
-      Number(map.year), Number(map.month) - 1, Number(map.day),
-      Number(map.hour) % 24, Number(map.minute), Number(map.second)
-    );
-    guess += desired - observed;
-  }
-  return new Date(guess);
-}
+// base_date(DATE, 시각 없음)를 09:00 로컬 UTC 순간으로 변환하는 `localNineAmUtc`는
+// `utils/localTime.js`로 옮겼다(RLY-20260806-032 — reminderJobs.js의 SpecialDay 롤링 재계산과
+// 공유). ⚠️ 이 함수는 저장된 base_date를 그대로 쓸 뿐, "이미 지난 날짜면 내년으로" 굴리는
+// 롤링이나 음력→양력 변환은 하지 않는다 — 그 계산(§5A "다음 해 trigger_at 계산")은
+// reminderJobs.js(2단계 dispatch)의 몫이다.
 
 // events·tasks·special_days 세 축이 공유하는 파생 호출 지점 — special_days는 회차가 없어(fork
 // 전환 대상 아님, 단일 row) 대상이 하나뿐이라 ReminderDAO.syncTarget을 1회만 호출한다.

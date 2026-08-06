@@ -194,13 +194,13 @@ class MessageService {
            'id', po.id,
            'option_text', po.option_text,
            'display_order', po.display_order,
-           'vote_count', (SELECT COUNT(*) FROM message_poll_votes v WHERE v.option_id = po.id AND v.deleted_at IS NULL),
-           'voted_by_me', EXISTS(SELECT 1 FROM message_poll_votes v WHERE v.option_id = po.id AND v.user_id = $3 AND v.deleted_at IS NULL)
+           'vote_count', (SELECT COUNT(*) FROM message_poll_votes v WHERE v.option_id = po.id),
+           'voted_by_me', EXISTS(SELECT 1 FROM message_poll_votes v WHERE v.option_id = po.id AND v.user_id = $3)
          ) ORDER BY po.display_order
        ) AS options
        FROM message_polls p
-       JOIN message_poll_options po ON po.poll_id = p.id AND po.deleted_at IS NULL
-       WHERE p.id = $1 AND p.message_id = $2 AND p.deleted_at IS NULL
+       JOIN message_poll_options po ON po.poll_id = p.id
+       WHERE p.id = $1 AND p.message_id = $2
        GROUP BY p.id`,
       [pollId, messageId, userId]
     );
@@ -217,24 +217,27 @@ class MessageService {
 
     await withTransaction(async (client) => {
       const pollResult = await client.query(
-        `SELECT allow_multiple, is_closed, closed_at FROM message_polls WHERE id = $1 AND message_id = $2 AND deleted_at IS NULL`,
+        `SELECT allow_multiple, closed_at FROM message_polls WHERE id = $1 AND message_id = $2`,
         [pollId, messageId]
       );
       const poll = pollResult.rows[0];
       if (!poll) throw new NotFoundError('투표를 찾을 수 없습니다');
-      if (poll.is_closed || poll.closed_at) throw new ConflictError('마감된 투표입니다');
+      if (poll.closed_at) throw new ConflictError('마감된 투표입니다');
       if (!poll.allow_multiple && option_ids.length > 1) throw new ConflictError('단일 선택 투표입니다');
 
+      // message_poll_votes에는 deleted_at이 없다(design_intent.md §message_poll_votes —
+      // "단일 선택 시 서비스 레이어가 기존 (poll_id, user_id) 행을 모두 삭제 후 재 INSERT").
+      // 재투표는 soft delete가 아니라 hard delete + 재삽입이다.
       await client.query(
-        `UPDATE message_poll_votes SET deleted_at = now() WHERE poll_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+        `DELETE FROM message_poll_votes WHERE poll_id = $1 AND user_id = $2`,
         [pollId, userId]
       );
       for (const optionId of option_ids) {
         await client.query(
-          `INSERT INTO message_poll_votes (id, poll_id, option_id, user_id, created_at)
-           VALUES ($1, $2, $3, $4, now())
-           ON CONFLICT (poll_id, option_id, user_id) DO UPDATE SET deleted_at = NULL`,
-          [generateUUID(), pollId, optionId, userId]
+          `INSERT INTO message_poll_votes (poll_id, option_id, user_id, voted_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (poll_id, option_id, user_id) DO NOTHING`,
+          [pollId, optionId, userId]
         );
       }
     });
@@ -242,8 +245,8 @@ class MessageService {
 
   async closePoll(messageId, pollId, context) {
     const result = await pool.query(
-      `UPDATE message_polls SET is_closed = TRUE, closed_at = now(), updated_at = now()
-       WHERE id = $1 AND message_id = $2 AND deleted_at IS NULL
+      `UPDATE message_polls SET closed_at = now(), updated_at = now()
+       WHERE id = $1 AND message_id = $2
        RETURNING id`,
       [pollId, messageId]
     );
