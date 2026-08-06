@@ -50,6 +50,13 @@ const MAX_ATTEMPTS = 5; // 동일.
 // 재시도 대상인 일시적 실패(GCS 네트워크 등)와 구분하기 위한 표식.
 class MediaProcessingError extends Error {}
 
+// RLY-20260806-084 — media.md §3-3-1: 엔티티 이미지 3종은 binder_storage_usage 집계 대상이
+// 아니다. mediaService.confirm()도 이 3종의 applyStorageDelta(+1)를 건너뛰므로, 아래
+// rejectAttachment()가 조건 없이 -1을 적용하면 "적립한 적 없는 바이트"를 차감해 집계가
+// 음수로 흐른다(BINDER_AVATAR·CAST_COVER는 binder_id가 채워져 있어 null 가드만으로는
+// 걸러지지 않는다 — mediaService.js와 동일 이유).
+const ENTITY_IMAGE_CONTEXT_TYPES = new Set(['USER_AVATAR', 'BINDER_AVATAR', 'CAST_COVER']);
+
 function backoffMinutes(attemptCount) {
   return Math.min(2 ** (attemptCount - 1), 16);
 }
@@ -79,13 +86,18 @@ async function rejectAttachment(attachment, claimToken, file, reason) {
   // 새로 도입하며 생긴 지점). GCS 객체를 지웠으니 quota도 반환한다 — deleteAttachment(§8-1)와
   // 동일한 sign=-1 패턴을 그대로 재사용한다(applyStorageDelta는 이미 양방향으로 설계돼 있다,
   // 새 구조 아님).
-  await AttachmentDAO.applyStorageDelta(pool, {
-    binderId: attachment.binder_id,
-    storageKey: attachment.storage_key,
-    fileSize: attachment.file_size,
-    attachmentId: attachment.id,
-    sign: -1,
-  });
+  //
+  // RLY-20260806-084 — 엔티티 이미지 3종은 애초에 confirm()에서 +1을 적립하지 않는다(§3-3-1).
+  // 여기서 무조건 -1을 적용하면 적립한 적 없는 바이트를 차감해 집계가 음수로 흐른다.
+  if (!ENTITY_IMAGE_CONTEXT_TYPES.has(attachment.context_type)) {
+    await AttachmentDAO.applyStorageDelta(pool, {
+      binderId: attachment.binder_id,
+      storageKey: attachment.storage_key,
+      fileSize: attachment.file_size,
+      attachmentId: attachment.id,
+      sign: -1,
+    });
+  }
   eventBus.emit('ws:broadcast', {
     binder_id: attachment.binder_id,
     type: 'attachment_rejected',
@@ -150,9 +162,16 @@ async function processAttachment(attachment, claimToken) {
     }
 
     // [Step 4] 파생 미디어 생성 (media.md:244-294 — SECTION_MESSAGE|EVENT|TASK|POST|CAST 분기만
-    // 다룬다. avatar·cover 분기는 이 코드베이스의 attachments 테이블에 행 자체가 생기지 않아
-    // — mediaService.presign()이 avatar/cover는 INSERT를 건너뛴다 — claim 대상이 될 수 없다.
-    // 사전 존재 결함이라 이 Task 범위에서 다루지 않는다. 047 보고서에 명시.)
+    // 다룬다.
+    // ⚠️ RLY-20260806-084(S2) 갱신 — 구 주석("avatar·cover는 attachments 행이 없어 claim 대상이
+    // 될 수 없다")은 폐기됐다. presign()이 이제 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·
+    // CAST_COVER)도 attachments 행을 만들고 confirm()이 그대로 processing으로 올리므로, 이
+    // Worker가 그 행을 claim해 Step1~3(MIME 위변조 검사·EXIF 파기)은 이미 실제로 적용된다.
+    // 다만 이 Step4·Step5는 여전히 6종 첨부 분기만 안다 — 엔티티 이미지 전용 파생 규격
+    // (thumb.webp 720px + full.webp 1080px 2종, media.md:441-444)과 Step5의 엔티티 포인터
+    // 갱신(user_infos.image_url 등, media.md:456-478)은 아직 배선돼 있지 않다. 지금은 이미지면
+    // 무조건 아래 6종 분기를 타 thumb.webp 하나만 만들고 status='ready'로 종결한다(엔티티
+    // 포인터는 안 바뀐다) — Worker 로직(Step4·5) 변경은 이번 Task 범위 밖(S3)이라 그대로 둔다.)
     let thumbnailUrl = null;
     const cdnBucket = storage.bucket(CDN_BUCKET);
 

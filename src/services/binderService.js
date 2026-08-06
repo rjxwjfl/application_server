@@ -227,15 +227,12 @@ class BinderService {
       const member = await BinderDAO.getMember(client, binderId, userId);
       if (!member || member.role !== 0) throw new ForbiddenError('권한이 없습니다');
 
-      // RLY-20260806-052 — image_url·thumbnail_url 소유권 검증(binders 테이블엔 avatar/cover
-      // 구분 컬럼이 없어 둘 다 'avatars' prefix 하나로 검증한다 — mediaService._authorizeAvatarPresign
-      // 의 binder 분기와 같은 근거).
-      if (updateData.image_url !== undefined) {
-        await MediaService.assertOwnedMediaReference(updateData.image_url, { prefix: 'avatars', entityId: binderId });
-      }
-      if (updateData.thumbnail_url !== undefined) {
-        await MediaService.assertOwnedMediaReference(updateData.thumbnail_url, { prefix: 'avatars', entityId: binderId });
-      }
+      // RLY-20260806-084 — image_url·thumbnail_url은 서버 전용 필드다(media.md §4-4 Step5·
+      // api.md:146-150). null(사진 제거)·undefined(미포함)만 허용, 그 외 값은 400.
+      MediaService.assertServerOnlyImageFields({
+        image_url: updateData.image_url,
+        thumbnail_url: updateData.thumbnail_url,
+      });
 
       const binder = await BinderDAO.update(client, binderId, updateData);
       const settings = await BinderDAO.updateSettings(client, binderId, updateData);

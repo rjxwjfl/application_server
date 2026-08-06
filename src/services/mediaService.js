@@ -27,6 +27,15 @@ const AUDIO_FILE_SIZE_LIMIT_BYTES = [20, 100, 300].map((mb) => mb * 1024 * 1024)
 const VIDEO_FILE_SIZE_LIMIT_BYTES = [200, 1024, 5120].map((mb) => mb * 1024 * 1024); // Free/Lite/Plus (1GB·5GB)
 const TIER_NAMES = ['free', 'lite', 'plus'];
 
+// RLY-20260806-084 — media.md §3-3-1(엔티티 이미지 3종 — 검사 경로 통합). 아바타·커버가
+// attachments 행 없이 별도 GCS 경로로 빠지던 구 설계(무검사 통과 결함 실측 확인, 2026-08-06)를
+// 폐기하고 첨부와 동일한 presign → confirm → Worker 경로에 태운다. tier 무관 플랫 상한
+// (media.md §3-3·§4-1 서버 Step4) — 첨부 6종의 tier별 상한(위 IMAGE_FILE_SIZE_LIMIT_BYTES 등)과
+// 다른 값이므로 섞지 않는다.
+const ENTITY_IMAGE_CONTEXT_TYPES = new Set(['USER_AVATAR', 'BINDER_AVATAR', 'CAST_COVER']);
+const AVATAR_FILE_SIZE_LIMIT_BYTES = 10 * 1024 * 1024; // USER_AVATAR · BINDER_AVATAR — 10MB flat
+const CAST_COVER_FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024; // CAST_COVER — 20MB flat
+
 const storage = new Storage();
 
 const SIGNED_URL_TTL = {
@@ -59,51 +68,103 @@ function buildStorageKey(binderId, attachmentId, filename) {
   return `attachments/${binderId}/${yyyy}/${mm}/${attachmentId}${ext ? '.' + ext : ''}`;
 }
 
+// media.md §4-1 서버 Step6 — 엔티티 이미지 3종 전용 키. 업로드마다 {attachment_id}로 새 키를
+// 쓴다(구 `original.{ext}` 덮어쓰기 폐기 — 검사 실패 시 이전 사진이 이미 사라지는 문제 방지,
+// media.md:274 근거).
+function buildEntityImageStorageKey(prefix, entityId, attachmentId, filename) {
+  const ext = filename ? filename.split('.').pop() : '';
+  return `${prefix}/${entityId}/${attachmentId}${ext ? '.' + ext : ''}`;
+}
+
 class MediaService {
   /**
-   * context_type: SECTION_MESSAGE | EVENT | TASK | POST | CAST | avatar | cover
-   * context_id: UUID of the context entity (avatar/cover: the entity being pictured — see entity_type)
-   * binder_id: UUID — required for non-avatar/cover contexts
-   * entity_type: avatar/cover 전용 — 'avatar'는 'user'|'binder', 'cover'는 'binder'|'cast'.
-   *   media.md §4-1(entity_type 필드)이 문서화한 값이나 코드에 미배선 상태였다(RLY-20260806-052
-   *   조사 보고). avatar는 클라 유일 실사용 경로(user)와의 하위호환을 위해 생략 시 'user'로 기본값.
-   *   cover는 binder/cast 중 무엇을 가리키는지 구분할 방법이 없어 생략을 허용하지 않는다.
+   * context_type: 9종 — 첨부 6종(SECTION_MESSAGE·EVENT·TASK·POST·CAST·SPECIAL_DAY) +
+   *   엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·CAST_COVER).
+   * context_id: 컨텍스트 PK. 엔티티 이미지 3종은 대상 엔티티 PK(user_id|binder_id|cast_id)가
+   *   필수다(첨부 6종은 pre-upload 단계에 null 허용).
+   * binder_id: 저장 사용량 집계 + GCS 키 네이밍용. USER_AVATAR만 null(귀속 바인더 없음).
+   *
+   * RLY-20260806-084 — media.md §3-3-1·§4-1(2026-08-07 확정)로 구 `context_type: 'avatar'|'cover'`
+   * + `entity_type` 2단 판별자 계약을 대체한다. `context_type` 하나가 이미 엔티티 종류를
+   * 결정하므로 두 번째 판별자가 불필요했다(구 값의 조합 중 절반은 애초에 무의미했다).
    */
   async presign(data, context) {
-    const { filename, content_type, file_size, context_type, context_id, binder_id, entity_type } = data;
+    const { filename, content_type, file_size, context_type, context_id, binder_id } = data;
     const id = generateUUID();
+    const isEntityImage = ENTITY_IMAGE_CONTEXT_TYPES.has(context_type);
 
     // RLY-20260806-056 — media.md:106,127이 서술하는 "MIME 타입 허용 목록 확인"이 코드엔
     // 없었다(presign이 content_type을 어떤 목록과도 대조하지 않고 그대로 DB·GCS 폼에 썼다).
     // api.md:2395가 이미 문서화한 415 UNSUPPORTED_MEDIA_TYPE 계약을 여기서 처음 배선한다.
     // 이미지가 아닌 content_type(오디오·비디오·문서·기타)은 이번 Task 범위 밖이라 손대지
-    // 않는다(team-lead 지시) — avatar·cover는 §3-3상 항상 이미지 전용이라 이 검사가 그대로 적용된다.
-    if (content_type && content_type.toLowerCase().startsWith('image/')
+    // 않는다(team-lead 지시) — 첨부 6종은 image/ 로 선언한 경우만 대조한다.
+    //
+    // RLY-20260806-084 — 엔티티 이미지 3종은 §3-3상 항상 이미지 전용이므로, 선언된 content_type이
+    // 'image/'로 시작하는지와 무관하게 무조건 허용 목록과 대조한다. "image/ 로 시작할 때만
+    // 대조"로 구현하면 application/octet-stream 선언이 검사를 통째로 우회한다 — 2026-08-06
+    // 클라가 GIF를 application/octet-stream으로 선언해 아바타 무검사 통과가 실제로 확인된 경로
+    // (media.md §4-1 서버 Step3 경고).
+    if (isEntityImage) {
+      if (!content_type || !ALLOWED_IMAGE_MIME_TYPES.has(content_type.toLowerCase())) {
+        throw new UnsupportedMediaTypeError('지원하지 않는 이미지 형식입니다');
+      }
+    } else if (content_type && content_type.toLowerCase().startsWith('image/')
       && !ALLOWED_IMAGE_MIME_TYPES.has(content_type.toLowerCase())) {
       throw new UnsupportedMediaTypeError('지원하지 않는 이미지 형식입니다');
     }
+
+    // media.md §4-1 서버 Step2/4 — 엔티티 이미지 3종은 저장 용량 집계 대상이 아니라(§3-3-1)
+    // 플랫 상한(아래)이 유일한 상한이며, file_size가 confirm의 ±10% 편차 검사에도 쓰이므로
+    // 누락을 허용하지 않는다.
+    if (isEntityImage && (file_size === undefined || file_size === null)) {
+      throw new BadRequestError('file_size is required for entity image uploads');
+    }
+
+    // entityBinderId — 엔티티 이미지 3종의 attachments.binder_id 컬럼에 넣을 값(§4-1 서버 Step7:
+    // USER_AVATAR는 null · BINDER_AVATAR는 context_id와 동일 · CAST_COVER는 그 캐스트가 속한
+    // 바인더 id). 인가 단계에서 함께 정해진다(CAST_COVER는 인가 조회에서 이미 얻는 값이라
+    // 별도 쿼리를 추가하지 않는다).
+    let entityBinderId = null;
 
     if (context_type === 'SECTION_MESSAGE') {
       const sectionId = await SectionDAO.findSectionIdByMessage(pool, context_id);
       if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, context.sender_id))) {
         throw new ForbiddenError('섹션 첨부 접근 권한이 없습니다', 'SECTION_ACCESS_DENIED');
       }
-    } else if (context_type === 'avatar') {
+    } else if (context_type === 'USER_AVATAR') {
       // RLY-20260806-052 — 이전엔 avatar/cover가 이 if/else 사슬에서 통째로 빠져 있어
       // 인가 검사가 전혀 없었다(임의 유저가 남의 user_id/binder_id/cast_id로 presign 가능).
-      await this._authorizeAvatarPresign(context_id, entity_type, context);
-    } else if (context_type === 'cover') {
-      await this._authorizeCoverPresign(context_id, entity_type, context);
+      await this._authorizeUserAvatarPresign(context_id, context);
+    } else if (context_type === 'BINDER_AVATAR') {
+      await this._authorizeBinderAvatarPresign(context_id, context);
+      entityBinderId = context_id;
+    } else if (context_type === 'CAST_COVER') {
+      entityBinderId = await this._authorizeCastCoverPresign(context_id, context);
     } else {
-      // EVENT · TASK · POST · CAST 등 binder 소속 첨부 업로드 — getSignedUrl과 같은 갭이었다.
-      // 업로드(쓰기)이므로 공개 캘린더라도 비멤버는 허용하지 않는다(공개 읽기 예외는 조회 전용).
+      // EVENT · TASK · POST · CAST · SPECIAL_DAY 등 binder 소속 첨부 업로드 — getSignedUrl과
+      // 같은 갭이었다. 업로드(쓰기)이므로 공개 캘린더라도 비멤버는 허용하지 않는다(공개 읽기
+      // 예외는 조회 전용).
       if (!binder_id) throw new BadRequestError('binder_id required for attachment contexts');
       await requireBinderMember(pool, binder_id, context.sender_id);
     }
 
-    // F-S9 — 한도 집행 지점. avatar/cover는 binder_storage_usage 대상이 아니다(binder_id 없음).
+    // 엔티티 이미지 3종의 플랫 상한(media.md §3-3·§4-1 서버 Step4) — tier 무관, 첨부 6종의
+    // tier별 상한(아래)과 별개 수치다. 총량 한도(binder_storage_usage) 검사에는 들어가지 않는다
+    // (§3-3-1) — 아래 !isEntityImage 블록 전체를 건너뛴다.
+    if (isEntityImage) {
+      const declaredSize = Number(file_size) || 0;
+      const flatLimitBytes = context_type === 'CAST_COVER'
+        ? CAST_COVER_FILE_SIZE_LIMIT_BYTES
+        : AVATAR_FILE_SIZE_LIMIT_BYTES;
+      if (declaredSize > flatLimitBytes) {
+        const limitMb = Math.round(flatLimitBytes / (1024 * 1024));
+        throw new PayloadTooLargeError(`이미지 파일은 ${limitMb}MB를 초과할 수 없습니다`);
+      }
+    }
+
+    // F-S9 — 한도 집행 지점. 엔티티 이미지 3종은 binder_storage_usage 대상이 아니다(§3-3-1).
     // SECTION_MESSAGE도 binder_id로 집계되므로 같이 검사한다(결정 33·SC-billing.md 액션 E).
-    if (context_type !== 'avatar' && context_type !== 'cover') {
+    if (!isEntityImage) {
       const [bytesUsed, tier] = await Promise.all([
         AttachmentDAO.getBytesUsed(pool, binder_id),
         AttachmentDAO.getTier(pool, binder_id),
@@ -158,9 +219,12 @@ class MediaService {
     }
 
     let storage_key;
-    if (context_type === 'avatar' || context_type === 'cover') {
-      // Avatar/cover use entity-centric path
-      storage_key = `${context_type}s/${context_id}/${id}${filename ? '.' + filename.split('.').pop() : ''}`;
+    if (context_type === 'USER_AVATAR') {
+      storage_key = buildEntityImageStorageKey('avatars/users', context_id, id, filename);
+    } else if (context_type === 'BINDER_AVATAR') {
+      storage_key = buildEntityImageStorageKey('avatars/binders', context_id, id, filename);
+    } else if (context_type === 'CAST_COVER') {
+      storage_key = buildEntityImageStorageKey('covers/casts', context_id, id, filename);
     } else {
       storage_key = buildStorageKey(binder_id, id, filename);
     }
@@ -177,110 +241,87 @@ class MediaService {
       fields: { 'Content-Type': content_type },
     });
 
-    if (context_type !== 'avatar' && context_type !== 'cover') {
-      await pool.query(
-        `INSERT INTO attachments
-           (id, binder_id, context_type, context_id, storage_key, filename,
-            file_size, content_type, status, storage_class, uploader_id,
-            created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','standard',$9,now(),now())`,
-        [id, binder_id, context_type, context_id || null,
-         storage_key, filename || null, file_size || null,
-         content_type || null, context.sender_id]
-      );
-    }
+    // RLY-20260806-084 — media.md §3-3-1: 엔티티 이미지 3종도 attachments 행을 만든다(구
+    // "DB 레코드 없음" 설계 폐기). 상태 없이는 재시도(attempt_count)·점유(claim_token)·거부
+    // 종결(status='rejected')이 성립하지 않아 Worker의 MIME 위변조 검사·EXIF 파기·파생 생성에
+    // 도달 자체를 못 했다(2026-08-06 무검사 통과 실측). insertBinderId는 §4-1 서버 Step7 규칙대로
+    // 타입별로 다르다(위 entityBinderId 계산 참조).
+    const insertBinderId = isEntityImage ? entityBinderId : binder_id;
+    await pool.query(
+      `INSERT INTO attachments
+         (id, binder_id, context_type, context_id, storage_key, filename,
+          file_size, content_type, status, storage_class, uploader_id,
+          created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','standard',$9,now(),now())`,
+      [id, insertBinderId, context_type, context_id || null,
+       storage_key, filename || null, file_size || null,
+       content_type || null, context.sender_id]
+    );
 
     return { id, upload_url: uploadUrl, storage_key };
   }
 
   /**
-   * RLY-20260806-052 — avatar presign 인가. entity_type 생략 시 'user'(클라 유일 실사용 경로,
-   * storage_repository.dart:83-88 — contextType:'avatar', entityType 미전송)로 취급한다.
+   * RLY-20260806-052/084 — USER_AVATAR presign 인가. media.md §4-1-1: 본인만.
    */
-  async _authorizeAvatarPresign(contextId, entityType, context) {
+  async _authorizeUserAvatarPresign(contextId, context) {
     if (!contextId) throw new BadRequestError('context_id required for avatar contexts');
-    const type = entityType || 'user';
-
-    if (type === 'user') {
-      if (contextId !== context.sender_id) {
-        throw new ForbiddenError('본인 프로필 사진만 업로드할 수 있습니다', 'AVATAR_FORBIDDEN');
-      }
-      return;
+    if (contextId !== context.sender_id) {
+      throw new ForbiddenError('본인 프로필 사진만 업로드할 수 있습니다', 'AVATAR_FORBIDDEN');
     }
-    if (type === 'binder') {
-      // binderService.updateBinder와 동일 기준 — master(role 0)만(binderService.js:227).
-      // 실제로 이 storage_key를 소비하는 유일한 필드는 binders.image_url(PATCH /binders/:id)이며
-      // 그 엔드포인트가 이미 master 전용이다 — presign 단계 인가를 그 기준에 맞춘다.
-      await requireBinderMember(pool, contextId, context.sender_id, { minRole: 0 });
-      return;
-    }
-    throw new BadRequestError('지원하지 않는 entity_type입니다', 'UNSUPPORTED_ENTITY_TYPE');
   }
 
   /**
-   * RLY-20260806-052 — cover presign 인가. avatar와 달리 entity_type을 생략할 수 없다 —
-   * context_id 하나만으로는 binder_id인지 cast_id인지 구분할 방법이 없다(둘 다 UUID).
+   * RLY-20260806-052/084 — BINDER_AVATAR presign 인가. media.md §4-1-1: 그 바인더의
+   * master(role 0) — binderService.updateBinder(PATCH /binders/:id)와 동일 기준. 실제로 이
+   * storage_key를 소비하는 유일한 필드는 binders.image_url이며 그 엔드포인트가 이미 master
+   * 전용이다 — presign 단계 인가를 그 기준에 맞춘다.
    */
-  async _authorizeCoverPresign(contextId, entityType, context) {
-    if (!contextId) throw new BadRequestError('context_id required for cover contexts');
-    if (entityType === 'binder') {
-      // 위 avatar/binder와 동일 기준(master만) — binders 테이블엔 avatar·cover 구분 컬럼이
-      // 없고 image_url 하나뿐이라 실질적으로 avatar/binder와 같은 문지기를 공유한다.
-      await requireBinderMember(pool, contextId, context.sender_id, { minRole: 0 });
-      return;
-    }
-    if (entityType === 'cast') {
-      // castService.update(:73-80)와 동일한 판정을 그대로 재사용한다 — 작성자 본인이거나
-      // master/manager(role<=1)여야 한다. 새 헬퍼를 만들지 않고 기존 패턴을 인라인 복제한다.
-      const cast = await CastDAO.findById(pool, contextId);
-      if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
-      const { member } = await requireBinderMemberByCalendarId(pool, cast.calendar_id, context.sender_id);
-      if (member.role > 1 && cast.author_id !== context.sender_id) {
-        throw new ForbiddenError('권한이 없습니다');
-      }
-      return;
-    }
-    throw new BadRequestError('cover 업로드에는 entity_type(binder|cast)이 필요합니다', 'ENTITY_TYPE_REQUIRED');
+  async _authorizeBinderAvatarPresign(contextId, context) {
+    if (!contextId) throw new BadRequestError('context_id required for binder avatar contexts');
+    await requireBinderMember(pool, contextId, context.sender_id, { minRole: 0 });
   }
 
   /**
-   * RLY-20260806-052 — PATCH 계열 엔드포인트(users/:id, binders/:binderId, casts/:castId)가
-   * 클라 선언 image_url·thumbnail_url·cover_image_url을 검증 없이 그대로 DB에 쓰던 결함의 수리.
+   * RLY-20260806-052/084 — CAST_COVER presign 인가. media.md §4-1-1: 그 캐스트의 작성자 본인
+   * 또는 master·manager(role ≤ 1) — castService.update와 동일 판정(작성자는 role과 무관하게
+   * 허용, 그 외는 role<=1). requireBinderMemberByCalendarId가 반환하는 calendar.binder_id를
+   * attachments.binder_id 계산에 재사용한다(별도 조회를 추가하지 않는다).
    *
-   * avatar/cover는 attachments 행이 없어(media.md §4-1, 설계상 의도) 행 참조로 검증할 수 없다 —
-   * 대신 storage_key 자체가 이미 신뢰의 근거다: presign이 `{prefix}/{entityId}/{uuid}.ext` 형태로
-   * 결정적으로 키를 생성하고(mediaService.presign:96), 그 키를 발급받으려면 위 _authorize*Presign이
-   * 이미 이 entityId에 대한 쓰기 권한을 확인했다. 따라서 "제출된 값이 이 entityId 접두사와 정확히
-   * 일치하는 storage_key인가 + GCS에 실제로 그 객체가 존재하는가"만 확인하면 별도 상태 저장 없이
-   * (attachments 행도, 새 테이블도 없이) 위조 URL을 배제할 수 있다 — 가장 단순한 방법(팀리드 지시).
-   *
-   * ⚠️ 이 메서드는 URL 위조·타인 참조만 막는다. MIME 위변조 검사·EXIF 파기는 하지 않는다
-   * (①이 보류돼 avatar/cover엔 Worker 파이프라인이 없다 — 보고서 참조).
-   *
-   * @param {string|null|undefined} value - 미제공(undefined)이면 기존 값 유지(DAO의 COALESCE와
-   *   동일 의미) — 검증하지 않고 통과시킨다. null은 기존 COALESCE 동작(무시 — 지우지 않음)을
-   *   그대로 둔다 — 이 메서드가 그 동작을 바꾸지 않는다(별도 결함, 이번 Task 범위 아님).
-   * @param {object} params
-   * @param {string} params.prefix - 'avatars' | 'covers'
-   * @param {string} params.entityId - 이 값을 갱신하는 대상 엔티티의 실제 id(user/binder/cast)
+   * @returns {string} 이 캐스트가 속한 바인더 id — presign의 entityBinderId(§4-1 서버 Step7)로 쓰인다.
    */
-  async assertOwnedMediaReference(value, { prefix, entityId }) {
-    if (value === undefined || value === null) return;
-    if (typeof value !== 'string') {
-      throw new BadRequestError('허용되지 않은 이미지 참조입니다', 'INVALID_IMAGE_REFERENCE');
+  async _authorizeCastCoverPresign(contextId, context) {
+    if (!contextId) throw new BadRequestError('context_id required for cast cover contexts');
+    const cast = await CastDAO.findById(pool, contextId);
+    if (!cast) throw new NotFoundError('캐스트를 찾을 수 없습니다');
+    const { calendar, member } = await requireBinderMemberByCalendarId(pool, cast.calendar_id, context.sender_id);
+    if (member.role > 1 && cast.author_id !== context.sender_id) {
+      throw new ForbiddenError('권한이 없습니다');
     }
+    return calendar.binder_id;
+  }
 
-    const wantPrefix = `${prefix}/${entityId}/`;
-    const rest = value.startsWith(wantPrefix) ? value.slice(wantPrefix.length) : null;
-    const isOwnedKey = !!rest && rest.length > 0 && !rest.includes('/') && !rest.includes('..');
-    if (!isOwnedKey) {
-      throw new BadRequestError('허용되지 않은 이미지 참조입니다', 'INVALID_IMAGE_REFERENCE');
-    }
-
-    const bucket = storage.bucket(getMediaBucket());
-    const [exists] = await bucket.file(value).exists();
-    if (!exists) {
-      throw new BadRequestError('업로드된 파일을 찾을 수 없습니다', 'IMAGE_REFERENCE_NOT_FOUND');
+  /**
+   * RLY-20260806-084 — media.md §4-4 Step5 note / api.md:146-150: image_url·thumbnail_url·
+   * cover_image_url은 서버 전용 필드다("포인터는 검사를 통과한 순간에만, 서버가 옮긴다"). 클라가
+   * null이 아닌 값을 보내면 400으로 거부한다. 남는 용도는 "사진 제거"뿐이라 두 필드 모두 null은
+   * 허용하고, undefined(필드 자체 미포함)는 기존 값 유지(DAO COALESCE와 동일 의미)로 통과시킨다.
+   *
+   * assertOwnedMediaReference(RLY-20260806-052)를 대체한다 — 그 헬퍼는 "클라가 보낸 storage_key가
+   * 자기 소유 형식인가 + GCS에 실재하는가"를 검증했지만, 이제 서버가 검사 통과 시점에만
+   * 엔티티 포인터를 옮기므로(media.md §4-4 Step5) 클라가 이 필드에 값을 실어 보내는 경로 자체가
+   * 사라진다 — 형식 검증보다 값 자체를 안 받는 쪽이 더 강한 방어다.
+   *
+   * @param {object} fields - { image_url? , thumbnail_url? , cover_image_url? } 등 필드명→값.
+   */
+  assertServerOnlyImageFields(fields) {
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined && value !== null) {
+        throw new BadRequestError(
+          `${key}은(는) 서버가 채우는 필드입니다. 사진은 presign 업로드로만 반영됩니다`,
+          'SERVER_ONLY_IMAGE_FIELD'
+        );
+      }
     }
   }
 
@@ -356,13 +397,20 @@ class MediaService {
 
       // F-S9 — 첨부 행 갱신과 같은 트랜잭션에서 원자 갱신(같은 storage_key의 다른 활성 행이
       // 이미 있으면 0 — 멱등 재confirm·복제 승계 양쪽에 forward-compatible).
-      await AttachmentDAO.applyStorageDelta(client, {
-        binderId: attachment.binder_id,
-        storageKey: attachment.storage_key,
-        fileSize: attachment.file_size,
-        attachmentId: attachment.id,
-        sign: 1,
-      });
+      //
+      // RLY-20260806-084 — media.md §3-3-1: 엔티티 이미지 3종은 이 집계 대상이 아니다. binder_id
+      // 없는 USER_AVATAR는 applyStorageDelta의 null 가드로 자동 제외되지만, BINDER_AVATAR·
+      // CAST_COVER는 binder_id가 채워져 있어(§4-1 서버 Step7) 그 가드만으로는 걸러지지 않는다 —
+      // context_type으로 명시 제외한다(빠뜨리면 실제 소비 안 한 바이트가 바인더 한도를 깎아먹는다).
+      if (!ENTITY_IMAGE_CONTEXT_TYPES.has(attachment.context_type)) {
+        await AttachmentDAO.applyStorageDelta(client, {
+          binderId: attachment.binder_id,
+          storageKey: attachment.storage_key,
+          fileSize: attachment.file_size,
+          attachmentId: attachment.id,
+          sign: 1,
+        });
+      }
 
       return attachment;
     });

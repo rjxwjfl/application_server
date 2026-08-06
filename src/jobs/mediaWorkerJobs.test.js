@@ -505,6 +505,32 @@ async function run() {
     assert.ok(!/scanned|malware_scan|virus_scan/i.test(daoSrc), 'DAO에 "스캔 완료"를 뜻하는 필드/코드가 없어야 한다(거짓 신호 금지)');
   });
 
+  // ═══════════════════════════════════════════════════════════════════
+  // ⑦ RLY-20260806-084 — media.md §3-3-1: 엔티티 이미지 3종은 거부돼도 storage delta를
+  //    건드리면 안 된다(confirm에서 애초에 +1을 적립하지 않았으므로). BINDER_AVATAR는
+  //    binder_id가 채워져 있어(§4-1 서버 Step7) applyStorageDelta의 null 가드만으로는
+  //    걸러지지 않는다 — rejectAttachment의 명시적 context_type 제외가 실제로 동작하는지 확인.
+  // ═══════════════════════════════════════════════════════════════════
+  await check('⑦ BINDER_AVATAR MIME 위변조 거부 — binder_storage_usage가 전혀 바뀌지 않는다(적립한 적 없으므로)', async () => {
+    const jpegBytes = await makeJpegWithGpsAndOrientation();
+    const key = 'avatars/binders/b1/entity-mime-mismatch.png';
+    gcsMedia[key] = jpegBytes;
+    const id = seedAttachment({
+      status: 'processing', storage_key: key, content_type: 'image/png', file_size: jpegBytes.length,
+      context_type: 'BINDER_AVATAR', context_id: 'b1', binder_id: 'b1',
+    });
+    // confirm()이 BINDER_AVATAR에 대해 애초에 delta를 적립하지 않았다는 전제를 그대로 재현한다
+    // (§3-3-1 — 엔티티 이미지 3종은 binder_storage_usage 대상이 아니다).
+    const quotaBefore = (db.binder_storage_usage.b1 && db.binder_storage_usage.b1.bytes_used) || 0;
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[id].status, 'rejected', 'BINDER_AVATAR도 첨부와 동일하게 MIME 위변조는 거부된다');
+    assert.ok(gcsDeleteLog.includes(key), 'GCS 원본이 삭제돼야 한다(첨부와 동일 규약)');
+    const quotaAfter = (db.binder_storage_usage.b1 && db.binder_storage_usage.b1.bytes_used) || 0;
+    assert.strictEqual(quotaAfter, quotaBefore, '적립한 적 없는 바이트를 차감하면 안 된다 — binder_storage_usage가 음수로 흐르는 결함의 회귀');
+  });
+
   console.log(`\n[mediaWorkerJobs] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
   if (failures.length) {
     console.log('--- 실패 목록 ---');
