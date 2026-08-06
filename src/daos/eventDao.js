@@ -8,7 +8,7 @@ class EventDAO {
   async findById(conn, eventId) {
     const query = `
       SELECT id, calendar_id, author_id, event_type, summary,
-             description, color, r_rule, recurrence_timezone, locations, forked_from,
+             description, color, r_rule, recurrence_timezone, reminder_offsets, locations, forked_from,
              created_at, updated_at, deleted_at
       FROM events
       WHERE id = $1 AND deleted_at IS NULL
@@ -17,15 +17,25 @@ class EventDAO {
     return result.rows[0] || null;
   }
 
+  // 회차 목록(id·start_date)만 필요한 호출부용 — 마스터 필드(reminder_offsets 등) 변경 후
+  // 회차별로 발송 원장을 다시 파생할 때 쓴다(RLY-20260806-026 컬럼 배선).
+  async findInstancesByEventId(conn, eventId) {
+    const result = await conn.query(
+      `SELECT id, start_date FROM event_instances WHERE event_id = $1 AND deleted_at IS NULL`,
+      [eventId]
+    );
+    return result.rows;
+  }
+
   async createEvent(conn, data) {
     const eventQuery = `
       INSERT INTO events (
         id, calendar_id, author_id, event_type, summary,
         description, color, r_rule, locations, forked_from,
-        recurrence_timezone, created_at, updated_at
+        recurrence_timezone, reminder_offsets, created_at, updated_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, COALESCE($12, now()), COALESCE($13, now())
+        $11, $12, COALESCE($13, now()), COALESCE($14, now())
       )
       RETURNING *
     `;
@@ -42,6 +52,9 @@ class EventDAO {
       data.locations ? JSON.stringify(data.locations) : null,
       data.forked_from || null,
       data.recurrence_timezone || null,
+      // RLY-20260806-026 — SC-reminder §7-1: 부재/null → 무변동(신규 행이라 결국 NULL 저장),
+      // 존재(빈 배열 포함) → 그대로 저장. `??`로 undefined/null만 걸러 빈 배열은 보존한다.
+      data.reminder_offsets ?? null,
       data.created_at,
       data.updated_at
     ]);
@@ -65,7 +78,7 @@ class EventDAO {
   }
 
   async updateEvent(conn, eventId, updateData) {
-    const { summary, description, color, r_rule, locations, recurrence_timezone } = updateData;
+    const { summary, description, color, r_rule, locations, recurrence_timezone, reminder_offsets } = updateData;
     // recurrence_timezone은 COALESCE가 아니라 hasOwnProperty 기반 CASE WHEN을 쓴다 — 이 저장소의
     // 기존 관례(postDAO.js update()의 title/special_day_id, groupDAO.js updateGroup()의 color)를
     // 그대로 따른 것이다. COALESCE는 "필드 부재(변경 없음)"와 "필드가 명시적으로 null(지우기)"을
@@ -73,6 +86,11 @@ class EventDAO {
     // 일부러 COALESCE를 유지했다 — 각 필드의 "명시적 지우기" 필요 여부는 개별 판정해야 하고,
     // 이번 범위는 recurrence_timezone 하나뿐이다. 이 컬럼만 다르다고 "빠뜨린 COALESCE"로 오해해
     // 통일하지 말 것 — 통일하면 지우기가 다시 죽는다.
+    //
+    // reminder_offsets는 COALESCE로 충분하다 — SC-reminder §7-1 계약 자체가 "부재/null → 무변동,
+    // 존재(빈 배열 포함) → 전체 replace"라 recurrence_timezone과 달리 "명시적 null로 지우기"를
+    // 요구하지 않는다. 빈 배열 `[]`은 null이 아니므로 COALESCE가 그대로 통과시켜 "리마인더 전량
+    // 해제"를 표현한다.
     const hasRecurrenceTimezone = Object.prototype.hasOwnProperty.call(updateData, 'recurrence_timezone');
     const query = `
       UPDATE events
@@ -82,14 +100,16 @@ class EventDAO {
           r_rule = COALESCE($4, r_rule),
           locations = COALESCE($5, locations),
           recurrence_timezone = CASE WHEN $6 THEN $7 ELSE recurrence_timezone END,
+          reminder_offsets = COALESCE($8, reminder_offsets),
           updated_at = now()
-      WHERE id = $8 AND deleted_at IS NULL
+      WHERE id = $9 AND deleted_at IS NULL
       RETURNING *
     `;
     const result = await conn.query(query, [
       summary, description, color, r_rule,
       locations ? JSON.stringify(locations) : null,
       hasRecurrenceTimezone, recurrence_timezone,
+      reminder_offsets ?? null,
       eventId
     ]);
     return result.rows[0];
@@ -181,9 +201,11 @@ class EventDAO {
 
   // TaskDAO.findInstanceContext(taskDAO.js:226-234)와 동일 패턴 — 인스턴스가 실제로
   // 해당 event_id에 속하는지 확인하면서 인가에 필요한 calendar_id/binder_id/author_id를 한 번에 확보한다.
+  // e.reminder_offsets도 함께 실어 온다 — RLY-20260806-026: 회차 시각만 바뀌는 갱신에서 리마인더를
+  // 재파생할 때 이 값이 유일한 오프셋 출처다(역산 경로 없음).
   async findInstanceContext(conn, eventId, instanceId) {
     const result = await conn.query(`
-      SELECT ei.id, ei.deleted_at, e.calendar_id, e.author_id, c.binder_id
+      SELECT ei.id, ei.deleted_at, e.calendar_id, e.author_id, c.binder_id, e.reminder_offsets
       FROM event_instances ei
       JOIN events e ON e.id = ei.event_id
       JOIN calendars c ON c.id = e.calendar_id

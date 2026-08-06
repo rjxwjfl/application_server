@@ -121,24 +121,14 @@ class ReminderDAO {
   // 반복 항목(회차 여러 개)은 호출부가 회차마다 이 함수를 반복 호출한다 — eventDAO.createEvent가
   // 이미 인스턴스마다 루프를 도는 것과 같은 패턴이라 여기서 배열을 받지 않는다.
   //
-  // `offsets === undefined`(호출부가 아예 안 넘김)은 SC-reminder §7-1의 "부재/null → 무변동,
-  // 존재(빈 배열 포함) → 항목 전체 replace" 계약 중 **무변동** 분기다. 오프셋 자체는 건드리지 않고
-  // 기존 각 행이 이미 보유한 trigger_offset을 그대로 쓰며 baseTime만 새로 반영한다 — 항목 시각이
-  // 바뀌었을 때 원장을 다시 파생시키는 경로다(events·tasks.reminder_offsets가 owner row에 아직
-  // 쓰이지 않는 상태에서도 이 경로는 그 컬럼을 읽지 않으므로 정확하다. RLY-20260806-026 구현보고서 참조).
+  // ⚠️ `offsets`는 항상 호출부가 `{events|tasks|special_days}.reminder_offsets`(owner row에
+  // 저장된 값)를 명시적으로 읽어 넘긴다 — 오프셋의 출처는 이 컬럼 하나뿐이다. 회차 시각만
+  // 바뀐 갱신도 예외가 아니다: 호출부가 항목 row를 다시 조회해 그 `reminder_offsets`를 그대로
+  // 넘기고, 이 함수는 baseTime만 새 값으로 트리거를 재계산한다(같은 오프셋이면 결과적으로
+  // no-op에 가깝지만, 오프셋이 그 사이 바뀌었어도 항상 정확하다). 기존 `reminders` 행의
+  // trigger_offset으로 역산하는 경로는 두지 않는다 — 저장이 깨져 있던 이력 때문에 애초에
+  // 행이 없는 항목이 있었고, 그 경우 역산은 아무것도 복구하지 못했다(RLY-20260806-026 구현보고서).
   async syncTarget(conn, { targetType, targetId, baseTime, offsets, timezone = null }) {
-    if (offsets === undefined) {
-      await conn.query(
-        `UPDATE reminders
-         SET trigger_at = $1::timestamptz - (trigger_offset * interval '1 second'),
-             timezone = COALESCE($2, timezone),
-             updated_at = now()
-         WHERE target_type = $3 AND target_id = $4`,
-        [baseTime, timezone, targetType, targetId]
-      );
-      return;
-    }
-
     const list = Array.isArray(offsets)
       ? [...new Set(offsets.filter((o) => Number.isInteger(o) && o >= 0))]
       : [];
