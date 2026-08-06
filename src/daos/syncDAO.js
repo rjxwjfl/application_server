@@ -3,9 +3,12 @@ class SyncDAO {
   // =========================================================================
   // 권한 획득 유틸리티
   // =========================================================================
+  // role >= 0 — join-request pending(role=-1, RLY-20260806-018) 바인더는 이 유저의 동기화
+  // 스코프(currDIds)에 넣지 않는다. 이 함수가 sync 파이프라인 전체의 접근 스코프 뿌리이므로,
+  // 여기서 빠지면 getSection·getEventsDeltaFull 등 하위 모든 델타 쿼리가 자동으로 차단된다.
   static async getBinderIdsByUserId(pool, userId) {
     const { rows } = await pool.query(
-      `SELECT binder_id FROM binder_members WHERE user_id = $1 AND deleted_at IS NULL`,
+      `SELECT binder_id FROM binder_members WHERE user_id = $1 AND deleted_at IS NULL AND role >= 0`,
       [userId]
     );
     return rows.map(r => r.binder_id);
@@ -37,11 +40,14 @@ class SyncDAO {
 
   static async getBinderMembers(pool, currDIds) {
     if (!currDIds.length) return [];
+    // role >= 0 — pending(role=-1) 신청자를 다른 멤버의 동기화 페이로드(멤버 로스터)에 노출하지
+    // 않는다(RLY-20260806-018). currDIds는 이미 getBinderIdsByUserId에서 필터되므로 이 필터가
+    // 실제로 걸러내는 건 "요청자는 진짜 멤버지만 같은 바인더에 다른 pending 신청자가 있는" 경우다.
     const query = `
       SELECT binder_id, user_id, role, nickname_in_binder, joined_at,
              created_at, updated_at, deleted_at
       FROM binder_members
-      WHERE binder_id = ANY($1::uuid[]) AND deleted_at IS NULL
+      WHERE binder_id = ANY($1::uuid[]) AND deleted_at IS NULL AND role >= 0
     `;
     const { rows } = await pool.query(query, [currDIds]);
     return rows;
@@ -67,8 +73,10 @@ class SyncDAO {
       FROM user_infos ui
       JOIN users u ON ui.user_id = u.id
       WHERE ui.user_id IN (
+        -- role >= 0 — pending(role=-1) 신청자의 프로필을 다른 멤버 동기화에 끼워 보내지 않는다
+        -- (RLY-20260806-018).
         SELECT DISTINCT dm.user_id FROM binder_members dm
-        WHERE dm.binder_id = ANY($1::uuid[]) AND dm.deleted_at IS NULL
+        WHERE dm.binder_id = ANY($1::uuid[]) AND dm.deleted_at IS NULL AND dm.role >= 0
       )
       ${oldTs ? 'AND ui.updated_at > $2' : ''}
     `;
@@ -88,14 +96,17 @@ class SyncDAO {
 
   static async getSection(pool, userId, currDIds, oldTs, previousSectionIds) {
     if (!currDIds.length) return [];
+    // role >= 0 — currDIds는 이미 getBinderIdsByUserId에서 pending 바인더를 걸러내지만, 이 JOIN과
+    // "role <= 1(master·manager 전체 섹션 접근)" 비교 자체도 독립적으로 뚫려 있었다: role=-1이
+    // "<= 1"을 통과해 대기 신청자가 비공개 섹션까지 전부 받아가는 경로였다(RLY-20260806-018).
     const query = `
       SELECT s.* FROM sections s
       JOIN binder_members bm ON bm.binder_id = s.binder_id
-        AND bm.user_id = $1 AND bm.deleted_at IS NULL
+        AND bm.user_id = $1 AND bm.deleted_at IS NULL AND bm.role >= 0
       WHERE s.binder_id = ANY($2::uuid[])
         AND (
           (s.deleted_at IS NULL AND (
-            bm.role <= 1
+            bm.role BETWEEN 0 AND 1
             OR s.access_scope = 0
             OR EXISTS (
               SELECT 1 FROM section_members sm

@@ -78,9 +78,11 @@ class NotificationService {
 
       if (routeData.route_type === TargetType.SECTION_MESSAGE && routeData.route_id) {
         const { rows } = await pool.query(
+          // role >= 0 — 방어적 필터(RLY-20260806-018). userIds는 이미 getMembersForAlert에서
+          // pending을 걸렀지만, target_user_ids로 직접 넘어온 경우까지 대비한다.
           `SELECT bm.user_id FROM section_messages m
            JOIN sections s ON s.id = m.section_id
-           JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.deleted_at IS NULL
+           JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.deleted_at IS NULL AND bm.role >= 0
            WHERE m.id = $1 AND bm.user_id = ANY($2::uuid[]) AND (s.access_scope = 0 OR
              EXISTS (SELECT 1 FROM section_members sm WHERE sm.section_id = s.id
                  AND sm.user_id = bm.user_id AND sm.deleted_at IS NULL))`,
