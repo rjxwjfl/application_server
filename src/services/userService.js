@@ -87,16 +87,13 @@ class UserService {
   async updateUser(uid, updateData) {
     const { display_name, bio, image_url, thumbnail_url } = updateData;
 
-    const updatedUser = await withTransaction(async (client) => {
-      // RLY-20260806-052 — image_url·thumbnail_url을 실제로 바꾸려는 요청일 때만 소유권을
-      // 검증한다(register/OAuth가 심는 provider photoURL은 UserDAO.create 경로라 여기 안 걸린다).
-      if (image_url !== undefined || thumbnail_url !== undefined) {
-        const existing = await UserDAO.findByUid(client, uid);
-        if (!existing) throw new NotFoundError('사용자를 찾을 수 없습니다');
-        await MediaService.assertOwnedMediaReference(image_url, { prefix: 'avatars', entityId: existing.id });
-        await MediaService.assertOwnedMediaReference(thumbnail_url, { prefix: 'avatars', entityId: existing.id });
-      }
+    // RLY-20260806-084 — image_url·thumbnail_url은 서버 전용 필드다(media.md §4-4 Step5·
+    // api.md:146-150). null(사진 제거)·undefined(미포함)만 허용, 그 외 값은 400
+    // SERVER_ONLY_IMAGE_FIELD. register/OAuth가 심는 provider photoURL은 UserDAO.create
+    // 경로라 여기 안 걸린다(RLY-20260806-052부터 유지되는 전제).
+    MediaService.assertServerOnlyImageFields({ image_url, thumbnail_url });
 
+    const updatedUser = await withTransaction(async (client) => {
       const result = await UserDAO.update(client, uid, {
         display_name,
         bio,
@@ -123,15 +120,13 @@ class UserService {
     if (userId !== requesterId) {
       throw new ForbiddenError('본인 프로필만 수정할 수 있습니다', 'USER_UPDATE_FORBIDDEN');
     }
-    return await withTransaction(async (client) => {
-      // RLY-20260806-052 — 위 updateUser와 동일한 소유권 검증.
-      if (updateData.image_url !== undefined) {
-        await MediaService.assertOwnedMediaReference(updateData.image_url, { prefix: 'avatars', entityId: userId });
-      }
-      if (updateData.thumbnail_url !== undefined) {
-        await MediaService.assertOwnedMediaReference(updateData.thumbnail_url, { prefix: 'avatars', entityId: userId });
-      }
+    // RLY-20260806-084 — 위 updateUser와 동일한 서버 전용 필드 검증.
+    MediaService.assertServerOnlyImageFields({
+      image_url: updateData.image_url,
+      thumbnail_url: updateData.thumbnail_url,
+    });
 
+    return await withTransaction(async (client) => {
       const result = await UserDAO.updateById(client, userId, updateData);
       if (!result) throw new NotFoundError('사용자를 찾을 수 없습니다');
       return result;

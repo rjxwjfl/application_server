@@ -80,14 +80,12 @@ class CastService {
     if (!member || member.deleted_at || (member.role > 1 && cast.author_id !== context.sender_id))
       throw new ForbiddenError('권한이 없습니다');
 
-    // RLY-20260806-052 — cover_image_url·thumbnail_url 소유권 검증. 'covers' prefix로
-    // mediaService._authorizeCoverPresign의 cast 분기가 생성한 storage_key와 짝을 맞춘다.
-    if (data.cover_image_url !== undefined) {
-      await MediaService.assertOwnedMediaReference(data.cover_image_url, { prefix: 'covers', entityId: castId });
-    }
-    if (data.thumbnail_url !== undefined) {
-      await MediaService.assertOwnedMediaReference(data.thumbnail_url, { prefix: 'covers', entityId: castId });
-    }
+    // RLY-20260806-084 — cover_image_url·thumbnail_url은 서버 전용 필드다(media.md §4-4 Step5·
+    // api.md:146-150). null(사진 제거)·undefined(미포함)만 허용, 그 외 값은 400.
+    MediaService.assertServerOnlyImageFields({
+      cover_image_url: data.cover_image_url,
+      thumbnail_url: data.thumbnail_url,
+    });
 
     const updated = await CastDAO.update(pool, castId, data);
 

@@ -120,14 +120,17 @@ async function run() {
   );
   assert.strictEqual(db.user_infos.self1.display_name, 'self-new');
 
-  // ============ ④ 이미지 필드 검증(052) 불변 — 인가 통과 후 여전히 형식 검증에 걸린다 ============
+  // ============ ④ 이미지 필드 검증 불변 — 인가 통과 후 여전히 서버 전용 필드 검증에 걸린다.
+  // RLY-20260806-084 — 052의 assertOwnedMediaReference(INVALID_IMAGE_REFERENCE)는 폐기되고
+  // assertServerOnlyImageFields(SERVER_ONLY_IMAGE_FIELD)로 대체됐다(값 자체를 안 받는 더 강한
+  // 방어 — media.md §4-4 Step5). 054의 IDOR 방어 순서(요청자 대조가 먼저)는 불변이다.
   await expectRejected(
-    '본인 id인데 임의 URL — 인가는 통과하지만 052의 소유권 검증(INVALID_IMAGE_REFERENCE)에 걸린다',
+    '본인 id인데 임의 URL — 인가는 통과하지만 서버 전용 필드 검증(SERVER_ONLY_IMAGE_FIELD)에 걸린다',
     () => userService.updateUserById('self1', { image_url: 'https://evil.example.com/x.png' }, 'self1'),
-    { statusCode: 400, errorCode: 'INVALID_IMAGE_REFERENCE' }
+    { statusCode: 400, errorCode: 'SERVER_ONLY_IMAGE_FIELD' }
   );
   await expectRejected(
-    '타인 id + 임의 URL — 052 검증까지 가지도 못하고 054의 403이 먼저 걸린다(방어 순서)',
+    '타인 id + 임의 URL — 서버 전용 필드 검증까지 가지도 못하고 054의 403이 먼저 걸린다(방어 순서)',
     () => userService.updateUserById('victim1', { image_url: 'https://evil.example.com/x.png' }, 'attacker1'),
     { statusCode: 403, errorCode: 'USER_UPDATE_FORBIDDEN' }
   );

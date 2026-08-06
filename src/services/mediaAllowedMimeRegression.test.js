@@ -29,8 +29,8 @@ async function mockQuery(sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   queryLog.push(s);
   // 이 스위트는 MIME 게이트가 DB에 닿기도 전에 거부하는지를 확인하는 것이 핵심이다 —
-  // 통과 케이스는 context_type='avatar'+본인 id만 써서(DB 호출이 없는 유일한 인가 분기,
-  // mediaService.js:_authorizeAvatarPresign의 'user' 갈래) 여기까지 오지 않게 설계했다.
+  // 통과 케이스는 context_type='USER_AVATAR'+본인 id만 써서(DB 호출이 없는 유일한 인가 분기,
+  // mediaService.js:_authorizeUserAvatarPresign)여기까지 오지 않게 설계했다.
   // 혹시 도달하면 그 자체가 "게이트가 새는지" 신호이므로 무엇이 왔는지 남기고 던진다.
   throw new Error(`[mock] 예상치 못한 DB 호출 — MIME 게이트가 DB 이전에 걸러야 한다: ${s.slice(0, 140)} params=${JSON.stringify(params)}`);
 }
@@ -56,10 +56,10 @@ function isInfraRejection(err) {
   return err && err.statusCode !== 415;
 }
 
-async function expectMimeRejected(desc, contentType) {
+async function expectMimeRejected(desc, contentType, contextType = 'USER_AVATAR') {
   try {
     await MediaService.presign(
-      { context_type: 'avatar', context_id: 'self1', filename: 'a.bin', content_type: contentType },
+      { context_type: contextType, context_id: 'self1', filename: 'a.bin', content_type: contentType, file_size: 1000 },
       ctx('self1')
     );
     fail++;
@@ -74,10 +74,10 @@ async function expectMimeRejected(desc, contentType) {
   }
 }
 
-async function expectMimeAllowed(desc, contentType) {
+async function expectMimeAllowed(desc, contentType, contextType = 'USER_AVATAR') {
   try {
     await MediaService.presign(
-      { context_type: 'avatar', context_id: 'self1', filename: 'a.bin', content_type: contentType },
+      { context_type: contextType, context_id: 'self1', filename: 'a.bin', content_type: contentType, file_size: 1000 },
       ctx('self1')
     );
     pass++; // GCS 자격증명이 있는 환경이면 여기까지 성공할 수도 있다.
@@ -109,9 +109,46 @@ async function run() {
   await expectMimeRejected('애플 전용(IMAGE/HEIC, 대문자) — 대소문자 상관없이 거부', 'IMAGE/HEIC');
   await expectMimeAllowed('안드로이드 네이티브(IMAGE/WEBP, 대문자) — 대소문자 상관없이 통과', 'IMAGE/WEBP');
 
-  // ============ 이미지가 아닌 content_type은 이번 게이트의 영향을 받지 않는다(범위 밖) ============
-  await expectMimeAllowed('video/mp4 — 이미지 게이트 대상이 아니므로 415로 막히지 않는다', 'video/mp4');
-  await expectMimeAllowed('application/pdf — 이미지 게이트 대상이 아니므로 415로 막히지 않는다', 'application/pdf');
+  // ============ RLY-20260806-084 — 엔티티 이미지 3종은 image/ 접두사 여부와 무관하게 항상
+  // 허용 목록과 대조한다("image/ 로 시작할 때만 대조"하면 우회된다는 것이 media.md §4-1
+  // 서버 Step3의 명시 경고 — 2026-08-06 실제로 GIF를 application/octet-stream으로 선언해
+  // 아바타 무검사 통과가 확인된 경로다). 구 코드는 이 두 케이스를 "게이트 밖"으로 취급해
+  // 통과시켰다 — 그 결함을 여기서 회귀로 고정한다.
+  await expectMimeRejected(
+    'USER_AVATAR — application/octet-stream(2026-08-06 실제 우회 경로) — image/ 접두사가 아니어도 415로 거부',
+    'application/octet-stream'
+  );
+  await expectMimeRejected('USER_AVATAR — video/mp4은 이미지 전용 컨텍스트라 415로 거부', 'video/mp4');
+  await expectMimeRejected('USER_AVATAR — application/pdf은 이미지 전용 컨텍스트라 415로 거부', 'application/pdf');
+
+  // 세 컨텍스트 타입 모두 같은 게이트를 공유하는지 — BINDER_AVATAR·CAST_COVER는 이 뒤에 DB
+  // 인가 조회가 있어 여기까지 오면 mockQuery가 "예상치 못한 DB 호출"로 실패시킨다. 즉 이
+  // 케이스들이 통과한다는 것 자체가 "MIME 게이트가 인가보다 먼저 실행된다"는 증거다.
+  await expectMimeRejected('BINDER_AVATAR — application/octet-stream도 인가 전에 415로 거부(DB 호출 없이)', 'application/octet-stream', 'BINDER_AVATAR');
+  await expectMimeRejected('CAST_COVER — application/octet-stream도 인가 전에 415로 거부(DB 호출 없이)', 'application/octet-stream', 'CAST_COVER');
+
+  // ============ 이미지가 아닌 content_type은 첨부 6종(엔티티 이미지가 아닌 컨텍스트)에는
+  // 영향을 주지 않는다(범위 밖) — SECTION_MESSAGE는 DB 인가 조회가 있어 여기서 직접 확인할
+  // 수는 없지만(모든 DB 호출이 거부되는 mock), 최소한 "이미지 게이트가 던지지는 않는다"는
+  // 것은 이 mock이 SECTION_MESSAGE 인가의 DB 호출로 대신 실패하는 것으로 간접 확인된다
+  // (415가 아니라 DB mock 에러가 나야 정상 — MIME 게이트를 통과했다는 뜻).
+  await (async () => {
+    try {
+      await MediaService.presign(
+        { context_type: 'SECTION_MESSAGE', context_id: 'msg-1', binder_id: 'b1', filename: 'a.pdf', content_type: 'application/pdf' },
+        ctx('self1')
+      );
+      fail++;
+      failures.push('SECTION_MESSAGE + application/pdf: DB 인가 조회까지 도달해야 하는데 통과해버림(mock이 모든 DB 호출을 막아야 정상)');
+    } catch (err) {
+      if (err.statusCode === 415) {
+        fail++;
+        failures.push('SECTION_MESSAGE + application/pdf: 이미지 게이트가 비이미지 컨텍스트에 새어 415로 거부됨(회귀) — msg=' + err.message);
+      } else {
+        pass++; // MIME 게이트는 통과했고 그 다음 DB 인가 조회에서 mock이 막은 것 — 기대한 동작.
+      }
+    }
+  })();
 
   console.log(`\n[mediaAllowedMimeRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
   if (failures.length) {
