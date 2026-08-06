@@ -199,6 +199,13 @@ async function mockQuery(sql, params = []) {
     const count = Object.values(db.event_instances).filter((r) => r.event_id === params[0] && !r.deleted_at).length;
     return { rows: [{ count }] };
   }
+  // RLY-20260806-037 — EventDAO.findEarliestActiveInstance(all_upcoming RRULE 대조 DTSTART).
+  if (s.startsWith('SELECT id, original_date, is_all_day') && s.includes('FROM event_instances')) {
+    const rows = Object.values(db.event_instances)
+      .filter((r) => r.event_id === params[0] && !r.deleted_at)
+      .sort((a, b) => new Date(a.original_date) - new Date(b.original_date));
+    return { rows: rows.length ? [rows[0]] : [] };
+  }
   if (s.startsWith('INSERT INTO events')) {
     const [id, calendar_id, author_id, event_type, summary, description, color, r_rule, locations, forked_from, recurrence_timezone] = params;
     if (db.events[id]) return { rows: [] }; // ON CONFLICT DO NOTHING
@@ -278,6 +285,13 @@ async function mockQuery(sql, params = []) {
   if (s.startsWith('SELECT COUNT(*)::int AS count FROM task_instances')) {
     const count = Object.values(db.task_instances).filter((r) => r.task_id === params[0] && !r.deleted_at).length;
     return { rows: [{ count }] };
+  }
+  // RLY-20260806-037 — TaskDAO.findEarliestActiveInstance(all_upcoming RRULE 대조 DTSTART).
+  if (s.startsWith('SELECT id, original_date, is_all_day') && s.includes('FROM task_instances')) {
+    const rows = Object.values(db.task_instances)
+      .filter((r) => r.task_id === params[0] && !r.deleted_at)
+      .sort((a, b) => new Date(a.original_date) - new Date(b.original_date));
+    return { rows: rows.length ? [rows[0]] : [] };
   }
   if (s.startsWith('INSERT INTO tasks')) {
     const [id, calendar_id, author_id, task_type, summary, description, priority, locations, r_rule, forked_from, recurrence_timezone] = params;
