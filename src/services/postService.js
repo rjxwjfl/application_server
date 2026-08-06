@@ -169,7 +169,6 @@ class PostService {
     if (existing) return { count: await PostDAO.getLikeCount(pool, postId) };
 
     await PostDAO.createLike(pool, {
-      id: generateUUID(),
       post_id: postId,
       user_id: context.sender_id,
     });
@@ -193,7 +192,7 @@ class PostService {
     const member = await BinderDAO.getMember(pool, post.binder_id, context.sender_id);
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 좋아요를 취소할 수 있습니다');
 
-    await PostDAO.softDeleteLike(pool, postId, context.sender_id);
+    await PostDAO.deleteLike(pool, postId, context.sender_id);
 
     eventBus.emit('sync', {
       binder_id: post.binder_id,

@@ -151,7 +151,7 @@ class PostDAO {
 
   async findLike(conn, postId, userId) {
     const result = await conn.query(
-      `SELECT * FROM post_likes WHERE post_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      `SELECT * FROM post_likes WHERE post_id = $1 AND user_id = $2`,
       [postId, userId]
     );
     return result.rows[0] || null;
@@ -159,26 +159,28 @@ class PostDAO {
 
   async getLikeCount(conn, postId) {
     const result = await conn.query(
-      `SELECT COUNT(*)::int AS count FROM post_likes WHERE post_id = $1 AND deleted_at IS NULL`,
+      `SELECT COUNT(*)::int AS count FROM post_likes WHERE post_id = $1`,
       [postId]
     );
     return result.rows[0].count;
   }
 
+  // post_likes에는 id·deleted_at 컬럼이 없다(design_intent.md §post_likes, PK는
+  // (post_id, user_id) 자연키 — 단순 토글, soft delete 대상 아님).
   async createLike(conn, data) {
     const result = await conn.query(
-      `INSERT INTO post_likes (id, post_id, user_id, created_at)
-       VALUES ($1,$2,$3,COALESCE($4,now()))
+      `INSERT INTO post_likes (post_id, user_id, created_at)
+       VALUES ($1,$2,COALESCE($3,now()))
        RETURNING *`,
-      [data.id, data.post_id, data.user_id, data.created_at]
+      [data.post_id, data.user_id, data.created_at]
     );
     return result.rows[0] || null;
   }
 
-  async softDeleteLike(conn, postId, userId) {
+  // hard delete — SC-post.md 액션D: "liked=false → post_likes DELETE WHERE post_id AND user_id".
+  async deleteLike(conn, postId, userId) {
     await conn.query(
-      `UPDATE post_likes SET deleted_at = now()
-       WHERE post_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      `DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2`,
       [postId, userId]
     );
   }
