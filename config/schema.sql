@@ -303,6 +303,10 @@ CREATE TABLE events (
   -- day_span·duration_seconds)는 fork 전환 미착수라, ck_ev_anchor 배타 CHECK는 그 5개가
   -- 함께 들어올 때 한 번에 건다 — 지금 걸면 "5개 모두 NULL"만 통과하는 무의미한 제약이 된다.
   recurrence_timezone VARCHAR(64),
+  -- 항목 공통 알림 오프셋(초, 대상 시각 기준 사전). RLY-20260806-026 — schema.md:384 단독 이식
+  -- (special_days.reminder_offsets 정의 복제 — nullable, 기본값 없음). 회차 생성 시 이 목록에서
+  -- reminders 행이 파생된다(ReminderDAO.syncTarget, §10-4).
+  reminder_offsets INTEGER[],
   locations   JSONB,
   forked_from UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -377,6 +381,9 @@ CREATE TABLE tasks (
   -- timed 반복의 anchor TZID(IANA). RLY-20260806-019 — events.recurrence_timezone과 동일 사유·
   -- 동일 단독 이식(위 주석 참조).
   recurrence_timezone VARCHAR(64),
+  -- 항목 공통 알림 오프셋(초). RLY-20260806-026 — schema.md:541 단독 이식(events와 동일 사유·
+  -- special_days.reminder_offsets 정의 복제).
+  reminder_offsets INTEGER[],
   locations   JSONB,
   forked_from UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
