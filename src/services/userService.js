@@ -1,5 +1,6 @@
 const { UserDAO } = require('../daos/userDAO');
 const { UserSettingsDAO } = require('../daos/userSettingsDAO');
+const { MediaService } = require('./mediaService');
 
 const { generateUUID, generateUserCode } = require('../utils/uuid');
 const pool = require('../../config/db');
@@ -61,6 +62,15 @@ class UserService {
     const { display_name, bio, image_url, thumbnail_url } = updateData;
 
     const updatedUser = await withTransaction(async (client) => {
+      // RLY-20260806-052 — image_url·thumbnail_url을 실제로 바꾸려는 요청일 때만 소유권을
+      // 검증한다(register/OAuth가 심는 provider photoURL은 UserDAO.create 경로라 여기 안 걸린다).
+      if (image_url !== undefined || thumbnail_url !== undefined) {
+        const existing = await UserDAO.findByUid(client, uid);
+        if (!existing) throw new NotFoundError('사용자를 찾을 수 없습니다');
+        await MediaService.assertOwnedMediaReference(image_url, { prefix: 'avatars', entityId: existing.id });
+        await MediaService.assertOwnedMediaReference(thumbnail_url, { prefix: 'avatars', entityId: existing.id });
+      }
+
       const result = await UserDAO.update(client, uid, {
         display_name,
         bio,
@@ -82,6 +92,14 @@ class UserService {
 
   async updateUserById(userId, updateData) {
     return await withTransaction(async (client) => {
+      // RLY-20260806-052 — 위 updateUser와 동일한 소유권 검증.
+      if (updateData.image_url !== undefined) {
+        await MediaService.assertOwnedMediaReference(updateData.image_url, { prefix: 'avatars', entityId: userId });
+      }
+      if (updateData.thumbnail_url !== undefined) {
+        await MediaService.assertOwnedMediaReference(updateData.thumbnail_url, { prefix: 'avatars', entityId: userId });
+      }
+
       const result = await UserDAO.updateById(client, userId, updateData);
       if (!result) throw new NotFoundError('사용자를 찾을 수 없습니다');
       return result;

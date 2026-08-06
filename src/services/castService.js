@@ -1,6 +1,7 @@
 const { CastDAO } = require('../daos/castDAO');
 const { CalendarDAO } = require('../daos/calendarDAO');
 const { BinderDAO } = require('../daos/binderDAO');
+const { MediaService } = require('./mediaService');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -78,6 +79,15 @@ class CastService {
     const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
     if (!member || member.deleted_at || (member.role > 1 && cast.author_id !== context.sender_id))
       throw new ForbiddenError('권한이 없습니다');
+
+    // RLY-20260806-052 — cover_image_url·thumbnail_url 소유권 검증. 'covers' prefix로
+    // mediaService._authorizeCoverPresign의 cast 분기가 생성한 storage_key와 짝을 맞춘다.
+    if (data.cover_image_url !== undefined) {
+      await MediaService.assertOwnedMediaReference(data.cover_image_url, { prefix: 'covers', entityId: castId });
+    }
+    if (data.thumbnail_url !== undefined) {
+      await MediaService.assertOwnedMediaReference(data.thumbnail_url, { prefix: 'covers', entityId: castId });
+    }
 
     const updated = await CastDAO.update(pool, castId, data);
 
