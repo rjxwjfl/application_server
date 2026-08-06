@@ -7,6 +7,19 @@ const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
 const { BadRequestError, NotFoundError, ConflictError, ForbiddenError } = require('../core/errors');
 
+// RLY-20260806-066 — 타인 조회 응답에 남겨도 되는 필드. 본인이 프로필로 공개한 정보 +
+// 조회에 필요한 식별자·시간정보. email·firebase_uid·provider·status·latest_activity_at은
+// 계정 식별·인증·활동 기록이라 여기서 제외한다(본인 조회는 이 필터를 타지 않는다).
+const PUBLIC_USER_FIELDS = ['id', 'user_code', 'display_name', 'bio', 'image_url', 'thumbnail_url', 'created_at', 'updated_at'];
+
+function toPublicProfile(user) {
+  const result = {};
+  for (const field of PUBLIC_USER_FIELDS) {
+    if (field in user) result[field] = user[field];
+  }
+  return result;
+}
+
 class UserService {
   async createUser(userData, client) {
     const {
@@ -50,12 +63,25 @@ class UserService {
     return await UserDAO.findByUid(pool, uid);
   }
 
-  async getUserById(userId) {
-    return await UserDAO.findById(pool, userId);
+  // RLY-20260806-066 — GET /users/:id 가 findById 결과(email·firebase_uid·provider·status·
+  // latest_activity_at 포함)를 그대로 반환해, 인증된 아무나 유저 id만 알면 타인의 계정
+  // 식별·인증·활동 기록을 얻던 과다노출의 수리. 기준: 본인이 프로필로 공개한 정보(user_code·
+  // display_name·bio·image_url·thumbnail_url)와 조회에 필요한 식별자(id)·시간정보(created_at·
+  // updated_at)는 누구에게나, 계정 식별·인증·활동 기록(email·firebase_uid·provider·status·
+  // latest_activity_at)은 본인에게만 — requesterId는 인증된 신원(req.user_id)만 받는다.
+  // 054(updateUserById)가 세운 본인 판정 선례를 조회 경로에 재사용한다.
+  async getUserById(userId, requesterId) {
+    const user = await UserDAO.findById(pool, userId);
+    if (!user) return null;
+    return userId === requesterId ? user : toPublicProfile(user);
   }
 
-  async getUserByUserCode(userCode) {
-    return await UserDAO.findByUserCode(pool, userCode);
+  // RLY-20260806-066 — GET /users/code/:code 도 findByUserCode를 그대로 반환해 동일하게
+  // 과다노출되고 있었다. 유저 코드로 접근해도 대상은 여전히 "타인"이므로 같은 필터를 적용한다.
+  async getUserByUserCode(userCode, requesterId) {
+    const user = await UserDAO.findByUserCode(pool, userCode);
+    if (!user) return null;
+    return user.id === requesterId ? user : toPublicProfile(user);
   }
 
   async updateUser(uid, updateData) {

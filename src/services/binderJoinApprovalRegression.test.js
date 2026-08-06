@@ -95,7 +95,8 @@ async function mockQuery(sql, params = []) {
   }
 
   // BinderDAO.getMembers(목록) — authz 통과 후에만 도달해야 함
-  if (s.includes('FROM binder_members dm') && s.includes('JOIN users u')) {
+  // RLY-20260806-066 — u.email 제거로 `JOIN users u`도 함께 빠졌다. LEFT JOIN user_infos만으로 매칭한다.
+  if (s.includes('FROM binder_members dm') && s.includes('LEFT JOIN user_infos ui')) {
     return { rows: [] };
   }
 

@@ -2,12 +2,14 @@ const userService = require('../../services/userService');
 const asyncHandler = require('../../core/asyncHandler');
 
 const getUserById = asyncHandler(async (req, res) => {
-  const user = await userService.getUserById(req.params.id);
+  // RLY-20260806-066 — 본인/타인 판정을 위해 인증 신원(req.user_id)을 넘긴다.
+  const user = await userService.getUserById(req.params.id, req.user_id);
   res.json({ success: true, data: user });
 });
 
 const getUserByCode = asyncHandler(async (req, res) => {
-  const user = await userService.getUserByUserCode(req.params.code);
+  // RLY-20260806-066 — 동일.
+  const user = await userService.getUserByUserCode(req.params.code, req.user_id);
   res.json({ success: true, data: user });
 });
 
