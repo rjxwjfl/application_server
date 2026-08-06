@@ -170,10 +170,14 @@ class MediaService {
     //    (media.md §4-4의 "위험한 파일 → 삭제" 선례는 여기 적용하지 않는다 — 정상 파일이 조금 큰 것뿐).
 
     // 5. 확정 — 실제 크기로 file_size를 고친 뒤 델타를 적용한다(선언값이 아니라 재확인된 값).
+    //    RLY-20260806-047 — status는 'ready'가 아니라 'processing'이다(media.md §4-3 step3·§9
+    //    상태 전이표: confirm → 'processing', Worker 완료 → 'ready'). Worker(mediaWorkerJobs.js)가
+    //    이 'processing' 행을 claim해 media.md §4-4 파이프라인을 돌린 뒤 'ready'로 전환한다 — 예전
+    //    코드는 이 단계를 건너뛰고 검사 없이 바로 'ready'로 직행했다(결함, 이번 Task의 핵심).
     return withTransaction(async (client) => {
       const result = await client.query(
         `UPDATE attachments
-         SET status = 'ready', file_size = $3, updated_at = now()
+         SET status = 'processing', file_size = $3, updated_at = now()
          WHERE id = $1 AND uploader_id = $2 AND status = 'pending'
          RETURNING *`,
         [attachmentId, context.sender_id, actualSize]

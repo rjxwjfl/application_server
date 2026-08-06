@@ -108,12 +108,17 @@ async function mockQuery(sql, params = []) {
     return { rows: [], rowCount: 1 };
   }
 
-  // MediaService.confirm — 최종 확정(RLY-20260806-015: file_size를 실제 재확인 값으로 갱신)
-  if (s.startsWith("UPDATE attachments SET status = 'ready'")) {
+  // MediaService.confirm — 최종 확정(RLY-20260806-015: file_size를 실제 재확인 값으로 갱신).
+  // RLY-20260806-047 — status는 'ready'가 아니라 'processing'이다(Worker가 나중에 'ready'로
+  // 전환한다, media.md §4-3 step3·§9). F-S9 델타는 이 UPDATE 시점에 이미 적용되므로(아래
+  // applyStorageDelta 호출은 이 UPDATE와 같은 트랜잭션) 이 변경이 집계 시점에 영향을 주지
+  // 않는다 — mediaWorkerJobs.test.js가 processing→ready 전환 후에도 bytes_used가 그대로임을
+  // 별도로 고정한다.
+  if (s.startsWith("UPDATE attachments SET status = 'processing'")) {
     const [id, uploaderId, actualSize] = params;
     const att = db.attachments[id];
     if (!att || att.uploader_id !== uploaderId || att.status !== 'pending') return { rows: [] };
-    att.status = 'ready';
+    att.status = 'processing';
     att.file_size = actualSize;
     return { rows: [{ ...att }] };
   }
@@ -496,7 +501,8 @@ async function run() {
 
     await check('실제 크기가 tolerance 이내면서 한도를 근소 초과해도 confirm은 통과 + 실제 값으로 집계', async () => {
       await MediaService.confirm(id, ctx('u1'));
-      assert.strictEqual(db.attachments[id].status, 'ready', '근소 초과로 거부하지 않는다');
+      // RLY-20260806-047 — confirm은 이제 'ready'가 아니라 'processing'으로 전환한다(Worker 몫).
+      assert.strictEqual(db.attachments[id].status, 'processing', '근소 초과로 거부하지 않는다');
       assert.strictEqual(db.attachments[id].file_size, declared + 5, '실제 값으로 file_size 갱신');
       assert.strictEqual(db.binder_storage_usage.b1.bytes_used, FREE_LIMIT + 5, '실제 값 그대로 집계(한도 초과 상태 허용)');
       assert.ok(!gcsDeleteLog.includes(key), '수용 경로이므로 GCS 객체를 삭제하지 않는다');
