@@ -28,13 +28,10 @@ router.patch("/:binderId/settings", binderController.updateBinderSettings);
 // 초대 토큰 발급
 router.post("/:binderId/invitations", binderController.issueBinderInvitation);
 
-// 공개 Binder 가입 신청
+// 공개 Binder 가입 신청 (api.md:446-521 — RLY-20260806-024)
 router.post("/:binderId/join-request", binderController.requestBinderJoin);
-
-// 가입 신청 관리 (미설계 라우트 — 관리자용 유지)
 router.get("/:binderId/join-requests", binderController.getJoinRequests);
-router.patch("/:binderId/join-requests/approve", binderController.approveJoinRequest);
-router.delete("/:binderId/join-requests/reject", binderController.rejectJoinRequest);
+router.patch("/:binderId/join-requests/:requestId", binderController.decideJoinRequest);
 
 // 멤버 목록
 router.get("/:binderId/members", binderController.getBinderMembers);

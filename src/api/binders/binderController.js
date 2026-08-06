@@ -40,32 +40,35 @@ const binderController = {
     res.json({ success: true, data: invitation });
   }),
 
-  // 가입 신청 목록 (manage GET)
+  // 가입 신청 목록 (api.md:474-496) — status/page/limit 쿼리
   getJoinRequests: asyncHandler(async (req, res) => {
-    const requests = await BinderService.getJoinRequests(req.params.binderId, req.user_id);
-    res.json({ success: true, data: requests });
+    const { status, page, limit } = req.query;
+    const result = await BinderService.getJoinRequests(req.params.binderId, req.user_id, { status, page, limit });
+    res.json({ success: true, data: result });
   }),
 
-  // 가입 신청 (manage POST)
+  // 공개 Binder 가입 신청 (api.md:446-461)
   requestBinderJoin: asyncHandler(async (req, res) => {
-    await BinderService.requestBinderJoin(req.params.binderId, req.user_id, req.device_uuid);
-    res.status(201).json({ success: true, message: '가입 신청이 완료되었습니다' });
+    const joinRequest = await BinderService.requestBinderJoin(req.params.binderId, req.user_id, req.device_uuid);
+    if (joinRequest) {
+      res.status(201).json({
+        success: true,
+        data: { id: joinRequest.id, status: joinRequest.status, expires_at: joinRequest.expires_at },
+        message: '가입 신청이 완료되었습니다',
+      });
+    } else {
+      res.status(201).json({ success: true, message: '바인더에 가입되었습니다' });
+    }
   }),
 
-  // 가입 승인 (manage PATCH)
-  approveJoinRequest: asyncHandler(async (req, res) => {
-    const { request_id } = req.body;
-    if (!request_id) throw new BadRequestError('request_id가 필요합니다');
-    await BinderService.approveJoinRequest(req.params.binderId, request_id, req.user_id);
-    res.json({ success: true, message: '가입 신청이 승인되었습니다' });
-  }),
-
-  // 가입 거절 (manage DELETE)
-  rejectJoinRequest: asyncHandler(async (req, res) => {
-    const { request_id } = req.body;
-    if (!request_id) throw new BadRequestError('request_id가 필요합니다');
-    await BinderService.rejectJoinRequest(req.params.binderId, request_id, req.user_id);
-    res.json({ success: true, message: '가입 신청이 거절되었습니다' });
+  // 가입 신청 승인·거절·차단 (api.md:500-521) — action: approve | reject | block
+  decideJoinRequest: asyncHandler(async (req, res) => {
+    const { action } = req.body;
+    if (!['approve', 'reject', 'block'].includes(action)) {
+      throw new BadRequestError('action은 approve|reject|block 중 하나여야 합니다');
+    }
+    const result = await BinderService.decideJoinRequest(req.params.binderId, req.params.requestId, action, req.user_id);
+    res.json({ success: true, data: { id: result.id, status: result.status, decided_at: result.decided_at } });
   }),
 
   getBinderMembers: asyncHandler(async (req, res) => {
