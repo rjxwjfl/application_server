@@ -72,9 +72,14 @@ function buildNotification(reminder) {
   return { title, body };
 }
 
-// 발송 완료 처리 — Event·Task는 markSent, SpecialDay는 다음 해로 롤링. 롤링 계산이 실패하면
-// (음력 윤달 없음 등) 여기서 그대로 throw해 상위(dispatchOne)의 catch가 재시도/포기 경로를
-// 타게 한다 — "실패를 sent_at으로 덮어 영구 미발송으로 만들지 마라"(지시) 그대로.
+// 발송 완료 처리 — Event·Task는 markSent, SpecialDay는 다음 해로 롤링.
+//
+// RLY-20260806-048 — computeNextTriggerAt(specialDayRolling.js)이 이제 "그 해에 없음"(양력
+// 2/29 평년, 음력 윤달 없는 해)을 그냥 건너뛰고 존재하는 다음 해로 넘어간다 — 정상 경로에서 더는
+// throw하지 않는다(이전엔 음력 쪽이 여기서 throw해 아래 재시도 경로를 타다 결국 포기했고, 그게
+// 그 기념일 알림이 영구히 죽는 결함이었다 — throw 자체가 사라지므로 자연히 해소된다). 그래도
+// 남는 throw(전진 상한 초과 — 정상 데이터로는 도달 안 함)는 기존 그대로 아래 catch의
+// retryOrGiveUp이 처리한다 — 별도 처리 불필요.
 async function finalizeSuccess(reminder, claimToken) {
   if (reminder.target_type === 2) {
     const nextTriggerAt = computeNextTriggerAt({
