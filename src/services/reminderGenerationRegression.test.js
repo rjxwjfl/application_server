@@ -562,9 +562,13 @@ async function run() {
   check('updateEvent가 회차의 리마인더도 같이 재파생함(옛 오프셋 제거)', findReminders(0, 'evi9').length === 1 && findReminders(0, 'evi9')[0].trigger_offset === 3600);
 
   // ⑥ 반복 항목 — 회차 여러 개면 회차마다 원장이 붙는다(같은 오프셋 세트가 인스턴스별 독립 행으로).
+  // RLY-20260806-037 — r_rule='FREQ=WEEKLY;COUNT=2'를 붙였다(Sept2→Sept9는 정확히 7일 뒤라
+  // 이 규칙과 일치한다). 037의 독립 전개 대조가 생기기 전에는 r_rule 없이 인스턴스 2개를
+  // 그냥 제출해도 통과했다 — 그 자체가 이 Task가 막으려는 결함(§4-7 "규칙과 무관한 회차를
+  // 임의로 주입")이라, 없는 채로 두면 안 되고 실제로 일치하는 규칙을 붙이는 게 맞다.
   const evRecur = await expectOk('⑥ 반복 이벤트 생성(회차 2개)', () => EventService.createEvent({
     id: 'ev2', calendar_id: 'cal1', author_id: 'author1', summary: '주간 스탠드업',
-    reminder_offsets: [600],
+    reminder_offsets: [600], r_rule: 'FREQ=WEEKLY;COUNT=2',
     instances: [
       { id: 'evi2a', original_date: '2026-09-02T00:00:00Z', start_date: '2026-09-02T00:00:00Z', end_date: '2026-09-02T00:30:00Z' },
       { id: 'evi2b', original_date: '2026-09-09T00:00:00Z', start_date: '2026-09-09T00:00:00Z', end_date: '2026-09-09T00:30:00Z' },

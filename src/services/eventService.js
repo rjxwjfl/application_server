@@ -4,6 +4,7 @@ const { SectionDAO } = require('../daos/sectionDAO');
 const { ReminderDAO } = require('../daos/reminderDAO');
 const { cascadeDeleteInstanceChildren, REMINDER_TARGET_TYPE } = require('../daos/deleteCascadeHelpers');
 const { adjustRuleCount } = require('../utils/recurrenceRule');
+const { assertOccurrencesMatchRule } = require('../utils/recurrenceExpansion');
 const { BinderDAO } = require('../daos');
 const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
@@ -43,6 +44,24 @@ class EventService {
     // 바인더 멤버십 검증 — data.calendar_id는 events.calendar_id로 그대로 쓰이는 클라이언트 payload다.
     // 반환된 calendar.binder_id를 emit에 재사용한다(A-NEW-13) — data.binder_id는 클라 payload라 신뢰할 수 없다.
     const { calendar: authzCalendar } = await requireBinderMemberByCalendarId(pool, data.calendar_id, context.sender_id);
+
+    // RLY-20260806-037 — system.md §4-7: 클라가 제출한 회차 집합을 r_rule로 독립 전개해 대조한다.
+    // DB 접근이 필요 없어 트랜잭션 밖(가장 먼저)에서 검사한다 — 실패하면 쓰기 자체가 없다.
+    // DTSTART는 제출된 인스턴스 중 가장 이른 original_date다 — 생성 시점엔 그것이 곧 계열의
+    // 진짜 시작점이다(기존 계열이 없다).
+    if (data.instances && data.instances.length > 0) {
+      const earliest = data.instances.reduce((min, inst) => {
+        const t = new Date(inst.original_date).getTime();
+        return t < min ? t : min;
+      }, Infinity);
+      assertOccurrencesMatchRule({
+        rRule: data.r_rule,
+        isAllDay: !!data.instances[0].is_all_day,
+        recurrenceTimezone: data.recurrence_timezone,
+        dtstartInstant: new Date(earliest),
+        submittedInstances: data.instances,
+      });
+    }
 
     const event = await withTransaction(async (client) => {
       if (data.calendar) {
@@ -258,6 +277,36 @@ class EventService {
 
       if (toCreate.length > MAX_OCCURRENCES) {
         throw new BadRequestError(`회차는 최대 ${MAX_OCCURRENCES}개까지 생성할 수 있습니다`, 'occurrence_limit_exceeded');
+      }
+
+      // ④-1 RLY-20260806-037 — 재생성될 회차 집합을 이번에 적용될 r_rule로 독립 전개해 대조한다.
+      // r_rule·recurrence_timezone은 patch에 있으면 그 값, 없으면 origin값(패치 병합과 동일 규칙,
+      // ⑥의 forkEvent 생성 로직과 값 출처를 맞춘다).
+      // DTSTART(계열의 진짜 시작점, recurrenceExpansion.js 헤더 참조):
+      //   this_and_future — boundaryDate(fork가 새로 시작하는 지점, 이미 서버가 검증한 값).
+      //   all_upcoming — 같은 owner 행을 유지하므로 boundaryDate(=지금)를 쓰면 위상이 틀어진다.
+      //     삭제 전에 조회한 "그 이벤트의 살아있는 첫 회차"가 진짜 시작점이다(원본이든 fork
+      //     조각이든 동일하게 성립 — findEarliestActiveInstance 주석 참조).
+      if (toCreate.length > 0) {
+        const effectiveRRule = patch.r_rule !== undefined ? patch.r_rule : origin.r_rule;
+        const effectiveRecurrenceTimezone = Object.prototype.hasOwnProperty.call(patch, 'recurrence_timezone')
+          ? patch.recurrence_timezone : origin.recurrence_timezone;
+
+        let dtstartInstant;
+        if (scope === 'this_and_future') {
+          dtstartInstant = boundaryDate;
+        } else {
+          const earliest = await EventDAO.findEarliestActiveInstance(client, eventId);
+          dtstartInstant = earliest ? new Date(earliest.original_date) : new Date(toCreate[0].original_date);
+        }
+
+        assertOccurrencesMatchRule({
+          rRule: effectiveRRule,
+          isAllDay: !!toCreate[0].is_all_day,
+          recurrenceTimezone: effectiveRecurrenceTimezone,
+          dtstartInstant,
+          submittedInstances: toCreate,
+        });
       }
 
       // ⑤ 적용 — 삭제(경계 이후 기존 회차, 참가자·리마인더 cascade) 후 재생성.
