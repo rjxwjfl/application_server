@@ -97,6 +97,90 @@ class AttachmentDAO {
     return result.rows[0];
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // RLY-20260806-047 — Worker(media.md §4-4) claim/lease. reminderDAO.claimDueBatch·
+  // markSent·markFailed·giveUp과 컬럼명·패턴 모두 동일(system.md §10-13 "이 계약은
+  // reminder 전용이 아니다" — 재사용, 새 구조 아님).
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // "조회 후 갱신"이 아니라 단일 UPDATE 문 안에서 후보 선정(FOR UPDATE SKIP LOCKED)과
+  // claim이 함께 일어난다(reminderDAO.claimDueBatch와 동일 이유 — 경합 시 중복 claim 방지).
+  async claimProcessingBatch(conn, { claimToken, limit = 50, leaseMinutes = 5, maxAttempts = 5 }) {
+    const result = await conn.query(
+      `UPDATE attachments
+       SET claim_token = $1, claimed_at = now(), attempt_count = attempt_count + 1, updated_at = now()
+       WHERE id IN (
+         SELECT id FROM attachments
+         WHERE status = 'processing'
+           AND (claim_token IS NULL OR claimed_at < now() - ($2 || ' minutes')::interval)
+           AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+           AND attempt_count < $3
+         ORDER BY created_at ASC
+         LIMIT $4
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id, context_type, context_id, binder_id, storage_key, filename,
+                 content_type, file_size, attempt_count`,
+      [claimToken, leaseMinutes, maxAttempts, limit]
+    );
+    return result.rows;
+  }
+
+  // Step5 성공 종결 — status='ready' + thumbnail_url(파생 미디어 있는 타입만, 없으면 null 유지).
+  // claim_token 일치를 WHERE에 건다 — lease 만료 후 다른 워커가 이미 재claim했으면 이 UPDATE는
+  // 0행 매칭으로 조용히 무효화된다(reminderDAO.markSent와 동일 원리).
+  async markReady(conn, id, claimToken, thumbnailUrl) {
+    const result = await conn.query(
+      `UPDATE attachments
+       SET status = 'ready', thumbnail_url = COALESCE($3, thumbnail_url),
+           claim_token = NULL, claimed_at = NULL, updated_at = now()
+       WHERE id = $1 AND claim_token = $2
+       RETURNING id`,
+      [id, claimToken, thumbnailUrl || null]
+    );
+    return result.rows.length > 0;
+  }
+
+  // Step1·2 — 판정이 끝난 거부(MIME 위변조·악성코드). 재시도 대상이 아니다(콘텐츠 자체의
+  // 판정이라 다시 시도해도 같은 결과다) — reminderDAO.giveUp과 달리 즉시 종결한다.
+  async markRejected(conn, id, claimToken) {
+    const result = await conn.query(
+      `UPDATE attachments
+       SET status = 'rejected', claim_token = NULL, claimed_at = NULL, updated_at = now()
+       WHERE id = $1 AND claim_token = $2
+       RETURNING storage_key`,
+      [id, claimToken]
+    );
+    return result.rows[0] || null;
+  }
+
+  // 일시적 실패(GCS 네트워크 오류 등) — 지수 백오프로 next_attempt_at을 미루고 lease를 놓는다.
+  // reminderDAO.markFailed와 동일.
+  async markFailed(conn, id, claimToken, nextAttemptAt) {
+    const result = await conn.query(
+      `UPDATE attachments
+       SET claim_token = NULL, claimed_at = NULL, next_attempt_at = $1, updated_at = now()
+       WHERE id = $2 AND claim_token = $3
+       RETURNING id`,
+      [nextAttemptAt, id, claimToken]
+    );
+    return result.rows.length > 0;
+  }
+
+  // 재시도 상한 도달 — reminderDAO.giveUp은 sent_at으로 "완료"를 가장하지만(리마인더는 늦은
+  // 발송보다 미발송이 낫다), attachments엔 media.md:186이 정의한 'error'(기술적 실패) 상태가
+  // 이미 있다 — 그것을 그대로 쓴다. 거짓으로 'ready' 처리하지 않는다.
+  async markError(conn, id, claimToken) {
+    const result = await conn.query(
+      `UPDATE attachments
+       SET status = 'error', claim_token = NULL, claimed_at = NULL, updated_at = now()
+       WHERE id = $1 AND claim_token = $2
+       RETURNING id`,
+      [id, claimToken]
+    );
+    return result.rows.length > 0;
+  }
+
   async markHidden(conn, ids) {
     if (!ids || ids.length === 0) return 0;
     const result = await conn.query(

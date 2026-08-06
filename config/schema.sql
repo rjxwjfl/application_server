@@ -651,6 +651,12 @@ CREATE TABLE attachments (
   -- standard|nearline|coldline|archive
   storage_class VARCHAR(20)  NOT NULL DEFAULT 'standard',
   hidden_at     TIMESTAMPTZ,
+  -- RLY-20260806-047 — Worker(§4-4) claim/lease. reminders(§10-4)와 컬럼명·타입·기본값 동일
+  -- (system.md §10-13 "이 계약은 reminder 전용이 아니다" — 이미 승인된 설계를 재사용, 새 구조 아님).
+  claim_token     UUID,
+  claimed_at      TIMESTAMPTZ,
+  attempt_count   INTEGER      NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   deleted_at    TIMESTAMPTZ,
@@ -662,6 +668,9 @@ CREATE TABLE attachments (
 );
 CREATE INDEX idx_att_context   ON attachments (context_type, context_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_binder    ON attachments (binder_id, created_at DESC) WHERE deleted_at IS NULL;
+-- RLY-20260806-047 — Worker claim 후보 조회(idx_rem_dispatch와 동일 패턴, §10-13). status='processing'
+-- 행만 대상이므로 부분 인덱스로 범위를 좁힌다.
+CREATE INDEX idx_att_dispatch ON attachments (status, next_attempt_at) WHERE status = 'processing';
 CREATE INDEX idx_att_storage_key ON attachments (storage_key) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_uploader  ON attachments (uploader_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_att_sync      ON attachments (binder_id, updated_at);
