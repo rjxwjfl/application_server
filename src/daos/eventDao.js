@@ -163,14 +163,14 @@ class EventDAO {
 
   // system.md §4-3 step2 "원본 행 잠금" — 같은 항목에 대한 두 구조 변경을 여기서 줄 세운다.
   //
-  // ⚠️ 항목 공통 알림 오프셋 컬럼(RLY-20260806-026이 스키마에 추가한 배열 컬럼)은 일부러
-  // SELECT하지 않는다 — createEvent가 아직 그 컬럼에 쓰지 않아(027 경계) 지금은 항상 NULL이고,
-  // 이 파일 소스에 그 식별자를 적는 것 자체가 정적 대조 회귀(reminderGenerationRegression.test.js,
-  // "eventDao.js가 아직 그 컬럼을 안 씀" 단언)를 깬다. 027이 owner row 배선을 마치면 다시 넣어라.
+  // RLY-20260806-041 — reminder_offsets를 SELECT에 추가했다(구 주석: "createEvent가 아직 그
+  // 컬럼에 쓰지 않아 026 후속 배선 전까지는 뺀다" — 그 배선이 이미 끝나 사유가 사라졌다).
+  // createForkEvent 호출부(eventService.applyRecurrenceScope)가 patch.reminder_offsets가
+  // 없을 때 이 origin값으로 상속하는 유일한 출처다.
   async findByIdForUpdate(conn, eventId) {
     const query = `
       SELECT id, calendar_id, author_id, event_type, summary,
-             description, color, r_rule, recurrence_timezone, locations, forked_from,
+             description, color, r_rule, recurrence_timezone, reminder_offsets, locations, forked_from,
              created_at, updated_at, deleted_at
       FROM events
       WHERE id = $1 AND deleted_at IS NULL
@@ -227,17 +227,18 @@ class EventDAO {
   // UUIDv7(new_event_id) — 서버가 생성하지 않는다(H19, §10-2 재전송 멱등). ON CONFLICT DO NOTHING
   // 이후 호출부가 findById로 기존 행을 다시 읽어 재전송을 흡수한다.
   //
-  // ⚠️ 알림 오프셋 컬럼은 INSERT 목록에 없다 — createEvent와 동일 경계(위 findByIdForUpdate
-  // 주석 참조). 새 회차의 리마인더는 호출부가 요청 payload를 직접 읽어(createEvent와 같은
-  // 패턴) ReminderDAO로 파생하며, 이 행 자체엔 남기지 않는다.
+  // RLY-20260806-041 — reminder_offsets를 INSERT 목록에 추가했다(구 주석: "createEvent와 동일
+  // 경계로 뺀다" — 026 후속 배선이 끝나 사유가 사라졌다). summary/r_rule과 나란히 넣는다.
+  // 회차별 리마인더 원장은 여전히 호출부가 patch.reminder_offsets를 직접 읽어 파생한다
+  // (이 owner row 컬럼은 표시값일 뿐 원장의 출처가 아니다 — createEvent와 동일 패턴).
   async createForkEvent(conn, data) {
     const query = `
       INSERT INTO events (
         id, calendar_id, author_id, event_type, summary,
         description, color, r_rule, locations, forked_from,
-        recurrence_timezone, created_at, updated_at
+        recurrence_timezone, reminder_offsets, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
       )
       ON CONFLICT (id) DO NOTHING
       RETURNING *
@@ -254,6 +255,7 @@ class EventDAO {
       data.locations ? JSON.stringify(data.locations) : null,
       data.forked_from,
       data.recurrence_timezone || null,
+      data.reminder_offsets || null,
     ]);
     if (result.rows[0]) return result.rows[0];
     return this.findById(conn, data.id); // 재전송 — 이미 존재하는 행을 그대로 반환

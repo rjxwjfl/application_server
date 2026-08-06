@@ -145,13 +145,13 @@ class TaskDAO {
   // TaskService.applyRecurrenceScope 하나가 이들을 조합해 PATCH scope와 split alias를 처리한다.
   // ============================================================================================
 
-  // ⚠️ 항목 공통 알림 오프셋 컬럼은 일부러 SELECT하지 않는다 — eventDao.js의 findByIdForUpdate와
-  // 동일 사유(027 경계, 정적 대조 회귀가 이 파일 소스에 그 식별자가 없기를 기대한다).
+  // RLY-20260806-041 — eventDao.js의 findByIdForUpdate와 동일 사유(reminder_offsets를
+  // SELECT에 추가, 026 후속 배선이 끝나 옛 경계 사유가 사라졌다).
   async findByIdForUpdate(conn, taskId) {
     const query = `
       SELECT id, calendar_id, author_id, task_type,
              summary, description, priority, locations,
-             r_rule, recurrence_timezone, forked_from,
+             r_rule, recurrence_timezone, reminder_offsets, forked_from,
              created_at, updated_at, deleted_at
       FROM tasks
       WHERE id = $1 AND deleted_at IS NULL
@@ -194,15 +194,16 @@ class TaskDAO {
     return result.rows[0] || null;
   }
 
-  // ⚠️ 알림 오프셋 컬럼은 INSERT 목록에 없다 — eventDao.js의 createForkEvent와 동일 사유·동일 경계.
+  // RLY-20260806-041 — eventDao.js의 createForkEvent와 동일 사유(reminder_offsets를 INSERT
+  // 목록에 추가, 026 후속 배선이 끝나 옛 경계 사유가 사라졌다).
   async createForkTask(conn, data) {
     const query = `
       INSERT INTO tasks (
         id, calendar_id, author_id, task_type, summary,
         description, priority, locations, r_rule, forked_from,
-        recurrence_timezone, created_at, updated_at
+        recurrence_timezone, reminder_offsets, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
       )
       ON CONFLICT (id) DO NOTHING
       RETURNING *
@@ -219,6 +220,7 @@ class TaskDAO {
       data.r_rule || null,
       data.forked_from,
       data.recurrence_timezone || null,
+      data.reminder_offsets || null,
     ]);
     if (result.rows[0]) return result.rows[0];
     return this.findById(conn, data.id);
