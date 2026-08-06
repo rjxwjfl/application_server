@@ -6,7 +6,7 @@ class EventDAO {
   async findById(conn, eventId) {
     const query = `
       SELECT id, calendar_id, author_id, event_type, summary,
-             description, color, r_rule, locations, forked_from,
+             description, color, r_rule, recurrence_timezone, locations, forked_from,
              created_at, updated_at, deleted_at
       FROM events
       WHERE id = $1 AND deleted_at IS NULL
@@ -20,10 +20,10 @@ class EventDAO {
       INSERT INTO events (
         id, calendar_id, author_id, event_type, summary,
         description, color, r_rule, locations, forked_from,
-        created_at, updated_at
+        recurrence_timezone, created_at, updated_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        COALESCE($11, now()), COALESCE($12, now())
+        $11, COALESCE($12, now()), COALESCE($13, now())
       )
       RETURNING *
     `;
@@ -39,6 +39,7 @@ class EventDAO {
       data.r_rule || null,
       data.locations ? JSON.stringify(data.locations) : null,
       data.forked_from || null,
+      data.recurrence_timezone || null,
       data.created_at,
       data.updated_at
     ]);
@@ -62,7 +63,15 @@ class EventDAO {
   }
 
   async updateEvent(conn, eventId, updateData) {
-    const { summary, description, color, r_rule, locations } = updateData;
+    const { summary, description, color, r_rule, locations, recurrence_timezone } = updateData;
+    // recurrence_timezone은 COALESCE가 아니라 hasOwnProperty 기반 CASE WHEN을 쓴다 — 이 저장소의
+    // 기존 관례(postDAO.js update()의 title/special_day_id, groupDAO.js updateGroup()의 color)를
+    // 그대로 따른 것이다. COALESCE는 "필드 부재(변경 없음)"와 "필드가 명시적으로 null(지우기)"을
+    // 구분 못해 지우기를 영원히 표현할 수 없다(RLY-20260806-019). 이 함수의 다른 컬럼(summary 등)은
+    // 일부러 COALESCE를 유지했다 — 각 필드의 "명시적 지우기" 필요 여부는 개별 판정해야 하고,
+    // 이번 범위는 recurrence_timezone 하나뿐이다. 이 컬럼만 다르다고 "빠뜨린 COALESCE"로 오해해
+    // 통일하지 말 것 — 통일하면 지우기가 다시 죽는다.
+    const hasRecurrenceTimezone = Object.prototype.hasOwnProperty.call(updateData, 'recurrence_timezone');
     const query = `
       UPDATE events
       SET summary = COALESCE($1, summary),
@@ -70,11 +79,17 @@ class EventDAO {
           color = COALESCE($3, color),
           r_rule = COALESCE($4, r_rule),
           locations = COALESCE($5, locations),
+          recurrence_timezone = CASE WHEN $6 THEN $7 ELSE recurrence_timezone END,
           updated_at = now()
-      WHERE id = $6 AND deleted_at IS NULL
+      WHERE id = $8 AND deleted_at IS NULL
       RETURNING *
     `;
-    const result = await conn.query(query, [summary, description, color, r_rule, locations ? JSON.stringify(locations) : null, eventId]);
+    const result = await conn.query(query, [
+      summary, description, color, r_rule,
+      locations ? JSON.stringify(locations) : null,
+      hasRecurrenceTimezone, recurrence_timezone,
+      eventId
+    ]);
     return result.rows[0];
   }
 
@@ -94,10 +109,12 @@ class EventDAO {
     const newEventQuery = `
       INSERT INTO events (
         id, calendar_id, author_id, event_type, summary,
-        description, color, r_rule, locations, forked_from, created_at, updated_at
+        description, color, r_rule, locations, forked_from,
+        recurrence_timezone, created_at, updated_at
       )
       SELECT $1, calendar_id, author_id, event_type, summary,
-             description, color, r_rule, locations, id, now(), now()
+             description, color, r_rule, locations, id,
+             recurrence_timezone, now(), now()
       FROM events WHERE id = $2
       RETURNING *
     `;

@@ -7,7 +7,7 @@ class TaskDAO {
     const query = `
       SELECT id, calendar_id, author_id, task_type,
              summary, description, priority, locations,
-             r_rule, forked_from,
+             r_rule, recurrence_timezone, forked_from,
              created_at, updated_at, deleted_at
       FROM tasks
       WHERE id = $1 AND deleted_at IS NULL
@@ -21,9 +21,9 @@ class TaskDAO {
       INSERT INTO tasks (
         id, calendar_id, author_id, task_type,
         summary, description, priority, locations,
-        r_rule, forked_from, created_at, updated_at
+        r_rule, forked_from, recurrence_timezone, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
       )
       RETURNING *
     `;
@@ -37,7 +37,8 @@ class TaskDAO {
       data.priority || 0,
       data.locations ? JSON.stringify(data.locations) : null,
       data.r_rule || null,
-      data.forked_from || null
+      data.forked_from || null,
+      data.recurrence_timezone || null
     ]);
 
     if (data.instances && data.instances.length > 0) {
@@ -59,7 +60,11 @@ class TaskDAO {
   }
 
   async updateTask(conn, taskId, updateData) {
-    const { summary, description, priority, locations, r_rule } = updateData;
+    const { summary, description, priority, locations, r_rule, recurrence_timezone } = updateData;
+    // recurrence_timezone은 COALESCE가 아니라 hasOwnProperty 기반 CASE WHEN을 쓴다 —
+    // eventDAO.updateEvent와 동일 사유·동일 관례(postDAO.js/groupDAO.js). 다른 컬럼은
+    // COALESCE 유지 — 통일하지 말 것(RLY-20260806-019, eventDAO.js 주석 참조).
+    const hasRecurrenceTimezone = Object.prototype.hasOwnProperty.call(updateData, 'recurrence_timezone');
     const query = `
       UPDATE tasks
       SET summary = COALESCE($1, summary),
@@ -67,14 +72,17 @@ class TaskDAO {
           priority = COALESCE($3, priority),
           locations = COALESCE($4, locations),
           r_rule = COALESCE($5, r_rule),
+          recurrence_timezone = CASE WHEN $6 THEN $7 ELSE recurrence_timezone END,
           updated_at = now()
-      WHERE id = $6 AND deleted_at IS NULL
+      WHERE id = $8 AND deleted_at IS NULL
       RETURNING *
     `;
     const result = await conn.query(query, [
       summary, description, priority,
       locations ? JSON.stringify(locations) : null,
-      r_rule, taskId
+      r_rule,
+      hasRecurrenceTimezone, recurrence_timezone,
+      taskId
     ]);
     return result.rows[0];
   }
@@ -107,11 +115,11 @@ class TaskDAO {
       INSERT INTO tasks (
         id, calendar_id, author_id, task_type,
         summary, description, priority, locations,
-        r_rule, forked_from, created_at, updated_at
+        r_rule, forked_from, recurrence_timezone, created_at, updated_at
       )
       SELECT $1, calendar_id, author_id, task_type,
              summary, description, priority, locations,
-             r_rule, id, now(), now()
+             r_rule, id, recurrence_timezone, now(), now()
       FROM tasks WHERE id = $2
       RETURNING *
     `;
