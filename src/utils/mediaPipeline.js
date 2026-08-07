@@ -243,19 +243,36 @@ function stripExif(buffer, detectedMime) {
 }
 
 /**
- * Step4 — 이미지 파생 썸네일(WebP, 720px 이내, quality 80). sharp는 여기(파생 미디어)에서만
- * 쓴다 — 원본 파일에는 절대 쓰지 않는다(team-lead 지시, 2c 판정).
- * 720px 해석: 문서가 "가로냐 최대변이냐"를 명시하지 않아, 가로·세로 어느 쪽도 720을 넘지 않게
- * (fit: 'inside', 업스케일 안 함)로 해석했다 — 세로로 긴 사진이 원본보다 커지는 걸 막는다.
+ * Step4 — 이미지 파생물 공통 생성기(WebP, maxDimension px 이내, quality 80). sharp는 여기
+ * (파생 미디어)에서만 쓴다 — 원본 파일에는 절대 쓰지 않는다(team-lead 지시, 2c 판정).
+ * maxDimension 해석: 문서가 "가로냐 최대변이냐"를 명시하지 않아, 가로·세로 어느 쪽도
+ * maxDimension을 넘지 않게(fit: 'inside', 업스케일 안 함)로 해석했다 — 세로로 긴 사진이
+ * 원본보다 커지는 걸 막는다.
+ *
+ * RLY-20260806-091(S3) — media.md §4-4 Step4: 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·
+ * CAST_COVER)은 첨부 6종의 720px 썸네일과 별개로 1080px "full" 파생도 만든다(구 256px 규격
+ * 폐기 — 3배 밀도 화면에서 120px 헤더에 360px가 필요해 부족했다는 판정). 크기만 다르고 로직은
+ * 완전히 같아 이 함수 하나로 두 크기를 다 만든다(720용 wrapper는 아래 generateImageThumbnail).
+ * @param {Buffer} buffer - 원본(EXIF 제거 적용 후, 적용됐다면) 이미지 버퍼.
+ * @param {number} maxDimension - 가로·세로 중 긴 변의 최대 길이(px).
+ * @returns {Promise<Buffer>} WebP 버퍼.
+ */
+async function generateImageDerivative(buffer, maxDimension) {
+  return sharp(buffer)
+    .rotate() // EXIF Orientation 제거 전 회전 정보를 픽셀에 반영 — 스트립 후엔 방향 태그가 없다.
+    .resize(maxDimension, maxDimension, { fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 80 })
+    .toBuffer();
+}
+
+/**
+ * Step4 — 이미지 파생 썸네일(WebP, 720px 이내, quality 80). 첨부 6종·엔티티 이미지 3종의
+ * thumb 파생 모두 이 720px 규격을 공유한다(media.md:435,443).
  * @param {Buffer} buffer - 원본(EXIF 제거 적용 후, 적용됐다면) 이미지 버퍼.
  * @returns {Promise<Buffer>} WebP 버퍼.
  */
 async function generateImageThumbnail(buffer) {
-  return sharp(buffer)
-    .rotate() // EXIF Orientation 제거 전 회전 정보를 픽셀에 반영 — 스트립 후엔 방향 태그가 없다.
-    .resize(720, 720, { fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 80 })
-    .toBuffer();
+  return generateImageDerivative(buffer, 720);
 }
 
 /**
@@ -291,6 +308,7 @@ module.exports = {
   parseWebpChunks,
   buildWebpBuffer,
   generateImageThumbnail,
+  generateImageDerivative,
   generateVideoPoster,
   EXIF_STRIPPABLE_MIME_TYPES,
   PNG_METADATA_CHUNK_TYPES,

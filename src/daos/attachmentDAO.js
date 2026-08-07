@@ -120,9 +120,11 @@ class AttachmentDAO {
          FOR UPDATE SKIP LOCKED
        )
        RETURNING id, context_type, context_id, binder_id, storage_key, filename,
-                 content_type, file_size, attempt_count`,
+                 content_type, file_size, attempt_count, created_at`,
       [claimToken, leaseMinutes, maxAttempts, limit]
     );
+    // created_at — RLY-20260806-091(S3): 엔티티 이미지 3종의 순서 역전 가드(media.md §4-4
+    // Step5-a)가 "이 행보다 created_at이 더 최신인 미삭제 형제 행이 있는가"를 판정하는 데 쓴다.
     return result.rows;
   }
 
@@ -264,6 +266,91 @@ class AttachmentDAO {
       params
     );
     return result.rows;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // RLY-20260806-091(S3) — media.md §4-4 Step5, 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·
+  // CAST_COVER) 전용 (a)~(d) 시퀀스. mediaWorkerJobs.js가 한 트랜잭션 안에서 순서대로 호출한다.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * (a) 순서 역전 가드 — 같은 (context_type, context_id)에 이 행보다 created_at이 더 최신인
+   * 미삭제 형제 행이 있는지 확인한다. 있으면 "빠른 연속 교체에서 늦게 끝난 옛 업로드가 최신
+   * 사진을 덮으려는 것"이므로 포인터를 옮기면 안 된다(media.md §4-4 Step5-a).
+   */
+  async findNewerActiveSibling(conn, { contextType, contextId, excludeId, afterCreatedAt }) {
+    const result = await conn.query(
+      `SELECT id FROM attachments
+       WHERE context_type = $1 AND context_id = $2 AND id <> $3
+         AND deleted_at IS NULL AND created_at > $4
+       LIMIT 1`,
+      [contextType, contextId, excludeId, afterCreatedAt]
+    );
+    return result.rows[0] || null;
+  }
+
+  /**
+   * (a)의 결과 — 이 행은 이미 뒤처졌다. 포인터는 건드리지 않고 이 행만 종결한다.
+   *
+   * 문서(media.md §4-4 Step5-a)는 "이 행만 deleted_at 처리하고 종료"라고만 쓴다. 다만
+   * status를 그대로 'processing'에 두면 claimProcessingBatch(WHERE status='processing' —
+   * deleted_at은 안 봄)가 이 행을 계속 재claim해 attempt_count가 소진될 때까지 무의미한
+   * 재처리를 반복한다. 새 상태값을 만들지 않고 기존 'ready'(이 파일 자체는 Step1~4를 실제로
+   * 통과했다 — 표시가 안 될 뿐이다)로 전환해 claim 대상에서 자연스럽게 빠지게 한다(Writer
+   * 판단 — 문서가 status를 명시하지 않아 직접 정한 해석). claimProcessingBatch의 WHERE 절은
+   * 첨부 6종과 공유하므로 여기서 건드리지 않았다 — 6종 동작 불변 요건과 충돌하지 않는다.
+   */
+  async markSuperseded(conn, id, claimToken, thumbnailUrl) {
+    const result = await conn.query(
+      `UPDATE attachments
+       SET status = 'ready', thumbnail_url = COALESCE($3, thumbnail_url),
+           claim_token = NULL, claimed_at = NULL, deleted_at = now(), updated_at = now()
+       WHERE id = $1 AND claim_token = $2
+       RETURNING id`,
+      [id, claimToken, thumbnailUrl || null]
+    );
+    return result.rows.length > 0;
+  }
+
+  /**
+   * (c) 엔티티 포인터 갱신 — full(1080px)·thumb(720px) 파생 URL을 대상 엔티티 컬럼에 옮긴다.
+   * 실재 컬럼: user_infos.image_url/thumbnail_url · binders.image_url/thumbnail_url ·
+   * casts.cover_image_url/thumbnail_url(userDAO.js·binderDAO.js·castDAO.js로 확인 —
+   * 문서가 한때 적었던 `users.profile_image_url`·`binders.cover_image_url`은 실재하지 않는다).
+   * (b)에서 status='ready' 전환이 성공했을 때만 호출된다 — 실패 경로는 이 함수에 도달하지
+   * 않으므로 포인터는 자동으로 이전 값 그대로 남는다(별도 롤백 로직 불필요).
+   */
+  async updateEntityImagePointer(conn, contextType, contextId, fullUrl, thumbUrl) {
+    if (contextType === 'USER_AVATAR') {
+      await conn.query(
+        `UPDATE user_infos SET image_url = $1, thumbnail_url = $2, updated_at = now() WHERE user_id = $3`,
+        [fullUrl, thumbUrl, contextId]
+      );
+    } else if (contextType === 'BINDER_AVATAR') {
+      await conn.query(
+        `UPDATE binders SET image_url = $1, thumbnail_url = $2, updated_at = now() WHERE id = $3`,
+        [fullUrl, thumbUrl, contextId]
+      );
+    } else if (contextType === 'CAST_COVER') {
+      await conn.query(
+        `UPDATE casts SET cover_image_url = $1, thumbnail_url = $2, updated_at = now() WHERE id = $3`,
+        [fullUrl, thumbUrl, contextId]
+      );
+    }
+  }
+
+  /**
+   * (d) 이전 세대 정리 — 같은 (context_type, context_id)의 다른 활성 행을 전부 소프트 삭제한다.
+   * 새 정리 메커니즘을 만들지 않는다 — 이후는 첨부와 동일한 규약(30일 뒤 하드 삭제 배치가
+   * 마지막 참조 가드를 확인하고 GCS 원본을 지운다, §8-1).
+   */
+  async markOtherGenerationsDeleted(conn, contextType, contextId, keepId) {
+    const result = await conn.query(
+      `UPDATE attachments SET deleted_at = now(), updated_at = now()
+       WHERE context_type = $1 AND context_id = $2 AND id <> $3 AND deleted_at IS NULL`,
+      [contextType, contextId, keepId]
+    );
+    return result.rowCount;
   }
 
   async softDelete(conn, id) {

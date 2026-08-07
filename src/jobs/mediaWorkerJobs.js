@@ -26,12 +26,13 @@ const fs = require('fs/promises');
 const cron = require('node-cron');
 const { Storage } = require('@google-cloud/storage');
 const pool = require('../../config/db');
+const withTransaction = require('../core/withTransaction');
 const { AttachmentDAO } = require('../daos/attachmentDAO');
 const { generateUUID } = require('../utils/uuid');
 const logger = require('../utils/logger');
 const eventBus = require('../events/eventBus');
 const {
-  detectActualMimeType, stripExif, generateImageThumbnail, generateVideoPoster,
+  detectActualMimeType, stripExif, generateImageThumbnail, generateImageDerivative, generateVideoPoster,
 } = require('../utils/mediaPipeline');
 
 const storage = new Storage();
@@ -56,6 +57,12 @@ class MediaProcessingError extends Error {}
 // 음수로 흐른다(BINDER_AVATAR·CAST_COVER는 binder_id가 채워져 있어 null 가드만으로는
 // 걸러지지 않는다 — mediaService.js와 동일 이유).
 const ENTITY_IMAGE_CONTEXT_TYPES = new Set(['USER_AVATAR', 'BINDER_AVATAR', 'CAST_COVER']);
+
+// RLY-20260806-091(S3) — media.md §4-4 Step4: 엔티티 이미지 3종은 첨부 6종과 같은 720px thumb
+// 외에 1080px full도 만든다(구 256px 규격 폐기 — 3배 밀도 화면에서 120px 헤더에 360px가
+// 필요해 부족했다는 판정). 이 상수 하나만 6종의 720px(mediaPipeline.js generateImageThumbnail)
+// 과 다르다 — 나머지 로직(WebP quality 80, fit:'inside', 업스케일 안 함)은 공유한다.
+const ENTITY_IMAGE_FULL_DIMENSION_PX = 1080;
 
 function backoffMinutes(attemptCount) {
   return Math.min(2 ** (attemptCount - 1), 16);
@@ -161,18 +168,13 @@ async function processAttachment(attachment, claimToken) {
       await fs.writeFile(originalPath, buffer); // Step4가 로컬 파일(비디오 포스터용 등)을 다시 쓸 수 있게 갱신.
     }
 
-    // [Step 4] 파생 미디어 생성 (media.md:244-294 — SECTION_MESSAGE|EVENT|TASK|POST|CAST 분기만
-    // 다룬다.
-    // ⚠️ RLY-20260806-084(S2) 갱신 — 구 주석("avatar·cover는 attachments 행이 없어 claim 대상이
-    // 될 수 없다")은 폐기됐다. presign()이 이제 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·
-    // CAST_COVER)도 attachments 행을 만들고 confirm()이 그대로 processing으로 올리므로, 이
-    // Worker가 그 행을 claim해 Step1~3(MIME 위변조 검사·EXIF 파기)은 이미 실제로 적용된다.
-    // 다만 이 Step4·Step5는 여전히 6종 첨부 분기만 안다 — 엔티티 이미지 전용 파생 규격
-    // (thumb.webp 720px + full.webp 1080px 2종, media.md:441-444)과 Step5의 엔티티 포인터
-    // 갱신(user_infos.image_url 등, media.md:456-478)은 아직 배선돼 있지 않다. 지금은 이미지면
-    // 무조건 아래 6종 분기를 타 thumb.webp 하나만 만들고 status='ready'로 종결한다(엔티티
-    // 포인터는 안 바뀐다) — Worker 로직(Step4·5) 변경은 이번 Task 범위 밖(S3)이라 그대로 둔다.)
+    // [Step 4] 파생 미디어 생성 (media.md §4-4 Step4). SECTION_MESSAGE|EVENT|TASK|POST|CAST|
+    // SPECIAL_DAY는 thumb.webp(720px) 하나. 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·
+    // CAST_COVER)은 thumb.webp(720px) + full.webp(1080px) 2종 — 분기 없이 3종 공통
+    // (RLY-20260806-091, S3).
+    const isEntityImage = ENTITY_IMAGE_CONTEXT_TYPES.has(attachment.context_type);
     let thumbnailUrl = null;
+    let fullUrl = null; // 엔티티 이미지 3종 전용 — Step5(c) 포인터 갱신에서 image_url 자리에 쓴다.
     const cdnBucket = storage.bucket(CDN_BUCKET);
 
     if (effectiveMime && effectiveMime.startsWith('image/')) {
@@ -182,9 +184,23 @@ async function processAttachment(attachment, claimToken) {
       } catch (err) {
         throw new MediaProcessingError(`Step4 thumbnail generation failed: ${err.message}`);
       }
-      const derivativeKey = `derivatives/${attachment.id}/thumb.webp`;
-      await cdnBucket.file(derivativeKey).save(thumbBuffer, { contentType: 'image/webp', resumable: false });
-      thumbnailUrl = `${CDN_BASE_URL}/${derivativeKey}`;
+      const thumbKey = `derivatives/${attachment.id}/thumb.webp`;
+      await cdnBucket.file(thumbKey).save(thumbBuffer, { contentType: 'image/webp', resumable: false });
+      thumbnailUrl = `${CDN_BASE_URL}/${thumbKey}`;
+
+      if (isEntityImage) {
+        // 파생 키는 항상 {attachment_id} 기반(불변) — 같은 URL이 다른 내용을 갖는 일이 없어
+        // CDN Invalidation 대상 자체가 없어진다(media.md §4-4 "파생 키를 불변으로 두는 이유").
+        let fullBuffer;
+        try {
+          fullBuffer = await generateImageDerivative(buffer, ENTITY_IMAGE_FULL_DIMENSION_PX);
+        } catch (err) {
+          throw new MediaProcessingError(`Step4 full-size derivative generation failed: ${err.message}`);
+        }
+        const fullKey = `derivatives/${attachment.id}/full.webp`;
+        await cdnBucket.file(fullKey).save(fullBuffer, { contentType: 'image/webp', resumable: false });
+        fullUrl = `${CDN_BASE_URL}/${fullKey}`;
+      }
     } else if (effectiveMime && effectiveMime.startsWith('video/')) {
       const posterPath = path.join(dir, 'poster.webp');
       try {
@@ -198,8 +214,56 @@ async function processAttachment(attachment, claimToken) {
       thumbnailUrl = `${CDN_BASE_URL}/${derivativeKey}`;
     }
     // 오디오·문서·기타: 파생 미디어 없음(media.md:252) — thumbnailUrl은 null로 유지.
+    // (엔티티 이미지 3종은 §3-3상 항상 이미지 전용이라 video/오디오/문서 분기에 들어오지 않는다
+    // — presign이 이미지 MIME만 허용한다, mediaService.js.)
 
-    // [Step 5] DB 갱신 + 알림 (media.md:272-280)
+    // [Step 5] DB 갱신 + 알림.
+    if (isEntityImage) {
+      // media.md §4-4 Step5 — USER_AVATAR|BINDER_AVATAR|CAST_COVER는 (a)~(d)를 같은
+      // 트랜잭션에서 수행한다(RLY-20260806-091, S3). "성공했을 때만 포인터를 옮긴다"가
+      // 이 분기의 요점이다 — 실패 경로(Step1 거부, Step3/4 위 throw)는 여기 자체에 도달하지
+      // 않으므로 포인터는 자동으로 이전 값 그대로 남는다. 별도 롤백 로직을 두지 않는다.
+      const outcome = await withTransaction(async (client) => {
+        // (a) 순서 역전 가드
+        const newer = await AttachmentDAO.findNewerActiveSibling(client, {
+          contextType: attachment.context_type,
+          contextId: attachment.context_id,
+          excludeId: attachment.id,
+          afterCreatedAt: attachment.created_at,
+        });
+        if (newer) {
+          await AttachmentDAO.markSuperseded(client, attachment.id, claimToken, thumbnailUrl);
+          return 'superseded';
+        }
+
+        // (b) attachments 행 종결
+        const applied = await AttachmentDAO.markReady(client, attachment.id, claimToken, thumbnailUrl);
+        if (!applied) return 'claim_stolen';
+
+        // (c) 엔티티 포인터 갱신 — full=1080 파생, thumb=720 파생
+        await AttachmentDAO.updateEntityImagePointer(
+          client, attachment.context_type, attachment.context_id, fullUrl, thumbnailUrl
+        );
+
+        // (d) 이전 세대 정리
+        await AttachmentDAO.markOtherGenerationsDeleted(
+          client, attachment.context_type, attachment.context_id, attachment.id
+        );
+        return 'ready';
+      });
+
+      if (outcome === 'claim_stolen') {
+        logger.warn('Media worker: markReady skipped — claim stolen by another worker (stale lease)', { attachmentId: attachment.id });
+      } else if (outcome === 'superseded') {
+        logger.warn('Media worker: entity image superseded by a newer upload — pointer not moved (order-reversal guard, media.md §4-4 Step5-a)', { attachmentId: attachment.id });
+      }
+      // media.md §4-4 Step5의 엔티티 분기는 6종 분기와 달리 이벤트 발행을 명시하지 않는다.
+      // §4-4-1 "거부 시 동작" 규약과 같은 결 — 실시간 push는 전 도메인 미구현이고(§13) 아바타
+      // 만을 위해 별도 통지 경로를 만들지 않는다. 클라는 낙관적 표시 후 다음 동기화로 수렴한다
+      // (Writer 판단 — 문서가 이 분기에 이벤트 발행 줄을 두지 않은 것을 그대로 따랐다).
+      return;
+    }
+
     const applied = await AttachmentDAO.markReady(pool, attachment.id, claimToken, thumbnailUrl);
     if (!applied) {
       logger.warn('Media worker: markReady skipped — claim stolen by another worker (stale lease)', { attachmentId: attachment.id });
