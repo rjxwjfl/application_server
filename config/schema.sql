@@ -947,6 +947,10 @@ CREATE TABLE audit_logs (
   PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
+-- 아래 연도 파티션은 초기 시드일 뿐이다 — RLY-20260806-175: src/jobs/partitionJobs.js가
+-- 서버 기동 시(및 매년 1/2 cron)마다 "올해+2년" 파티션이 있는지 다시 확인해 부족하면
+-- 만든다. 이 schema.sql을 몇 년 뒤에 그대로 재사용해 설치해도 앱 첫 기동에서 곧바로
+-- 스스로 메운다 — 이 정적 선언을 굳이 연도 계산하도록 고칠 필요가 없다.
 CREATE TABLE audit_logs_2026 PARTITION OF audit_logs
   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 CREATE TABLE audit_logs_2027 PARTITION OF audit_logs
@@ -972,6 +976,7 @@ CREATE TABLE activity_feeds (
   CONSTRAINT fk_af_actor  FOREIGN KEY (actor_id)  REFERENCES users(id)
 ) PARTITION BY RANGE (created_at);
 
+-- 위 audit_logs와 동일 — RLY-20260806-175: src/jobs/partitionJobs.js가 부족분을 채운다.
 CREATE TABLE activity_feeds_2026 PARTITION OF activity_feeds
   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 CREATE TABLE activity_feeds_2027 PARTITION OF activity_feeds
@@ -1034,6 +1039,9 @@ CREATE TABLE notifications (
   CONSTRAINT fk_noti_binder    FOREIGN KEY (binder_id)    REFERENCES binders(id)
 ) PARTITION BY RANGE (created_at);
 
+-- 위 audit_logs와 동일 — RLY-20260806-175: src/jobs/partitionJobs.js가 부족분을 채운다.
+-- 오래된 연도 파티션 정리(DROP)는 별개다 — RLY-20260806-173: src/jobs/cleanupJobs.js의
+-- cleanupNotificationPartitions()가 1년 보관 정책으로 처리한다(이 테이블만, User 판정).
 CREATE TABLE notifications_2026 PARTITION OF notifications
   FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 CREATE TABLE notifications_2027 PARTITION OF notifications
