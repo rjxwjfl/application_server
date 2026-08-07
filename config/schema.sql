@@ -984,6 +984,10 @@ CREATE TABLE activity_feeds_2027 PARTITION OF activity_feeds
 CREATE TABLE activity_feeds_2028  PARTITION OF activity_feeds  FOR VALUES FROM ('2028-01-01') TO ('2029-01-01');
 
 CREATE INDEX idx_feed_binder_cursor ON activity_feeds (binder_id, created_at DESC, id DESC);
+-- RLY-20260806-176 — 항목 단위(target_id) 조회용. 위 idx_feed_binder_cursor는 선두 컬럼이
+-- binder_id라 이 용도와 안 겹친다. 파티션 부모에 한 번만 낸다 — 기존·향후(175의 자동 생성
+-- 경로 포함) 자식 파티션 전부에 자동 전파된다(실측 확인, migrations/20260808_activity_feeds_target_index.sql 참조).
+CREATE INDEX idx_feed_target ON activity_feeds (target_type, target_id, created_at DESC);
 
 CREATE TABLE activity_feed_cursors (
   user_id            UUID        NOT NULL,
