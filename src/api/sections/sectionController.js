@@ -32,8 +32,9 @@ const sectionController = {
     res.json({ success: true, message: '섹션이 삭제되었습니다' });
   }),
 
+  // RLY-20260806-156 — members(신 형태, id 포함)와 user_ids(구 형태, 평문) 둘 다 받는다.
   addMembers: asyncHandler(async (req, res) => {
-    const result = await SectionService.addMembers(req.params.sectionId, req.body.user_ids,
+    const result = await SectionService.addMembers(req.params.sectionId, req.body.members ?? req.body.user_ids,
       { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.status(201).json({ success: true, data: result });
   }),
