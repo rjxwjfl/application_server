@@ -6,6 +6,7 @@ const pool = require('../../config/db');
 const withTransaction = require('../core/withTransaction');
 const { NotFoundError, ForbiddenError, BadRequestError, ConflictError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
+const { requireBinderMember } = require('../core/authz');
 
 // RLY-20260806-100 — F7 링크 카드(SC-messaging.md §20-2 L1~L6)의 target_type별 접근 검증.
 // L4가 "같은 binder 멤버는 events·tasks·special_days·casts·posts 자동 노출"이라 명시하므로
@@ -275,6 +276,16 @@ class MessageService {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
 
+      const section = await SectionDAO.findById(client, message.section_id);
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+
+      // RLY-20260806-107 — api.md:1902 "핀 토글. master·manager 전용." 이 서버 어디에도
+      // 집행되지 않았다(컨트롤러는 SectionService.assertMessageAccess로 콘텐츠 접근만
+      // 확인 — role 게이트가 없어 member·editor도 핀을 걸고 뗄 수 있었다). 새 미들웨어를
+      // 만들지 않고 기존 requireBinderMember(minRole)를 재사용한다 — role 0=master·
+      // 1=manager(숫자가 낮을수록 상위 권한)이므로 minRole:1은 master·manager만 통과.
+      await requireBinderMember(client, section.binder_id, context.sender_id, { minRole: 1 });
+
       // RLY-20260806-103 — 한도는 "지금부터 핀을 거는" 액션에만 적용한다(해제는 무관,
       // §16-12). message.is_pinned는 갱신 전(현재) 값 — 이게 false일 때만 곧 true로
       // 바뀔 액션이므로 이 분기에서만 카운트를 확인한다.
@@ -286,8 +297,7 @@ class MessageService {
       }
 
       const result = await MessageDAO.togglePin(client, messageId, context.sender_id);
-      const section = await SectionDAO.findById(client, message.section_id);
-      return { result, binder_id: section ? section.binder_id : null };
+      return { result, binder_id: section.binder_id };
     });
 
     eventBus.emit('sync', {
