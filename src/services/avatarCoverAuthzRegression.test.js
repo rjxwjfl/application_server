@@ -46,6 +46,7 @@ function setMember(binderId, userId, role) {
 // bA: master1(role0)·manager1(role1)·member1(일반, role3). outsider는 비멤버.
 setMember('bA', 'master1', 0);
 setMember('bA', 'manager1', 1);
+setMember('bA', 'editor1', 2); // RLY-20260806-127 — BINDER_AVATAR presign role≤1 대조군(editor는 여전히 막힘)
 setMember('bA', 'member1', 3);
 
 db.calendars.calA = { id: 'calA', binder_id: 'bA', title: 'CalA', description: null, color: 0, is_public: false, created_at: NOW, updated_at: NOW, deleted_at: null };
@@ -223,9 +224,16 @@ async function run() {
     else { fail++; failures.push(`USER_AVATAR INSERT 값 불일치: ${JSON.stringify(row)}`); }
   }
 
-  // 바인더 아바타 분기 — master만 허용(binderService.updateBinder와 동일 기준)
+  // 바인더 아바타 분기 — RLY-20260806-127: master·manager(role≤1) 허용으로 확장
+  // (binderService.updateBinder가 124로 master·manager까지 열려 media.md:283 "동일 기준"의
+  // 참조 대상이 바뀌었다 — presign도 같은 문지기를 공유해야 우회로가 안 생긴다).
   await expectRejected(
-    '바인더 아바타 presign — master 아니면 403',
+    '바인더 아바타 presign — editor(role2)는 여전히 403(대조군)',
+    () => MediaService.presign({ context_type: 'BINDER_AVATAR', context_id: 'bA', filename: 'a.jpg', content_type: 'image/jpeg', file_size: 1000 }, ctx('editor1')),
+    { statusCode: 403 }
+  );
+  await expectRejected(
+    '바인더 아바타 presign — 일반 멤버(role3)는 여전히 403(대조군)',
     () => MediaService.presign({ context_type: 'BINDER_AVATAR', context_id: 'bA', filename: 'a.jpg', content_type: 'image/jpeg', file_size: 1000 }, ctx('member1')),
     { statusCode: 403 }
   );
@@ -234,9 +242,12 @@ async function run() {
     '바인더 아바타 presign — master는 통과',
     () => MediaService.presign({ context_type: 'BINDER_AVATAR', context_id: 'bA', filename: 'a.jpg', content_type: 'image/jpeg', file_size: 1000 }, ctx('master1'))
   );
-  assert.strictEqual(insertedAttachments.length, 1, 'BINDER_AVATAR presign 성공 시 attachments 행이 정확히 1개 생겨야 한다');
-  {
-    const row = insertedAttachments[0];
+  await expectOk(
+    '바인더 아바타 presign — manager도 통과(신설, RLY-20260806-127)',
+    () => MediaService.presign({ context_type: 'BINDER_AVATAR', context_id: 'bA', filename: 'a.jpg', content_type: 'image/jpeg', file_size: 1000 }, ctx('manager1'))
+  );
+  assert.strictEqual(insertedAttachments.length, 2, 'BINDER_AVATAR presign 성공(master·manager) 2건이 각각 attachments 행을 만들어야 한다');
+  for (const row of insertedAttachments) {
     // media.md §4-1 서버 Step7: BINDER_AVATAR의 binder_id는 context_id와 동일해야 한다.
     if (row.contextType === 'BINDER_AVATAR' && row.contextId === 'bA' && row.binderId === 'bA') pass++;
     else { fail++; failures.push(`BINDER_AVATAR INSERT 값 불일치(binder_id=context_id 규칙): ${JSON.stringify(row)}`); }
