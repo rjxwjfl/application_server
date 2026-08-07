@@ -147,7 +147,7 @@ class MessageService {
     const { result, binder_id } = await withTransaction(async (client) => {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
-      const result = await MessageDAO.togglePin(client, messageId);
+      const result = await MessageDAO.togglePin(client, messageId, context.sender_id);
       const section = await SectionDAO.findById(client, message.section_id);
       return { result, binder_id: section ? section.binder_id : null };
     });

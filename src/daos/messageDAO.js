@@ -79,14 +79,22 @@ class MessageDAO {
     await conn.query(query, [messageId]);
   }
 
-  async togglePin(conn, messageId) {
+  // RLY-20260806-094 — is_pinned만 NOT으로 토글하고 pinned_at·pinned_by_user_id는 전혀
+  // 쓰지 않았다(항상 NULL). SC-messaging.md:1531·1538 — 핀 시 pinned_at=now()·
+  // pinned_by_user_id=actor, 해제 시 둘 다 NULL로 되돌린다(마지막 기록 보존 아님). SET
+  // 절의 `is_pinned` 참조는 같은 UPDATE 안에서 항상 갱신 전 값이라(Postgres 규약) 토글
+  // 방향 판정에 그대로 쓸 수 있다.
+  async togglePin(conn, messageId, userId) {
     const query = `
       UPDATE section_messages
-      SET is_pinned = NOT is_pinned, updated_at = now()
+      SET is_pinned = NOT is_pinned,
+          pinned_at = CASE WHEN is_pinned THEN NULL ELSE now() END,
+          pinned_by_user_id = CASE WHEN is_pinned THEN NULL ELSE $2 END,
+          updated_at = now()
       WHERE id = $1 AND deleted_at IS NULL
-      RETURNING id, is_pinned
+      RETURNING id, is_pinned, pinned_at, pinned_by_user_id
     `;
-    const result = await conn.query(query, [messageId]);
+    const result = await conn.query(query, [messageId, userId]);
     return result.rows[0];
   }
 
@@ -278,13 +286,19 @@ class MessageDAO {
   // 핀 메시지 조회
   // ============================================
 
+  // RLY-20260806-094 — pinned_at·pinned_by_user_id를 이제 togglePin이 채우므로, 이 SELECT도
+  // 함께 노출해야 값이 실제로 GET /section/{id}/pinned 응답에 도달한다(안 그러면 쓰기만
+  // 고치고 이 REST 응답에서는 여전히 안 보인다). 정렬도 SC-messaging.md §16-13(확정)이
+  // "pinned_at DESC(최근 핀이 좌측)"로 못 박아 updated_at 대신 pinned_at으로 바꿨다 —
+  // pinned_at이 항상 NULL이던 동안엔 이 정렬 자체가 성립할 수 없어 updated_at으로
+  // 대체돼 있었다.
   async findPinned(conn, sectionId) {
     const query = `
       SELECT id, section_id, user_id, parent_id, content,
-             mention_everyone, is_pinned, created_at, updated_at
+             mention_everyone, is_pinned, pinned_at, pinned_by_user_id, created_at, updated_at
       FROM section_messages
       WHERE section_id = $1 AND is_pinned = TRUE AND deleted_at IS NULL
-      ORDER BY updated_at DESC
+      ORDER BY pinned_at DESC
     `;
     const result = await conn.query(query, [sectionId]);
     return result.rows;

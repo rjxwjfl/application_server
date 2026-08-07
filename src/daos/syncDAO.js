@@ -547,6 +547,125 @@ class SyncDAO {
     return rows;
   }
 
+  /**
+   * RLY-20260806-094 — message_polls는 079의 message_reactions와 같은 부류다: 생성은
+   * createMessage 트랜잭션 안에서 메시지와 함께 이뤄지지만(V2 시나리오), 그 뒤 closePoll이
+   * 메시지 자신을 건드리지 않고 message_polls.closed_at·updated_at만 독립적으로 바꾼다
+   * (messageService.js closePoll — attachments의 Worker 비동기 상태전이·reactions의
+   * add/remove와 동일 모양, "부모 불변 + 자식만 변경"이 실제로 일어난다). 079와 동일한
+   * 두 조건 OR: (1) messageIds 스코프(기존과 동일) (2) 독자 updated_at + 섹션 접근 판정
+   * (getMessagesDeltaFull·getMessageReactions와 동일 재사용, 새 인가 개념 없음).
+   */
+  static async getMessagePolls(pool, messageIds, oldTs, userId, currDIds) {
+    const hasIndependentBranch = !!(oldTs && userId && currDIds && currDIds.length);
+    if (!messageIds.length && !hasIndependentBranch) return [];
+
+    if (!hasIndependentBranch) {
+      const query = `
+        SELECT * FROM message_polls
+        WHERE message_id = ANY($1::uuid[])
+        ${oldTs ? 'AND updated_at > $2' : ''}
+      `;
+      const params = oldTs ? [messageIds, oldTs] : [messageIds];
+      const { rows } = await pool.query(query, params);
+      return rows;
+    }
+
+    const query = `
+      SELECT p.* FROM message_polls p
+      JOIN section_messages m ON m.id = p.message_id
+      JOIN sections s ON s.id = m.section_id
+      WHERE (
+        (p.message_id = ANY($1::uuid[]) AND p.updated_at > $2)
+        OR (
+          p.updated_at > $2
+          AND s.binder_id = ANY($3::uuid[])
+          AND (s.access_scope = 0 OR EXISTS (
+            SELECT 1 FROM section_members sm
+            WHERE sm.section_id = s.id AND sm.user_id = $4 AND sm.deleted_at IS NULL
+          ))
+        )
+      )
+    `;
+    const { rows } = await pool.query(query, [messageIds, oldTs, currDIds, userId]);
+    return rows;
+  }
+
+  /**
+   * RLY-20260806-094 — message_poll_options는 message_embeds·message_mentions와 같은
+   * 부류다: created_at만 있고 updated_at·deleted_at 자체가 스키마에 없다(schema.sql
+   * message_poll_options) — poll 생성 시(V2 시나리오, bulk INSERT) 한 번만 만들어지고
+   * 그 뒤 개별 옵션을 고치거나 지우는 경로가 코드 어디에도 없다(grep 확인). "부모(poll)
+   * 불변 + 옵션만 나중에 변경"이 발생할 수 없어 독자 시간 분기를 넣지 않았다 — messageIds
+   * 스코프 하나로 poll 생성 시점에 이미 함께 실린다(embeds와 동일 이유).
+   */
+  static async getMessagePollOptions(pool, messageIds) {
+    if (!messageIds.length) return [];
+    const query = `
+      SELECT po.* FROM message_poll_options po
+      JOIN message_polls p ON p.id = po.poll_id
+      WHERE p.message_id = ANY($1::uuid[])
+    `;
+    const { rows } = await pool.query(query, [messageIds]);
+    return rows;
+  }
+
+  /**
+   * RLY-20260806-094 — message_poll_votes는 겉보기엔 reactions와 같은 "부모 불변 + 자식만
+   * 독립적으로 변경" 모양이지만, 컬럼 자체가 다르다: id도 deleted_at도 없다(복합 PK
+   * poll_id·option_id·user_id, `voted_at`만 존재 — schema.sql). 재투표는 서비스 레이어가
+   * 항상 (poll_id, user_id) 전체를 **hard delete 후 재삽입**한다(messageService.js
+   * votePoll — "message_poll_votes에는 deleted_at이 없다"는 design_intent.md의 기존
+   * 의도적 설계). 지워진 행은 어떤 시간 필터로도 흔적이 안 남는다 — updated_at 조건 하나
+   * 추가하는 079 패턴을 그대로 베끼면 "새 투표 행"만 실려서, 클라가 그 poll의 **기존 다른
+   * 사용자 투표까지 통째로 지워버린다** — 클라가 이미 그렇게 짜여 있다(sections_dao.dart:1085
+   * 주석 "서버가 변경된 poll의 votes 전량을 보내므로 해당 poll의 기존 votes를 삭제 후
+   * 전량 재삽입"). 그래서 여기서는 "새 투표가 있었던 poll_id"만 판정에 쓰고(079와 동일한
+   * OR 스코프·인가), 실제로 실어 보내는 건 그 poll_id의 **현재 투표 전량**이다 — 부분만
+   * 보내면 클라 쪽 delete-then-reinsert가 정상 투표까지 삭제해 새 결함을 만든다.
+   * (참고: 신규 투표 자체는 이 안에서 정상 전파된다 — 구조적으로 못 잡는 것은 "투표 제거
+   * 신호"뿐이지만, API에 표를 전부 비우는 수단이 없어(votePoll이 option_ids 빈 배열을
+   * 거부) 실질적으로 poll_id가 완전히 빈 상태로 전이하는 경로 자체가 없다.)
+   */
+  static async getMessagePollVotes(pool, messageIds, oldTs, userId, currDIds) {
+    const hasIndependentBranch = !!(oldTs && userId && currDIds && currDIds.length);
+    if (!messageIds.length && !hasIndependentBranch) return [];
+
+    if (!hasIndependentBranch) {
+      const query = `
+        SELECT v.* FROM message_poll_votes v
+        JOIN message_polls p ON p.id = v.poll_id
+        WHERE p.message_id = ANY($1::uuid[])
+      `;
+      const { rows } = await pool.query(query, [messageIds]);
+      return rows;
+    }
+
+    const query = `
+      SELECT v.* FROM message_poll_votes v
+      WHERE v.poll_id IN (
+        SELECT DISTINCT v2.poll_id
+        FROM message_poll_votes v2
+        JOIN message_polls p ON p.id = v2.poll_id
+        JOIN section_messages m ON m.id = p.message_id
+        JOIN sections s ON s.id = m.section_id
+        WHERE (
+          (p.message_id = ANY($1::uuid[]) AND v2.voted_at > $2)
+          OR (
+            v2.voted_at > $2
+            AND s.binder_id = ANY($3::uuid[])
+            AND (s.access_scope = 0 OR EXISTS (
+              SELECT 1 FROM section_members sm
+              WHERE sm.section_id = s.id AND sm.user_id = $4 AND sm.deleted_at IS NULL
+            ))
+          )
+        )
+      )
+    `;
+    const { rows } = await pool.query(query, [messageIds, oldTs, currDIds, userId]);
+    return rows;
+  }
+
   // =========================================================================
   // Personal Data 쿼리
   // =========================================================================
