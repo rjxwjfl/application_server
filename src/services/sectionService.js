@@ -85,9 +85,25 @@ class SectionService {
     });
   }
 
-  async addMembers(sectionId, userIds, context) {
-    if (!Array.isArray(userIds) || userIds.length === 0) throw new BadRequestError('user_ids 배열이 필요합니다');
-    const uniqueUserIds = [...new Set(userIds)];
+  // RLY-20260806-156 — User 판정("즉시 표시가 기본, 포기는 예외")에 따라 클라가 낙관적으로
+  // 붙이기 전에 서버를 미리 준비한다. 로컬 section_members에도 uq_section_members_active
+  // (section_id,user_id) WHERE deleted_at IS NULL 파샬 유니크가 이미 있어(143 확인) 멘션·
+  // 반응과 같은 함정이 성립할 수 있다 — 지금은 클라가 낙관적 로컬 삽입을 안 해서(addMembers가
+  // enqueueRequest만 하고 _dao 로컬 쓰기가 없음, section_repository.dart:153-171 확인) 터지지
+  // 않을 뿐이다. `members: [{id, user_id}]`(embeds[]·mentions와 동일 모양)를 새로 받고, 구
+  // 형태(`user_ids: [uuid]` 평문 배열)도 하위호환으로 받는다 — 새 패턴을 만들지 않았다.
+  async addMembers(sectionId, membersInput, context) {
+    if (!Array.isArray(membersInput) || membersInput.length === 0) throw new BadRequestError('user_ids 배열이 필요합니다');
+    const normalized = membersInput.map((m) => (
+      typeof m === 'string'
+        ? { id: generateUUID(), user_id: m }              // 구 형태 — 서버가 발급(기존 동작 유지)
+        : { id: m.id || generateUUID(), user_id: m.user_id } // 신 형태 — 클라 id 존중
+    ));
+    // user_id 기준 중복 제거 — 신 형태는 객체라 Set으로 못 거른다(참조가 매번 달라 중복이
+    // 하나도 안 걸러짐). 값(user_id) 기준으로 직접 거른다.
+    const seen = new Set();
+    const uniqueMembers = normalized.filter((m) => (seen.has(m.user_id) ? false : (seen.add(m.user_id), true)));
+
     const result = await withTransaction(async (client) => {
       const section = await SectionDAO.findById(client, sectionId, true);
       if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
@@ -95,10 +111,14 @@ class SectionService {
       if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
       if (section.access_scope !== 1) throw new BadRequestError('public 섹션에는 멤버를 추가할 수 없습니다');
       const added = [];
-      for (const userId of uniqueUserIds) {
-        const target = await BinderDAO.getMember(client, section.binder_id, userId);
+      for (const m of uniqueMembers) {
+        const target = await BinderDAO.getMember(client, section.binder_id, m.user_id);
         if (!target || target.deleted_at) throw new BadRequestError('모든 user_id는 활성 바인더 멤버여야 합니다');
-        if (await SectionDAO.addMember(client, sectionId, userId, generateUUID())) added.push(userId);
+        // ⚠️ SectionDAO.addMember의 "복원(restored)" 경로(sectionDAO.js:79-84)는 소프트 삭제된
+        // 기존 행을 되살릴 때 그 행의 **기존 id를 그대로 유지**하고 여기서 넘긴 m.id는 쓰지
+        // 않는다(UPDATE에 id가 없음) — 신규 삽입일 때만 m.id가 실제로 쓰인다. 이 복원 경로의
+        // 계약(새 클라 id를 반영할지)은 이번 Task 범위가 아니라 그대로 뒀다 — 보고서에 명시.
+        if (await SectionDAO.addMember(client, sectionId, m.user_id, m.id)) added.push(m.user_id);
       }
       return { binderId: section.binder_id, added_user_ids: added, member_count: await SectionDAO.countMembers(client, sectionId) };
     });

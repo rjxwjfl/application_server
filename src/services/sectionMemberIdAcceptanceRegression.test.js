@@ -1,0 +1,153 @@
+/**
+ * src/services/sectionMemberIdAcceptanceRegression.test.js
+ * =========================================
+ * RLY-20260806-156 ② — User 판정("즉시 표시가 기본, 포기는 예외")에 대비해 섹션 멤버 추가를
+ * 미리 준비한다. 로컬 `section_members`에도 `uq_section_members_active
+ * (section_id,user_id) WHERE deleted_at IS NULL` 파샬 유니크가 이미 있어(143 확인) 멘션·반응과
+ * 같은 함정이 성립할 수 있다 — 지금은 클라가 낙관적 로컬 삽입을 안 해서 터지지 않을 뿐이다.
+ * `SectionService.addMembers`가 `members: [{id, user_id}]`(신 형태, 클라 id 존중)와
+ * `user_ids: [uuid]`(구 형태, 서버 발급) 둘 다 받도록 확장했다.
+ *
+ * ⚠️ SectionDAO.addMember의 "복원(restored)" 경로는 소프트 삭제된 기존 행을 되살릴 때 그
+ * 행의 **기존 id를 그대로 유지**한다 — 새로 넘긴 id는 신규 삽입일 때만 쓰인다. 이 계약은
+ * 이번 Task 범위가 아니라 그대로 뒀다 — 그 사실 자체를 회귀로 실측해 고정한다(수리 안 함).
+ *
+ * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`.
+ *
+ * 실행: node src/services/sectionMemberIdAcceptanceRegression.test.js
+ */
+
+const assert = require('assert');
+
+const dbPath = require.resolve('../../config/db');
+const NOW = new Date('2026-08-07T00:00:00Z').toISOString();
+
+const binderMembers = {
+  'b1:manager1': { binder_id: 'b1', user_id: 'manager1', role: 1, deleted_at: null },
+  'b1:member1': { binder_id: 'b1', user_id: 'member1', role: 3, deleted_at: null },
+  'b1:member2': { binder_id: 'b1', user_id: 'member2', role: 3, deleted_at: null },
+};
+const sections = {
+  s1: { id: 's1', binder_id: 'b1', access_scope: 1, deleted_at: null },
+};
+
+// 인메모리 section_members — SectionDAO.addMember의 CTE(restored/inserted) 의미론을 그대로
+// 재현한다: 활성 행이 있으면 아무 것도 안 함(그 위는 서비스가 이미 걸러야 정상이지만 DAO
+// 자체는 ON CONFLICT DO NOTHING으로 방어), 소프트 삭제된 행이 있으면 "기존 id 유지"로 복원,
+// 둘 다 없으면 넘어온 id로 신규 삽입.
+const sectionMembersTable = [];
+
+async function mockQuery(sql, params = []) {
+  const s = sql.replace(/\s+/g, ' ').trim();
+  if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] };
+
+  if (s.includes('FROM binder_members') && s.includes('WHERE binder_id = $1 AND user_id = $2')) {
+    return { rows: binderMembers[`${params[0]}:${params[1]}`] ? [binderMembers[`${params[0]}:${params[1]}`]] : [] };
+  }
+  if (s.startsWith('SELECT id, binder_id, title, access_scope, is_default') && s.includes('FROM sections')) {
+    const row = sections[params[0]];
+    return { rows: row ? [row] : [] };
+  }
+  // SectionDAO.addMember — WITH restored ... inserted ...
+  if (s.startsWith('WITH restored AS')) {
+    const [sectionId, userId, id] = params;
+    const activeRow = sectionMembersTable.find((r) => r.section_id === sectionId && r.user_id === userId && !r.deleted_at);
+    if (activeRow) {
+      // ON CONFLICT ... DO NOTHING — 아무 것도 안 바뀜, 빈 결과.
+      return { rows: [] };
+    }
+    const deletedRow = sectionMembersTable.find((r) => r.section_id === sectionId && r.user_id === userId && r.deleted_at);
+    if (deletedRow) {
+      // restored — 기존 id 유지, deleted_at만 NULL로.
+      deletedRow.deleted_at = null;
+      return { rows: [{ user_id: userId }] };
+    }
+    // inserted — 신규, 넘어온 id 사용.
+    sectionMembersTable.push({ id, section_id: sectionId, user_id: userId, deleted_at: null });
+    return { rows: [{ user_id: userId }] };
+  }
+  // SectionDAO.countMembers
+  if (s.startsWith('SELECT COUNT(*)::int AS count FROM section_members')) {
+    const count = sectionMembersTable.filter((r) => r.section_id === params[0] && !r.deleted_at).length;
+    return { rows: [{ count }] };
+  }
+
+  throw new Error(`[mock] Unhandled query: ${s.slice(0, 140)} params=${JSON.stringify(params)}`);
+}
+
+const mockDb = { query: mockQuery, connect: async () => ({ query: mockQuery, release() {} }) };
+require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: mockDb };
+
+const { SectionService } = require('./sectionService');
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+function check(desc, cond, detail) { if (cond) pass++; else { fail++; failures.push(detail ? `${desc}: ${detail}` : desc); } }
+
+async function expectStatus(desc, fn, expectedStatus) {
+  try { await fn(); fail++; failures.push(`${desc}: 예상 ${expectedStatus} — 통과해버림`); }
+  catch (err) {
+    if (err.statusCode === expectedStatus) pass++;
+    else { fail++; failures.push(`${desc}: 예상 ${expectedStatus}, 실제 ${err.statusCode || err.message}`); }
+  }
+}
+
+const ctx = () => ({ sender_id: 'manager1', device_uuid: 'dev1' });
+
+async function run() {
+  // ============ ① 신 형태 — members:[{id,user_id}] — 클라 id를 그대로 존중 ============
+  {
+    const clientMemberId = 'client-section-member-id-AAA';
+    const result = await SectionService.addMembers('s1', [{ id: clientMemberId, user_id: 'member1' }], ctx());
+    check('신 형태 — added_user_ids에 member1 포함', result.added_user_ids.includes('member1'));
+    const row = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member1');
+    check('신 형태 — 클라가 보낸 id가 그대로 저장된다(신규 삽입 경로)', row && row.id === clientMemberId, `실제=${JSON.stringify(row)}`);
+  }
+
+  // ============ ② 구 형태 — user_ids:[uuid] — 하위호환, 서버가 id 발급(기존 동작) ============
+  {
+    const result = await SectionService.addMembers('s1', ['member2'], ctx());
+    check('구 형태 — 여전히 동작한다(회귀 없음)', result.added_user_ids.includes('member2'));
+    const row = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member2');
+    check('구 형태 — id는 서버가 새로 발급한다(user_id와 다른 값)', row && typeof row.id === 'string' && row.id !== 'member2');
+  }
+
+  // ============ ③ 부활 경로 실측 — 소프트 삭제된 행에 새 클라 id로 재추가하면 "기존" id 유지 ============
+  // ⚠️ 이건 결함으로 보고만 한다 — 이번 Task에서 고치지 않았다.
+  {
+    // member1을 제거(소프트 삭제)한 뒤 다른 클라 id로 재추가.
+    const before = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member1');
+    const originalId = before.id;
+    before.deleted_at = NOW; // 제거 시뮬레이션(SectionService.removeMember 대신 직접 조작 — 이 회귀의 관심사는 addMember 하나뿐)
+
+    const newClientId = 'client-section-member-id-BBB-different';
+    await SectionService.addMembers('s1', [{ id: newClientId, user_id: 'member1' }], ctx());
+
+    const after = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member1');
+    check(
+      '③ 실측 — 소프트 삭제된 멤버를 다른 클라 id로 재추가하면 "기존"(복원 전) id가 유지되고 새 id는 반영되지 않는다 — Architect가 지목한 지점과 동형, 고치지 않고 보고만 한다',
+      after && after.id === originalId && after.id !== newClientId,
+      `기대=${originalId}(기존 유지), 실제=${JSON.stringify(after)}`
+    );
+  }
+
+  // ============ 인가·유효성 회귀 없음(대조군) ============
+  await expectStatus(
+    '대조군 — 활성 바인더 멤버가 아니면 여전히 400',
+    () => SectionService.addMembers('s1', [{ id: 'x', user_id: 'not-a-binder-member' }], ctx()),
+    400
+  );
+
+  console.log(`\n[sectionMemberIdAcceptanceRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
+  if (failures.length) {
+    console.log('--- 실패 목록 ---');
+    failures.forEach((f) => console.log(' - ' + f));
+    process.exitCode = 1;
+  }
+}
+
+run().catch((error) => {
+  console.error('[sectionMemberIdAcceptanceRegression] 실행 실패:', error);
+  process.exitCode = 1;
+});
