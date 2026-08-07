@@ -216,6 +216,238 @@ Object.entries(skipTotals).sort((a, b) => b[1] - a[1]).forEach(([reason, count])
 });
 console.log(`\n제외 파일(031 소유, 위 헤더 §7): ${[...EXCLUDED_FILES].join(', ')}`);
 
+// ════════════════════════════════════════════════════════════════════════
+// § C. "쓰기 공백" 방향 — 스키마엔 있는데 이 저장소 어디의 INSERT·UPDATE SET 에도 없는
+// 컬럼을 잡는다. RLY-20260806-104(조사)가 제안한 것을 RLY-20260806-112(사용자 승인)가
+// 상설화한다. §A·§B와 다른 세 번째 방향 — **§B와 같은 스캐너(sqlSourceScanner.js)의 REF를
+// 재사용하되 clause 필터만 다르다**(`INSERT columns`·`UPDATE SET`만 본다). 새 파서를 만들지
+// 않았다. ⚠️ **§B는 이 절에서 전혀 건드리지 않는다** — §C는 아래에서 독립적으로 다시 스캔한다
+// (§B의 기존 REF 카운트·통과 건수에 부작용을 주지 않기 위해서다. `TARGET_FILES` 배열은
+// **읽기만** 재사용한다 — §B가 그 배열로 하는 일은 그대로다).
+//
+// ── 대상 파일 ────────────────────────────────────────────────────────────
+// §B와 동일한 TARGET_FILES + job 파일 3개(`cleanupJobs.js`·`holidayJobs.js`·
+// `subscriptionJobs.js` — raw `pool.query`를 쓰는데 §B 스캔 대상엔 없었다. RLY-20260806-104가
+// 직접 찾은 공백이다).
+//
+// ⚠️ **§B를 이 job 파일 3개까지 확장해야 하는가 — 판단(이번엔 하지 않았다)**: §B는 "코드가
+// 스키마에 없는 컬럼을 쓴다"(존재 방향)를 잡는다. job 파일 3개도 raw SQL을 쓰므로 원리적으로는
+// 같은 위험(스키마에 없는 컬럼 참조)에 노출돼 있다 — **확장하는 게 맞아 보인다.** 다만 이번
+// Task는 "쓰기 공백"(§C) 상설화가 목적이라 §B 자체의 범위 변경은 별도 승인 없이 하지 않았다
+// (지시 — "§B 확장은 이번에 하지 마라"). 비용은 낮다(TARGET_FILES 배열에 세 줄 추가하면 끝,
+// 새 인프라 불필요) — 다음 Task로 그대로 넘길 수 있다.
+//
+// ── 이 방향이 못 잡는 범위(§B와 같은 스캐너 한계를 그대로 물려받는다 — 지우지 말 것) ──
+// 파일 헤더의 "못 잡는 범위" 1~7과 전부 동일(같은 스캐너이므로). **이 §C에서 실제로 두 번
+// 부딪힌 구체 사례**(RLY-20260806-104 조사에서 발견, 둘 다 아래 화이트리스트에
+// `동적SQL-확인됨`으로 태그돼 있다 — 지우지 말 것, 지우면 다음 사람이 "왜 여기 있지?" 하며
+// 다시 조사해야 한다):
+//   · `message_embeds.updated_at`·`deleted_at` — `sectionDAO.js`의
+//     `for (const table of ['message_embeds', 'message_reactions', 'message_mentions']) {
+//       UPDATE ${table} child SET deleted_at = now()... }` 캐스케이드 루프(섹션 삭제 시)가
+//     실제로 쓴다 — `${table}` 동적 보간이라 정규식이 테이블명을 못 찾아(한계 6) 스캐너가
+//     이 문(statement) 전체를 스킵한다.
+//   · `user_settings`의 거의 모든 설정 컬럼 — `userSettingsDAO.updatePartial()`이
+//     `SET ${setClauses.join(', ')}`로 **런타임에** SQL을 조립한다(한계 6, 동일 이유). 스캐너는
+//     문자열 리터럴만 파싱하므로 이 동적 조립을 SET 컬럼으로 못 뽑는다.
+// 둘 다 RLY-20260806-104가 직접 소스를 읽어 실제로 정상 기록되는 것을 확인했다 — 결함이
+// 아니라 **스캐너의 판별 한계**다.
+//
+// ── 화이트리스트 vs 알려진 미해결 — 구조적으로 다르다(섞지 말 것) ──────────────────
+// `_writeGapWhitelist` = **의도적으로 안 써지는 컬럼(결함 아님)**. 사유 태그 5종
+// (RLY-20260806-104 권고 체계 그대로):
+//   · `DEFAULT`        — 스키마 `DEFAULT`/`GENERATED`로 채워진다(INSERT가 명시할 필요 없음).
+//   · `동적SQL-확인됨`  — 스캐너 한계로 안 보이지만 직접 소스를 읽어 정상 기록을 확인했다.
+//   · `V2`             — 아직 만들지 않기로 한 기능의 선언된 컬럼(`docs/v2/` 근거).
+//   · `폐기`           — 폐기된 기능의 잔존 컬럼(스키마 정리는 별건).
+//   · `미착수`         — 읽기도 쓰기도 없다(기능 자체가 서버에 없다 — "쓰기 공백"이 아니라
+//                        "미착수"라는 RLY-20260806-104의 핵심 구분).
+// 초기 시드는 **RLY-20260806-104 조사의 "확인함" 절을 그대로 옮겼다 — 여기서 다시 판정하지
+// 않았다.**
+//
+// `_writeGapKnownIssues` = **실제 결함인데 이번 Task(장치를 만드는 것) 범위 밖이라 지금 안
+// 고친 것**. 화이트리스트에 넣지 않는다 — 넣으면 "지금 있는 결함을 화이트리스트로 덮는" 것이
+// 된다(금지 사항). 대신 **실행마다 경고를 출력**하고 실패로 세지 않는다(클라
+// `test/tooling/server_response_dto_drift_regression_test.dart` §6-1의 `_knownIssues`와
+// 대칭 구조 — RLY-20260806-109가 먼저 쓴 패턴을 그대로 따랐다). 고쳐지면 이 배열에서 항목을
+// 빼라 — 그러면 §C가 자동으로 "이제 안 빠졌다"를 검증하게 된다.
+// ════════════════════════════════════════════════════════════════════════
+
+// ⚠️ RLY-20260806-112 실측 발견 — `eventDao.js`·`taskDAO.js`도 §C 첫 실행에서 events·tasks·
+// event_instances·task_instances 등 6개 테이블 전체를 "쓰기 공백"으로 대량 오탐시켰다(둘 다
+// 실제로는 정상 기록되는 핵심 테이블이다). 원인: 파일 헤더 §7 주석("031 병합 완료 — 제외
+// 해제됨, 두 파일 모두 스캐너 대상")과 달리 **`TARGET_FILES`(§B) 배열엔 실제로 이 두 파일이
+// 없다** — 주석과 배열이 서로 어긋난 상태였다. §B 자체는 이번 Task에서 건드리지 않았다(지시)
+// — 이 사실은 구현 보고서에 별도로 등재했다. §C는 이 두 파일 없이는 정확도를 낼 수 없어
+// 아래 목록에 추가했다(§B TARGET_FILES를 고치는 게 아니라 §C 자체의 스캔 대상을 넓히는 것).
+const WRITE_GAP_EXTRA_FILES = [
+  'src/jobs/cleanupJobs.js',
+  'src/jobs/holidayJobs.js',
+  'src/jobs/subscriptionJobs.js',
+  'src/daos/eventDao.js',
+  'src/daos/taskDAO.js',
+];
+
+const _writeGapWhitelist = [
+  // ── DEFAULT/GENERATED ──────────────────────────────────────────────────
+  { table: 'activity_feeds', column: 'id', reason: 'DEFAULT', note: 'GENERATED ALWAYS AS IDENTITY(schema.sql).' },
+  { table: 'activity_feeds', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'audit_logs', column: 'id', reason: 'DEFAULT', note: 'GENERATED ALWAYS AS IDENTITY.' },
+  { table: 'audit_logs', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'binder_join_requests', column: 'expires_at', reason: 'DEFAULT', note: "DEFAULT now() + INTERVAL '30 days'." },
+  { table: 'group_members', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'groups', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'holidays', column: 'id', reason: 'DEFAULT', note: 'SERIAL.' },
+  { table: 'holidays', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'holidays', column: 'updated_at', reason: 'DEFAULT', note: 'DEFAULT now() — holidayJobs.js INSERT가 명시하지 않는다.' },
+  { table: 'message_embeds', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'message_mentions', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'notifications', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now() — RLY-20260806-104 보고서가 이 컬럼을 "확인함" 절에서 빠뜨렸다(원시 스캔엔 있었으나 정리 중 누락됨) — §C를 실제로 돌려서 그 누락 자체를 여기서 잡아 시드에 추가했다.' },
+  { table: 'payment_receipt_logs', column: 'id', reason: 'DEFAULT', note: 'GENERATED ALWAYS AS IDENTITY.' },
+  { table: 'section_members', column: 'created_at', reason: 'DEFAULT', note: 'DEFAULT now().' },
+  { table: 'subscription_events', column: 'id', reason: 'DEFAULT', note: 'GENERATED ALWAYS AS IDENTITY(billingDAO.js가 실제 INSERT, id만 자동).' },
+  { table: 'user_settings', column: 'created_at', reason: 'DEFAULT', note: 'createDefault()가 user_id만 명시 INSERT — 나머지는 스키마 DEFAULT.' },
+
+  // ── 동적SQL-확인됨(위 "못 잡는 범위" 참조 — 직접 소스를 읽어 정상 기록을 확인함) ──────
+  { table: 'message_embeds', column: 'updated_at', reason: '동적SQL-확인됨', note: "sectionDAO.js의 `${table}` 캐스케이드 루프(섹션 삭제 시)가 실제로 쓴다." },
+  { table: 'message_embeds', column: 'deleted_at', reason: '동적SQL-확인됨', note: '위와 동일 캐스케이드.' },
+  { table: 'user_settings', column: 'language_code', reason: '동적SQL-확인됨', note: "userSettingsDAO.updatePartial()의 동적 SET 조립이 쓴다." },
+  { table: 'user_settings', column: 'holidays_countries', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'timezone', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'first_day_of_week', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'show_lunar_calendar', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'show_week_numbers', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'blue_saturday', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'is_push_enabled', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'is_notice_enabled', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'font_size', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'theme_preference', reason: '동적SQL-확인됨', note: '위와 동일.' },
+  { table: 'user_settings', column: 'updated_at', reason: '동적SQL-확인됨', note: "updatePartial()이 `setClauses.push('updated_at = NOW()')`로 동적 추가." },
+
+  // ── 폐기 ──────────────────────────────────────────────────────────────
+  { table: 'calendars', column: 'usage_type', reason: '폐기', note: 'SC-shift-manage ⚫ 폐기(2026-08-01 User 결정, specs_index.md). 스키마 컬럼 정리는 별건.' },
+
+  // ── 미착수(읽기도 쓰기도 없음 — 기능 자체가 서버에 없다) ──────────────────────
+  { table: 'binder_boosts', column: 'binder_id', reason: '미착수', note: 'Boost 구매 흐름 전체 미구현(verifyBoost 등 501 — RLY-20260806-099가 확인).' },
+  { table: 'binder_boosts', column: 'tier', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'status', reason: '미착수', note: '위와 동일 — RLY-20260806-099가 읽기(SELECT)만 추가했다, 쓰기는 여전히 없다.' },
+  { table: 'binder_boosts', column: 'paid_by_user_id', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'product_id', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'store_type', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'original_transaction_id', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'current_period_start', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'current_period_end', reason: '미착수', note: '위와 동일 — 읽기만 있음.' },
+  { table: 'binder_boosts', column: 'grace_period_end', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'cancel_at_period_end', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'created_at', reason: '미착수', note: '위와 동일.' },
+  { table: 'binder_boosts', column: 'updated_at', reason: '미착수', note: '위와 동일.' },
+  { table: 'holidays', column: 'deleted_at', reason: '미착수', note: '참조 데이터라 삭제 기능 자체가 없다 — holidayJobs.js는 INSERT만 한다.' },
+  { table: 'special_days', column: 'recurrence_policy_version', reason: '미착수', note: 'RLY-20260806-082 확인: 서버 내부 마이그레이션 북키핑용, 클라 계약 없음(DEFAULT 1).' },
+  { table: 'user_settings', column: 'persona_hint', reason: '미착수', note: 'api.md가 응답 예시에 포함하지만 서버 SELECT·INSERT·UPDATE 어디에도 없다.' },
+  { table: 'user_terms_consents', column: 'id', reason: '미착수', note: 'SC-blocked(계정 정지·휴면 UX) 전체 미구현 — 테이블 전체 참조 0건.' },
+  { table: 'user_terms_consents', column: 'user_id', reason: '미착수', note: '위와 동일.' },
+  { table: 'user_terms_consents', column: 'terms_version', reason: '미착수', note: '위와 동일.' },
+  { table: 'user_terms_consents', column: 'privacy_version', reason: '미착수', note: '위와 동일.' },
+  { table: 'user_terms_consents', column: 'consented_at', reason: '미착수', note: '위와 동일.' },
+  { table: 'user_terms_consents', column: 'consent_source', reason: '미착수', note: '위와 동일.' },
+  { table: 'users', column: 'suspended_reason', reason: '미착수', note: 'SC-blocked 미구현 — api.md AuthUserResponse 예시엔 있으나 서버가 읽지도 쓰지도 않는다.' },
+  { table: 'users', column: 'suspended_until', reason: '미착수', note: '위와 동일.' },
+  { table: 'users', column: 'inactive_since', reason: '미착수', note: '위와 동일.' },
+];
+
+// ⚠️ 화이트리스트가 아니다 — 실제 결함이다. 화이트리스트로 덮지 마라(AC).
+const _writeGapKnownIssues = [
+  {
+    table: 'notifications', column: 'group_key', reason: '실제결함-규칙미정',
+    note: 'RLY-20260806-108: SC-notifications.md §16-4가 "미해결·UI 표준 미정"이라 규칙을 '
+      + '정하지 않고 구현을 보류했다. 읽기(notificationDAO.getByRecipient의 SELECT 목록)·문서 '
+      + '계약(SC-notifications.md 시나리오 E20·design_intent.md)은 있는데 INSERT가 안 채운다. '
+      + '규칙이 정해지면 이 배열에서 항목을 빼라.',
+  },
+];
+
+function writeGapWhitelistFor(table) {
+  return new Set(_writeGapWhitelist.filter((w) => w.table === table).map((w) => w.column));
+}
+function writeGapKnownIssuesFor(table) {
+  return new Set(_writeGapKnownIssues.filter((w) => w.table === table).map((w) => w.column));
+}
+
+// 화이트리스트·알려진 미해결 항목 자체가 실재 컬럼을 가리키는지(오타로 조용히 무력화되는
+// 사고 방지 — EXCLUDED_FILES 존재 확인과 동일 패턴, §B 위 참조).
+[..._writeGapWhitelist, ..._writeGapKnownIssues].forEach((entry) => {
+  const real = realColumnsOf(entry.table);
+  check(`[쓰기 공백 §C] 화이트리스트/알려진 미해결 항목이 실재 컬럼을 가리킨다: ${entry.table}.${entry.column}`, real.has(entry.column));
+});
+
+// ── 자가검증 — 진단 로직 자체가 실제로 "안 쓴 컬럼"을 잡는지 합성 fixture로 확인한다
+// (client `server_response_dto_drift_regression_test.dart` §7과 대칭 — 실제 파일 없이
+// 파서·대조 로직만 검증). 실제 파일 기반 검증(아래)과는 별개다 — 둘 다 있어야
+// "로직이 맞는가"와 "진짜 경로에서 도는가"를 각각 증명한다(팀리드 지시).
+(function selfTestWriteGapDetection() {
+  const { scanOneStatement } = require('./sqlSourceScanner');
+  const fixtureTables = new Set(['widgets']);
+  const fixtureSql = 'INSERT INTO widgets (id, name) VALUES ($1, $2)';
+  const { refs } = scanOneStatement(fixtureSql, fixtureTables);
+  const writtenCols = new Set(refs.filter((r) => r.clause === 'INSERT columns').map((r) => r.column));
+  check('[쓰기 공백 §C 자가검증] INSERT 컬럼이 실제로 "쓴 컬럼"으로 잡힌다', writtenCols.has('id') && writtenCols.has('name'));
+  check(
+    '[쓰기 공백 §C 자가검증] ⚠️ INSERT에 없는 컬럼(예: created_at)은 "안 쓴 컬럼"으로 남는다 — 이게 이 장치의 존재 이유다',
+    !writtenCols.has('created_at')
+  );
+})();
+
+// ── 실제 파일 대조 — TARGET_FILES(§B와 공유, 읽기만) + job 파일 3개를 다시 스캔해
+// 테이블별 "실제로 쓴 컬럼" 집합을 만들고 스키마 전체 컬럼과 차집합한다.
+const writeGapWrittenColumns = new Map(); // table -> Set(column)
+[...TARGET_FILES, ...WRITE_GAP_EXTRA_FILES].forEach((relPath) => {
+  const abs = path.join(repoRoot, relPath);
+  const { refs } = scanFile(abs, allTables);
+  refs.forEach(({ table, column, clause }) => {
+    if (clause !== 'INSERT columns' && clause !== 'UPDATE SET') return;
+    if (!writeGapWrittenColumns.has(table)) writeGapWrittenColumns.set(table, new Set());
+    writeGapWrittenColumns.get(table).add(column);
+  });
+});
+
+// job 파일 3개가 실제로 존재하는지(오타 방지 — EXCLUDED_FILES 존재 확인과 동일 패턴).
+WRITE_GAP_EXTRA_FILES.forEach((relPath) => {
+  check(`[쓰기 공백 §C] job 파일이 실제로 존재한다: ${relPath}`, fs.existsSync(path.join(repoRoot, relPath)));
+});
+
+let writeGapKnownIssueHits = 0;
+allTables.forEach((table) => {
+  let schemaCols;
+  try {
+    schemaCols = extractTableColumns(schemaSql, table);
+  } catch (e) {
+    return; // 파티션 자식 테이블 — 부모에서 컬럼을 상속받아 자체 컬럼 선언이 없다.
+  }
+  if (!schemaCols || schemaCols.length === 0) return;
+
+  const written = writeGapWrittenColumns.get(table) || new Set();
+  const whitelisted = writeGapWhitelistFor(table);
+  const known = writeGapKnownIssuesFor(table);
+
+  schemaCols.filter((col) => !written.has(col)).forEach((col) => {
+    if (known.has(col)) {
+      writeGapKnownIssueHits += 1;
+      // 실패로 세지 않는다(§ 위 "화이트리스트 vs 알려진 미해결" 근거) — 대신 실행마다
+      // 눈에 띄게 출력한다. "고쳐지면 목록에서 빠지게 해라"를 사람이 알아채려면 계속 보여야 한다.
+      console.log(`⚠️  [쓰기 공백 §C — 알려진 미해결] ${table}.${col} — INSERT·UPDATE SET 어디에도 여전히 없음(실패로 세지 않음, 고쳐지면 _writeGapKnownIssues에서 빼라)`);
+      return;
+    }
+    check(
+      `[쓰기 공백 §C] ${table}.${col} — INSERT·UPDATE SET 어디에도 없음(화이트리스트 없음)`,
+      whitelisted.has(col)
+    );
+  });
+});
+
+console.log(`\n[쓰기 공백 §C] 화이트리스트 ${_writeGapWhitelist.length}건 · 알려진 미해결 ${_writeGapKnownIssues.length}건(이번 실행에서 ${writeGapKnownIssueHits}건 재확인) · 스캔 파일 ${TARGET_FILES.length + WRITE_GAP_EXTRA_FILES.length}개(§B TARGET_FILES ${TARGET_FILES.length} + job 파일 ${WRITE_GAP_EXTRA_FILES.length}).`);
+
+console.log(`\n[allDaoSchemaColumnRegression 전체] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건 — §A + §B + §C 합산)`);
+
 if (failures.length) {
   console.log('\n--- 실패 목록 ---');
   failures.forEach((f) => console.log(' - ' + f));
