@@ -51,6 +51,7 @@ setMember('b1', 'author1', 3);
 setMember('b1', 'editor1', 2);
 setMember('b1', 'member1', 3);
 setMember('b1', 'master1', 0);
+setMember('b1', 'manager1', 1); // RLY-20260806-124 — updateBinder(Info·Settings) master·manager 회귀용
 
 db.binders.b2 = { id: 'b2', name: 'PublicBinder', description: null, image_url: null, thumbnail_url: null, member_count: 1, last_activity_at: NOW, created_at: NOW, updated_at: NOW, deleted_at: null };
 db.binder_settings.b2 = { binder_id: 'b2', is_public: true, is_searchable: true, require_approval: false, updated_at: NOW };
@@ -319,6 +320,21 @@ async function run() {
   }));
 
   // ============ Binder (4) ============
+  // RLY-20260806-124 — updateBinder(Info: name·description·image_url·thumbnail_url · Settings:
+  // is_public·is_searchable·require_approval, 통합 함수) master 전용→master·manager 확장.
+  // SC-binder-manage.md:14-15·api.md:329(User 판정 2026-08-07). 대조군까지 4건.
+  await expectOk('Binder.updateBinder master는 여전히 가능', () => BinderService.updateBinder('b1', { name: 'M' }, 'master1'));
+  await expectOk('Binder.updateBinder manager도 가능(신설, 과잉 제한 해소)', () => BinderService.updateBinder('b1', { name: 'N' }, 'manager1'));
+  await expectStatus('Binder.updateBinder editor는 여전히 403', () => BinderService.updateBinder('b1', { name: 'X' }, 'editor1'), 403);
+  await expectStatus('Binder.updateBinder 일반 멤버는 여전히 403', () => BinderService.updateBinder('b1', { name: 'X' }, 'member1'), 403);
+  await expectStatus('Binder.updateBinder 비멤버는 403', () => BinderService.updateBinder('b1', { name: 'X' }, OUT), 403);
+  // deleteBinder·transferBinderMaster는 이번 변경으로 건드리지 않은 별개 함수(각자 독립된
+  // member.role !== 0 검사, src/services/binderService.js:278-296)라 여전히 master 전용이다 —
+  // 코드 읽기로 확인(수동 대조, 아래 게이트 검사 함수가 updateBinder와 별도임을 육안 확인).
+  // getMembersForUpdate(FOR UPDATE 배치 조회)를 쓰는 kick·역할변경·transfer 계열은 이 mock
+  // harness가 지원하지 않는 별도 쿼리 패턴이라(파일 전체를 건드리는 범위 확장 없이) 여기 추가하지
+  // 않았다 — 이번 변경이 그 함수들의 코드를 손대지 않았으므로 회귀 대상이 아니다.
+
   await expectStatus('Binder.getBinderMembers 비멤버', () => BinderService.getBinderMembers('b1', OUT), 403);
   await expectOk('Binder.getBinderMembers 멤버', () => BinderService.getBinderMembers('b1', 'member1'));
   await expectOk('Binder.getBinder 비멤버(공개 바인더 preview)', () => BinderService.getBinder('b2', OUT));
