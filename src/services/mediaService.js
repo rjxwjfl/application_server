@@ -278,14 +278,18 @@ class MediaService {
   }
 
   /**
-   * RLY-20260806-052/084 — BINDER_AVATAR presign 인가. media.md §4-1-1: 그 바인더의
-   * master(role 0) — binderService.updateBinder(PATCH /binders/:id)와 동일 기준. 실제로 이
-   * storage_key를 소비하는 유일한 필드는 binders.image_url이며 그 엔드포인트가 이미 master
-   * 전용이다 — presign 단계 인가를 그 기준에 맞춘다.
+   * RLY-20260806-052/084/127 — BINDER_AVATAR presign 인가. media.md §4-1-1: "그 바인더의
+   * master(role 0) — PATCH /binders/:id와 동일 기준"이라고 적혀 있지만 그 문구 자체가
+   * 고정값이 아니라 PATCH /binders/:id의 실제 규칙을 가리키는 참조다("동일 기준"). 그 참조
+   * 대상이 RLY-20260806-124(User 판정 2026-08-07)로 master 전용→master·manager(role≤1)로
+   * 넓어졌고, SC-binder-manage.md:14도 imageUrl·thumbnailUrl을 Info 필드로 묶어 master·manager
+   * 범위에 포함한다 — 두 문서 다 "master 고정"이 아니라 "그 엔드포인트를 따른다"는 참조였다.
+   * 이 presign이 실제로 이 storage_key를 소비하는 유일한 필드(binders.image_url)의 문지기와
+   * 어긋나면 그 자체가 우회로가 되므로(media.md:286 "같은 문지기를 공유") 여기도 role≤1로 맞춘다.
    */
   async _authorizeBinderAvatarPresign(contextId, context) {
     if (!contextId) throw new BadRequestError('context_id required for binder avatar contexts');
-    await requireBinderMember(pool, contextId, context.sender_id, { minRole: 0 });
+    await requireBinderMember(pool, contextId, context.sender_id, { minRole: 1 });
   }
 
   /**
