@@ -33,6 +33,7 @@ const logger = require('../utils/logger');
 const eventBus = require('../events/eventBus');
 const {
   detectActualMimeType, stripExif, generateImageThumbnail, generateImageDerivative, generateVideoPoster,
+  getMediaDurationSecs,
 } = require('../utils/mediaPipeline');
 
 const storage = new Storage();
@@ -175,6 +176,11 @@ async function processAttachment(attachment, claimToken) {
     const isEntityImage = ENTITY_IMAGE_CONTEXT_TYPES.has(attachment.context_type);
     let thumbnailUrl = null;
     let fullUrl = null; // 엔티티 이미지 3종 전용 — Step5(c) 포인터 갱신에서 image_url 자리에 쓴다.
+    // RLY-20260806-108 — 오디오·비디오 전용(media.md:356·367). 클라가 confirm 시점에 값을
+    // 보내지 않으므로(media_api.dart 확인) 서버가 원본에서 직접 뽑는다 — thumbnailUrl과 같은
+    // Step4 파생값 취급. 추출 실패는 부가 정보 누락일 뿐이라 첨부 처리 자체를 막지 않는다
+    // (null로 남고 로그만 남긴다 — MediaProcessingError로 승격하지 않는다).
+    let durationSecs = null;
     const cdnBucket = storage.bucket(CDN_BUCKET);
 
     if (effectiveMime && effectiveMime.startsWith('image/')) {
@@ -212,8 +218,23 @@ async function processAttachment(attachment, claimToken) {
       const derivativeKey = `derivatives/${attachment.id}/poster.webp`;
       await cdnBucket.file(derivativeKey).save(posterBuffer, { contentType: 'image/webp', resumable: false });
       thumbnailUrl = `${CDN_BASE_URL}/${derivativeKey}`;
+
+      durationSecs = await getMediaDurationSecs(originalPath).catch((err) => {
+        logger.warn('Media worker: Step4 duration extraction failed(video) — duration_secs left null', {
+          attachmentId: attachment.id, error: err.message,
+        });
+        return null;
+      });
+    } else if (effectiveMime && effectiveMime.startsWith('audio/')) {
+      // 오디오는 파생 미디어(썸네일·포스터)가 없다(media.md:252) — duration_secs만 뽑는다.
+      durationSecs = await getMediaDurationSecs(originalPath).catch((err) => {
+        logger.warn('Media worker: Step4 duration extraction failed(audio) — duration_secs left null', {
+          attachmentId: attachment.id, error: err.message,
+        });
+        return null;
+      });
     }
-    // 오디오·문서·기타: 파생 미디어 없음(media.md:252) — thumbnailUrl은 null로 유지.
+    // 문서·기타: 파생 미디어·재생시간 없음(media.md:252) — thumbnailUrl·durationSecs는 null로 유지.
     // (엔티티 이미지 3종은 §3-3상 항상 이미지 전용이라 video/오디오/문서 분기에 들어오지 않는다
     // — presign이 이미지 MIME만 허용한다, mediaService.js.)
 
@@ -264,7 +285,7 @@ async function processAttachment(attachment, claimToken) {
       return;
     }
 
-    const applied = await AttachmentDAO.markReady(pool, attachment.id, claimToken, thumbnailUrl);
+    const applied = await AttachmentDAO.markReady(pool, attachment.id, claimToken, thumbnailUrl, durationSecs);
     if (!applied) {
       logger.warn('Media worker: markReady skipped — claim stolen by another worker (stale lease)', { attachmentId: attachment.id });
       return;

@@ -89,7 +89,7 @@ class MediaService {
    * 결정하므로 두 번째 판별자가 불필요했다(구 값의 조합 중 절반은 애초에 무의미했다).
    */
   async presign(data, context) {
-    const { filename, content_type, file_size, context_type, context_id, binder_id } = data;
+    const { filename, content_type, file_size, context_type, context_id, binder_id, display_order } = data;
     const id = generateUUID();
     const isEntityImage = ENTITY_IMAGE_CONTEXT_TYPES.has(context_type);
 
@@ -247,15 +247,21 @@ class MediaService {
     // 도달 자체를 못 했다(2026-08-06 무검사 통과 실측). insertBinderId는 §4-1 서버 Step7 규칙대로
     // 타입별로 다르다(위 entityBinderId 계산 참조).
     const insertBinderId = isEntityImage ? entityBinderId : binder_id;
+    // RLY-20260806-108 — media.md:188·225(§4-1 서버 Step7)가 presign 요청의 display_order를
+    // 받아 저장한다고 규정하지만 이 INSERT에 컬럼 자체가 없었다(전부 스키마 DEFAULT 0으로
+    // 남는 쓰기 공백). 컬럼만 추가한다 — presign의 나머지 로직은 건드리지 않는다(S2 회귀 보호).
+    // ⚠️ 클라(`PresignRequest`, lib/data/dto/media/presign_request.dart)는 이 필드를 아직 안
+    // 보낸다(읽기만 확인) — 서버가 받아도 지금은 항상 undefined→0으로 저장된다. 클라 쪽 배선은
+    // 별도 Task로 보고한다(이번 보고서 참조).
     await pool.query(
       `INSERT INTO attachments
          (id, binder_id, context_type, context_id, storage_key, filename,
           file_size, content_type, status, storage_class, uploader_id,
-          created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','standard',$9,now(),now())`,
+          display_order, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','standard',$9,$10,now(),now())`,
       [id, insertBinderId, context_type, context_id || null,
        storage_key, filename || null, file_size || null,
-       content_type || null, context.sender_id]
+       content_type || null, context.sender_id, display_order ?? 0]
     );
 
     return { id, upload_url: uploadUrl, storage_key };
