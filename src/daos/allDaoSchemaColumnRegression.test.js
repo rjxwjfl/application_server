@@ -49,11 +49,15 @@
  * 6. `${table}`·`${column}` 같은 동적 보간으로 테이블/컬럼명 자체가 조립되는 경우
  *    (`deleteCascadeHelpers.js`의 `participantTable`·`sectionTable`, `sectionDAO.js`의
  *    `${table}` 루프) — 정규식이 유효한 테이블명을 못 찾아 그 문(statement) 전체가 스킵된다.
- * 7. `eventDAO.js`·`taskDAO.js` — RLY-20260806-031 소유(진행 중). 이미 알려진 실 결함이 있다
- *    (`event_participants`/`task_participants.inviter_id` — schema.sql에 없는 컬럼을
- *    addParticipant/addParticipantRaw가 참조). 포함시키면 031 작업 도중 이 회귀가 상시 RED로
- *    걸린다 — **EXCLUDED_FILES에 사유와 함께 한 곳에 모아 뒀다. 031이 병합되면 이 배열에서
- *    빼서 자동으로 편입시킬 것.**
+ * 7. (이력) `eventDao.js`·`taskDAO.js`는 RLY-20260806-031 진행 중엔 `EXCLUDED_FILES`로
+ *    제외돼 있었다(`inviter_id` — schema.sql에 없는 컬럼을 addParticipant/addParticipantRaw가
+ *    참조하던 알려진 결함). 031 병합 시 `EXCLUDED_FILES`에서는 빠졌지만, **§B의
+ *    `TARGET_FILES`(아래)엔 반영되지 않은 채로 남아** — "헤더는 포함된다고 하는데 배열엔
+ *    없다"는 어긋남이 생겼다(031 이후 계속). RLY-20260806-115가 `TARGET_FILES`에 이 두 파일을
+ *    실제로 추가하며 처음으로 REF 검증을 받았고, `inviter_id` 결함은 이미 없었다(031이 제대로
+ *    고쳤다) — 대신 `taskDAO.js`의 Postgres `::smallint` 캐스트가 스캐너 오탐 1건을 냈다
+ *    (`KNOWN_SCANNER_FALSE_POSITIVES`, §B 본문 참조). 이 항목은 "왜 한동안 안 잡혔는지"의
+ *    기록으로 남긴다 — 지금은 두 파일 다 §B/§C 스캔 대상이다.
  */
 
 const fs = require('fs');
@@ -133,9 +137,11 @@ assertSchemaLacks('billingService(getAssets — RLY-20260806-035 결함 회귀 �
 // reminders·special_days·events/tasks.reminder_offsets — reminderGenerationRegression.test.js
 // (RLY-20260806-026)가 이미 전량 커버해 여기서 중복 선언하지 않는다.
 
-// RLY-20260806-031이 소유 — inviter_id 결함이 이미 알려져 있다(위 헤더 §7). 병합되면 여기서 뺀다.
+// RLY-20260806-031 병합 완료 — 제외 해제됨(위 헤더 §7 이력 참조). 지금은 비어 있다.
+// 새로 제외할 파일이 생기면 사유와 함께 여기 추가한다 — 단, 아래 §B 자기검사가
+// TARGET_FILES에도 EXCLUDED_FILES에도 없는 파일을 자동으로 잡아내므로, 추가한 뒤
+// TARGET_FILES에서 빼는 것을 잊어도 자기검사가 통과시켜 준다(제외 사유가 있다는 뜻이므로).
 const EXCLUDED_FILES = new Set([
-  // RLY-20260806-031 병합 완료 — 제외 해제됨. 두 파일 모두 스캐너 대상이다.
 ]);
 
 // ════════════════════════════════════════════════════════════════════════
@@ -153,6 +159,7 @@ const TARGET_FILES = [
   'src/daos/calendarDAO.js',
   'src/daos/castDAO.js',
   'src/daos/deleteCascadeHelpers.js',
+  'src/daos/eventDao.js',
   'src/daos/groupDAO.js',
   'src/daos/messageDAO.js',
   'src/daos/notificationDAO.js',
@@ -161,6 +168,7 @@ const TARGET_FILES = [
   'src/daos/sectionDAO.js',
   'src/daos/specialDayDAO.js',
   'src/daos/syncDAO.js',
+  'src/daos/taskDAO.js',
   'src/daos/userDAO.js',
   'src/daos/userSettingsDAO.js',
   // 원시 SQL을 직접 쓰는 서비스(DAO를 안 거치는 쿼리)
@@ -170,11 +178,80 @@ const TARGET_FILES = [
   'src/services/messageService.js',
   'src/services/notificationService.js',
   'src/services/specialDayService.js',
+  // RLY-20260806-115 — job 파일도 raw pool.query를 쓴다(§C가 먼저 찾음, RLY-20260806-112).
+  // §B는 "코드가 스키마에 없는 컬럼을 쓴다"를 잡는 방향이라 이 파일들도 원리적으로 같은
+  // 위험에 노출돼 있었는데 지금까지 한 번도 검사받지 못했다.
+  'src/jobs/cleanupJobs.js',
+  'src/jobs/holidayJobs.js',
+  'src/jobs/subscriptionJobs.js',
 ].filter((f) => !EXCLUDED_FILES.has(f));
 
 const repoRoot = path.join(__dirname, '..', '..');
 const skipTotals = {}; // reason -> count (전체 합)
 const perFileReport = [];
+
+// RLY-20260806-115 — TARGET_FILES가 실제 raw SQL 사용 파일과 다시 어긋나지 않게 하는 자기검사.
+// 이번 결함의 원인이 정확히 "헤더 주석은 포함된다고 하는데 배열엔 없었다"였다 — 주석을
+// 갱신하는 것만으로는 재발을 막지 못한다(다음 사람이 또 배열에 추가하는 걸 잊을 수 있다).
+// 그래서 **파일시스템에서 직접** "테이블을 참조하는 SQL(INSERT/UPDATE/DELETE/SELECT ... FROM)을
+// 쓰는 .js 파일"을 찾아 TARGET_FILES와 대조한다 — 사람이 적은 목록이 아니라 실제 소스가
+// 기준이라 새 DAO·서비스·job이 추가돼도 이 검사가 자동으로 커버한다.
+{
+  const REPO_SRC_ROOT = path.join(__dirname, '..');
+  // 테이블 SQL을 실제로 쓰는지 판별하는 느슨한 휴리스틱(완전한 파서가 아니다 —
+  // sqlSourceScanner.js 헤더와 동일 철학) — BEGIN/COMMIT/ROLLBACK만 쓰는 core/withTransaction.js
+  // 같은 파일은 여기 걸리지 않는다(테이블명이 등장하지 않으므로 — 의도된 동작, 아래 확인).
+  const TABLE_SQL_RE = /\b(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM|FROM\s+\w)\b/i;
+
+  function listJsFilesRecursive(dir) {
+    let out = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        out = out.concat(listJsFilesRecursive(abs));
+      } else if (entry.isFile() && entry.name.endsWith('.js') && !entry.name.endsWith('.test.js')) {
+        out.push(abs);
+      }
+    }
+    return out;
+  }
+
+  const targetFilesAbsSet = new Set(TARGET_FILES.map((f) => path.join(repoRoot, f)));
+  const excludedFilesAbsSet = new Set([...EXCLUDED_FILES].map((f) => path.join(repoRoot, f)));
+  const allJsFiles = listJsFilesRecursive(REPO_SRC_ROOT);
+
+  const untracked = [];
+  allJsFiles.forEach((abs) => {
+    if (targetFilesAbsSet.has(abs) || excludedFilesAbsSet.has(abs)) return;
+    const src = fs.readFileSync(abs, 'utf8');
+    if (!/\.(query)\s*\(/.test(src)) return; // pool/conn/client.query(...) 호출 자체가 없으면 무관.
+    if (!TABLE_SQL_RE.test(src)) return; // BEGIN/COMMIT/ROLLBACK뿐이면(예: withTransaction.js) 무관.
+    untracked.push(path.relative(repoRoot, abs));
+  });
+
+  check(
+    `[§B 자기검사] 테이블 SQL을 쓰는 파일이 전부 TARGET_FILES(또는 EXCLUDED_FILES)에 등재돼 있다 — 빠진 파일: ${untracked.join(', ') || '없음'}`,
+    untracked.length === 0
+  );
+}
+
+// RLY-20260806-115 — eventDao.js·taskDAO.js를 TARGET_FILES에 추가하며 처음으로 실제 REF
+// 검증을 받은 결과 나온 **알려진 스캐너 오탐 1건**. §B 자체엔 REF 단위 화이트리스트가 없어(§C의
+// 컬럼 화이트리스트와 다른 개념 — 여긴 "컬럼이 실존하는가"를 보는 것이지 "의도적으로 안 쓰는가"를
+// 보는 게 아니다) 여기 인라인으로 처리한다.
+//
+// `taskDAO.js`의 `SET state = $3::smallint, ... completed_at = CASE WHEN $3::smallint = 3
+// THEN now() ELSE NULL END`(Postgres 타입 캐스트) — `extractComparisonColumns`의 정규식이
+// `::`(캐스트 연산자)를 모른다. `$3::smallint = 3`에서 `smallint`가 `= 3` 바로 앞에 오는
+// 식별자라 "smallint라는 컬럼이 비교식에 쓰였다"로 오판한다. **진짜 결함이 아니다** —
+// `task_participants` 테이블엔 애초에 `smallint`라는 컬럼이 없고, 이 SQL은 `state`(SMALLINT
+// 타입 컬럼)를 문자열 파라미터에서 캐스트해 비교하는 정상 코드다. 스캐너 자체(모든 파일이
+// 공유하는 `sqlSourceScanner.js`)를 고치는 대신(반경이 넓어 위험 대비 이득이 낮다고 판단)
+// 이 한 지점만 알려진 오탐으로 명시 처리한다 — 조용히 빼지 않고 `check()`로 남겨 통계에 잡히게 한다.
+const KNOWN_SCANNER_FALSE_POSITIVES = new Set([
+  'src/daos/taskDAO.js|WHERE/AND/ON|task_participants|smallint',
+]);
 
 TARGET_FILES.forEach((relPath) => {
   const abs = path.join(repoRoot, relPath);
@@ -186,6 +263,14 @@ TARGET_FILES.forEach((relPath) => {
   refs.forEach(({ table, column, clause }) => {
     fileRefCount += 1;
     const real = realColumnsOf(table);
+    const key = `${relPath}|${clause}|${table}|${column}`;
+    if (KNOWN_SCANNER_FALSE_POSITIVES.has(key)) {
+      // 컬럼이 실재하지 않는 게 맞다(위 주석) — 그 사실 자체를 단언해 "여전히 오탐인가"를
+      // 계속 확인한다. 스키마에 진짜 smallint 컬럼이 생기면(가능성 낮음) 이 단언이 깨져
+      // 재검토 신호가 된다.
+      check(`${relPath} [${clause}]: ${table}.${column} — 알려진 스캐너 오탐(Postgres ::타입 캐스트, 위 주석 참조)`, !real.has(column));
+      return;
+    }
     check(`${relPath} [${clause}]: ${table}.${column} 존재`, real.has(column));
   });
 
@@ -225,17 +310,14 @@ console.log(`\n제외 파일(031 소유, 위 헤더 §7): ${[...EXCLUDED_FILES].
 // (§B의 기존 REF 카운트·통과 건수에 부작용을 주지 않기 위해서다. `TARGET_FILES` 배열은
 // **읽기만** 재사용한다 — §B가 그 배열로 하는 일은 그대로다).
 //
-// ── 대상 파일 ────────────────────────────────────────────────────────────
-// §B와 동일한 TARGET_FILES + job 파일 3개(`cleanupJobs.js`·`holidayJobs.js`·
-// `subscriptionJobs.js` — raw `pool.query`를 쓰는데 §B 스캔 대상엔 없었다. RLY-20260806-104가
-// 직접 찾은 공백이다).
-//
-// ⚠️ **§B를 이 job 파일 3개까지 확장해야 하는가 — 판단(이번엔 하지 않았다)**: §B는 "코드가
-// 스키마에 없는 컬럼을 쓴다"(존재 방향)를 잡는다. job 파일 3개도 raw SQL을 쓰므로 원리적으로는
-// 같은 위험(스키마에 없는 컬럼 참조)에 노출돼 있다 — **확장하는 게 맞아 보인다.** 다만 이번
-// Task는 "쓰기 공백"(§C) 상설화가 목적이라 §B 자체의 범위 변경은 별도 승인 없이 하지 않았다
-// (지시 — "§B 확장은 이번에 하지 마라"). 비용은 낮다(TARGET_FILES 배열에 세 줄 추가하면 끝,
-// 새 인프라 불필요) — 다음 Task로 그대로 넘길 수 있다.
+// ── 대상 파일 — RLY-20260806-115로 §B와 완전히 합쳤다 ──────────────────────────
+// **이제 `TARGET_FILES` 하나만 쓴다.** 112 시점엔 §C 전용 `WRITE_GAP_EXTRA_FILES`(job 파일
+// 3개 + `eventDao.js`·`taskDAO.js`)가 따로 있었다 — §B의 `TARGET_FILES`에는 이 5개가 빠져
+// 있었기 때문이다(112가 그 빠짐 자체를 처음 발견했다). 115가 이 5개를 전부 §B의
+// `TARGET_FILES`로 옮겼으므로 §C 전용 목록은 더는 필요 없다 — **지시("§B와 대상이 어긋나면
+// 같은 함정이 반복된다. 하나로 합칠 수 있으면 합쳐라")대로 합쳤다.** 목록이 두 개로 갈라져
+// 있는 것 자체가 112가 겪은 오탐(files list drift)의 재발 조건이라, 합칠 수 있는 상황이 되자마자
+// 합쳤다.
 //
 // ── 이 방향이 못 잡는 범위(§B와 같은 스캐너 한계를 그대로 물려받는다 — 지우지 말 것) ──
 // 파일 헤더의 "못 잡는 범위" 1~7과 전부 동일(같은 스캐너이므로). **이 §C에서 실제로 두 번
@@ -272,21 +354,6 @@ console.log(`\n제외 파일(031 소유, 위 헤더 §7): ${[...EXCLUDED_FILES].
 // 대칭 구조 — RLY-20260806-109가 먼저 쓴 패턴을 그대로 따랐다). 고쳐지면 이 배열에서 항목을
 // 빼라 — 그러면 §C가 자동으로 "이제 안 빠졌다"를 검증하게 된다.
 // ════════════════════════════════════════════════════════════════════════
-
-// ⚠️ RLY-20260806-112 실측 발견 — `eventDao.js`·`taskDAO.js`도 §C 첫 실행에서 events·tasks·
-// event_instances·task_instances 등 6개 테이블 전체를 "쓰기 공백"으로 대량 오탐시켰다(둘 다
-// 실제로는 정상 기록되는 핵심 테이블이다). 원인: 파일 헤더 §7 주석("031 병합 완료 — 제외
-// 해제됨, 두 파일 모두 스캐너 대상")과 달리 **`TARGET_FILES`(§B) 배열엔 실제로 이 두 파일이
-// 없다** — 주석과 배열이 서로 어긋난 상태였다. §B 자체는 이번 Task에서 건드리지 않았다(지시)
-// — 이 사실은 구현 보고서에 별도로 등재했다. §C는 이 두 파일 없이는 정확도를 낼 수 없어
-// 아래 목록에 추가했다(§B TARGET_FILES를 고치는 게 아니라 §C 자체의 스캔 대상을 넓히는 것).
-const WRITE_GAP_EXTRA_FILES = [
-  'src/jobs/cleanupJobs.js',
-  'src/jobs/holidayJobs.js',
-  'src/jobs/subscriptionJobs.js',
-  'src/daos/eventDao.js',
-  'src/daos/taskDAO.js',
-];
 
 const _writeGapWhitelist = [
   // ── DEFAULT/GENERATED ──────────────────────────────────────────────────
@@ -397,10 +464,10 @@ function writeGapKnownIssuesFor(table) {
   );
 })();
 
-// ── 실제 파일 대조 — TARGET_FILES(§B와 공유, 읽기만) + job 파일 3개를 다시 스캔해
+// ── 실제 파일 대조 — TARGET_FILES(§B와 완전히 공유, 읽기만)를 다시 스캔해
 // 테이블별 "실제로 쓴 컬럼" 집합을 만들고 스키마 전체 컬럼과 차집합한다.
 const writeGapWrittenColumns = new Map(); // table -> Set(column)
-[...TARGET_FILES, ...WRITE_GAP_EXTRA_FILES].forEach((relPath) => {
+TARGET_FILES.forEach((relPath) => {
   const abs = path.join(repoRoot, relPath);
   const { refs } = scanFile(abs, allTables);
   refs.forEach(({ table, column, clause }) => {
@@ -410,10 +477,10 @@ const writeGapWrittenColumns = new Map(); // table -> Set(column)
   });
 });
 
-// job 파일 3개가 실제로 존재하는지(오타 방지 — EXCLUDED_FILES 존재 확인과 동일 패턴).
-WRITE_GAP_EXTRA_FILES.forEach((relPath) => {
-  check(`[쓰기 공백 §C] job 파일이 실제로 존재한다: ${relPath}`, fs.existsSync(path.join(repoRoot, relPath)));
-});
+// TARGET_FILES 존재 확인(오타 방지 — EXCLUDED_FILES 존재 확인과 동일 패턴)은 별도
+// check()로 두지 않는다. 바로 위 scanFile()이 fs.readFileSync를 쓰므로 파일이 없으면
+// ENOENT로 즉시 크래시한다 — 없어도 "조용히 통과"할 방법이 없어 중복 검사가 불필요하다
+// (job 파일 3개 전용이었던 이전 존재-확인 check()는 §B/§C 통합으로 제거했다).
 
 let writeGapKnownIssueHits = 0;
 allTables.forEach((table) => {
@@ -444,7 +511,7 @@ allTables.forEach((table) => {
   });
 });
 
-console.log(`\n[쓰기 공백 §C] 화이트리스트 ${_writeGapWhitelist.length}건 · 알려진 미해결 ${_writeGapKnownIssues.length}건(이번 실행에서 ${writeGapKnownIssueHits}건 재확인) · 스캔 파일 ${TARGET_FILES.length + WRITE_GAP_EXTRA_FILES.length}개(§B TARGET_FILES ${TARGET_FILES.length} + job 파일 ${WRITE_GAP_EXTRA_FILES.length}).`);
+console.log(`\n[쓰기 공백 §C] 화이트리스트 ${_writeGapWhitelist.length}건 · 알려진 미해결 ${_writeGapKnownIssues.length}건(이번 실행에서 ${writeGapKnownIssueHits}건 재확인) · 스캔 파일 ${TARGET_FILES.length}개(§B와 동일한 TARGET_FILES — RLY-20260806-115로 통합).`);
 
 console.log(`\n[allDaoSchemaColumnRegression 전체] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건 — §A + §B + §C 합산)`);
 
