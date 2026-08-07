@@ -8,9 +8,12 @@
  * `SectionService.addMembers`가 `members: [{id, user_id}]`(신 형태, 클라 id 존중)와
  * `user_ids: [uuid]`(구 형태, 서버 발급) 둘 다 받도록 확장했다.
  *
- * ⚠️ SectionDAO.addMember의 "복원(restored)" 경로는 소프트 삭제된 기존 행을 되살릴 때 그
- * 행의 **기존 id를 그대로 유지**한다 — 새로 넘긴 id는 신규 삽입일 때만 쓰인다. 이 계약은
- * 이번 Task 범위가 아니라 그대로 뒀다 — 그 사실 자체를 회귀로 실측해 고정한다(수리 안 함).
+ * ⚠️ RLY-20260806-159 갱신 — SectionDAO.addMember의 "복원(restored)" 경로가 소프트 삭제된
+ * 기존 행을 되살릴 때 **기존 id를 무조건 유지**하던 것을(156이 등재, 수리 안 함으로 남겨둠)
+ * 이제 고쳤다: `clientId`(5번째 인자, nullable)를 명시적으로 보내면 그 id로 갈아끼우고,
+ * 안 보내면(구 형태 호출) 기존 id를 그대로 유지한다(하위호환). section_members.id는
+ * 참조하는 FK도 폴리모픽 target_id도 없어(sectionDAO.js addMember 주석 — 스키마 전수 확인)
+ * id를 바꿔도 안전하다.
  *
  * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`.
  *
@@ -50,7 +53,7 @@ async function mockQuery(sql, params = []) {
   }
   // SectionDAO.addMember — WITH restored ... inserted ...
   if (s.startsWith('WITH restored AS')) {
-    const [sectionId, userId, id] = params;
+    const [sectionId, userId, id, clientId] = params;
     const activeRow = sectionMembersTable.find((r) => r.section_id === sectionId && r.user_id === userId && !r.deleted_at);
     if (activeRow) {
       // ON CONFLICT ... DO NOTHING — 아무 것도 안 바뀜, 빈 결과.
@@ -58,8 +61,12 @@ async function mockQuery(sql, params = []) {
     }
     const deletedRow = sectionMembersTable.find((r) => r.section_id === sectionId && r.user_id === userId && r.deleted_at);
     if (deletedRow) {
-      // restored — 기존 id 유지, deleted_at만 NULL로.
+      // restored — 실제 SQL 텍스트가 `SET id = COALESCE($4, id)`를 담고 있을 때만 id를
+      // clientId로 갈아끼운다(132/135의 교훈 — 목이 SQL과 무관하게 자체적으로 갈아끼우면
+      // 실제 코드를 되돌려도 회귀가 못 잡는다). clientId가 없으면(구 형태) 기존 id 유지.
+      if (s.includes('SET id = COALESCE($4, id)') && clientId) deletedRow.id = clientId;
       deletedRow.deleted_at = null;
+      deletedRow.updated_at = NOW;
       return { rows: [{ user_id: userId }] };
     }
     // inserted — 신규, 넘어온 id 사용.
@@ -113,23 +120,38 @@ async function run() {
     check('구 형태 — id는 서버가 새로 발급한다(user_id와 다른 값)', row && typeof row.id === 'string' && row.id !== 'member2');
   }
 
-  // ============ ③ 부활 경로 실측 — 소프트 삭제된 행에 새 클라 id로 재추가하면 "기존" id 유지 ============
-  // ⚠️ 이건 결함으로 보고만 한다 — 이번 Task에서 고치지 않았다.
+  // ============ ③ RLY-20260806-159 — 복원 경로에서 클라 id가 이긴다(신 형태) ============
   {
-    // member1을 제거(소프트 삭제)한 뒤 다른 클라 id로 재추가.
+    // member1을 제거(소프트 삭제)한 뒤 신 형태(clientId 있음)로 재추가.
     const before = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member1');
     const originalId = before.id;
     before.deleted_at = NOW; // 제거 시뮬레이션(SectionService.removeMember 대신 직접 조작 — 이 회귀의 관심사는 addMember 하나뿐)
 
     const newClientId = 'client-section-member-id-BBB-different';
-    await SectionService.addMembers('s1', [{ id: newClientId, user_id: 'member1' }], ctx());
+    const result = await SectionService.addMembers('s1', [{ id: newClientId, user_id: 'member1' }], ctx());
 
     const after = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member1');
-    check(
-      '③ 실측 — 소프트 삭제된 멤버를 다른 클라 id로 재추가하면 "기존"(복원 전) id가 유지되고 새 id는 반영되지 않는다 — Architect가 지목한 지점과 동형, 고치지 않고 보고만 한다',
-      after && after.id === originalId && after.id !== newClientId,
-      `기대=${originalId}(기존 유지), 실제=${JSON.stringify(after)}`
-    );
+    check('③-1 복원 — 클라가 명시적으로 보낸 id로 갈아끼워진다(더 이상 기존 id를 유지하지 않는다)',
+      after && after.id === newClientId && after.id !== originalId,
+      `기대=${newClientId}, 실제=${JSON.stringify(after)}`);
+    check('③-2 복원 — 응답의 added_user_ids에도 정상 포함된다(성공으로 처리)', result.added_user_ids.includes('member1'));
+    check('③-3 복원 후에도 section_members 행이 정확히 1개뿐이다(id 교체가 행을 복제/유실시키지 않는다, 참조 불변 확인)',
+      sectionMembersTable.filter((r) => r.section_id === 's1' && r.user_id === 'member1').length === 1);
+  }
+
+  // ============ ④ RLY-20260806-159 — 구 형태(clientId 없음)는 여전히 기존 id를 유지한다(하위호환) ============
+  {
+    // member2를 제거(소프트 삭제)한 뒤 구 형태(user_ids 평문)로 재추가.
+    const before = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member2');
+    const originalId = before.id;
+    before.deleted_at = NOW;
+
+    await SectionService.addMembers('s1', ['member2'], ctx());
+
+    const after = sectionMembersTable.find((r) => r.section_id === 's1' && r.user_id === 'member2');
+    check('④ 복원 — 구 형태(clientId 미전송)는 기존 id를 그대로 유지한다(하위호환 — clientId=null이면 COALESCE가 기존 id를 그대로 둔다)',
+      after && after.id === originalId,
+      `기대=${originalId}(기존 유지), 실제=${JSON.stringify(after)}`);
   }
 
   // ============ 인가·유효성 회귀 없음(대조군) ============
