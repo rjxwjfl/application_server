@@ -258,9 +258,21 @@ class MessageService {
     const { binder_id } = await withTransaction(async (client) => {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
-      await MessageDAO.softDelete(client, messageId);
+
       const section = await SectionDAO.findById(client, message.section_id);
-      return { binder_id: section ? section.binder_id : null };
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+
+      // RLY-20260806-111 — api.md:1895 "소프트 삭제. 작성자 또는 master·manager." 가 서버에
+      // 전혀 집행되지 않았다(107이 찾아 등재). 107의 togglePin(minRole:1, 예외 없음)과 다르다 —
+      // 여기는 **작성자 예외가 있다**(postService.delete·castService.delete와 동일 패턴,
+      // `role > 1 && author_id !== sender_id`). requireBinderMember(minRole:1)를 작성자가
+      // 아닐 때만 태워 같은 조건을 표현한다 — 새 인가 로직을 설계하지 않았다.
+      if (message.user_id !== context.sender_id) {
+        await requireBinderMember(client, section.binder_id, context.sender_id, { minRole: 1 });
+      }
+
+      await MessageDAO.softDelete(client, messageId);
+      return { binder_id: section.binder_id };
     });
 
     eventBus.emit('sync', {
@@ -391,7 +403,21 @@ class MessageService {
     });
   }
 
+  // RLY-20260806-111 — api.md:1992 "투표 수동 마감. 작성자 또는 master·manager." 가 서버에
+  // 전혀 집행되지 않았다(107이 찾아 등재) — context 파라미터가 아예 미사용이었다.
+  // message_polls에는 별도 author 컬럼이 없다(poll은 항상 메시지 생성과 같은 트랜잭션에서만
+  // 만들어진다 — 103) — "작성자"는 그 poll이 딸린 메시지의 작성자(message.user_id)다.
+  // deleteMessage와 동일 패턴(작성자 예외 + requireBinderMember(minRole:1)).
   async closePoll(messageId, pollId, context) {
+    const message = await MessageDAO.findById(pool, messageId);
+    if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
+
+    if (message.user_id !== context.sender_id) {
+      const section = await SectionDAO.findById(pool, message.section_id);
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+      await requireBinderMember(pool, section.binder_id, context.sender_id, { minRole: 1 });
+    }
+
     const result = await pool.query(
       `UPDATE message_polls SET closed_at = now(), updated_at = now()
        WHERE id = $1 AND message_id = $2
