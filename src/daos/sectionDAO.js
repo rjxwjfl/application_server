@@ -34,12 +34,16 @@ class SectionDAO {
     return rows;
   }
 
-  async create(conn, { id, binder_id, title, access_scope = 0 }) {
+  // is_default=true는 오직 바인더 생성 시 자동 INSERT되는 기본 섹션에만 쓴다
+  // (RLY-20260806-087 — binderService.createBinder 단일 호출지). 사용자가 만드는 섹션
+  // (sectionService.createSection)·이벤트 흐름의 pendingSection(eventService.createEvent)은
+  // 항상 기본값 false를 쓴다 — SC-section-manage.md:100·629 "바인더 생성 시 자동 INSERT" 계약.
+  async create(conn, { id, binder_id, title, access_scope = 0, is_default = false }) {
     const { rows } = await conn.query(
-      `INSERT INTO sections (id, binder_id, title, access_scope, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, now(), now())
+      `INSERT INTO sections (id, binder_id, title, access_scope, is_default, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, now(), now())
        RETURNING id, binder_id, title, access_scope, is_default, created_at, updated_at`,
-      [id, binder_id, title, access_scope]
+      [id, binder_id, title, access_scope, is_default]
     );
     return rows[0];
   }

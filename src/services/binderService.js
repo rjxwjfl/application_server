@@ -41,10 +41,14 @@ class BinderService {
         color: Math.floor(Math.random() * 15),
       });
 
+      // RLY-20260806-087 — 이 호출이 바인더당 유일한 is_default=true INSERT 지점이다
+      // (SC-section-manage.md:100·629). 삭제 차단(sectionService.js:72)·마지막 섹션 보호가
+      // 이 플래그에 의존한다.
       const section = await SectionDAO.create(client, {
         id: generateUUID(),
         binder_id: binder.id,
         title: '기본',
+        is_default: true,
       });
 
       return {
