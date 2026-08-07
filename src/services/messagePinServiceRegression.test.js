@@ -35,6 +35,14 @@ async function mockQuery(sql, params = []) {
     return { rows: row && !row.deleted_at ? [row] : [] };
   }
 
+  // MessageDAO.countPinned — RLY-20260806-103이 togglePin 앞에 추가한 한도 사전 체크.
+  // 이 스위트의 관심사(context.sender_id 배선)와는 무관해 항상 한도 미만(0)으로 응답한다.
+  if (s.startsWith('SELECT COUNT(*)::int AS count FROM section_messages')) {
+    const [sectionId] = params;
+    const count = Object.values(db.section_messages).filter((m) => m.section_id === sectionId && m.is_pinned === true && !m.deleted_at).length;
+    return { rows: [{ count }] };
+  }
+
   // MessageDAO.togglePin — 실제 SQL 그대로 시뮬레이션(갱신 전 is_pinned 값 기준 CASE)
   if (s.startsWith('UPDATE section_messages') && s.includes('SET is_pinned = NOT is_pinned')) {
     const [messageId, userId] = params;
