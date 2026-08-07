@@ -15,6 +15,27 @@ class SpecialDayDAO {
     return result.rows;
   }
 
+  // RLY-20260806-128 — SC-messaging.md §20-4 picker(GET /binders/{binderId}/items?type=SPECIAL_DAY).
+  // EMBED_TARGET_VALIDATORS(messageService.js)의 SPECIAL_DAY 검증과 같은 JOIN·스코프.
+  // castDAO.findByCalId·postDAO.findByBinderId와 동일한 cursor_at/limit 관행 — special_days는
+  // 회차 개념이 없어(단일 row) base_date가 이 테이블의 자연 keyset이다.
+  async findByBinder(conn, binderId, { cursor_at, limit = 20 } = {}) {
+    const params = [binderId, limit];
+    let where = 'c.binder_id = $1 AND sd.deleted_at IS NULL';
+    if (cursor_at) {
+      where += ' AND sd.base_date < $3';
+      params.push(cursor_at);
+    }
+    const result = await conn.query(
+      `SELECT sd.* FROM special_days sd
+       JOIN calendars c ON c.id = sd.calendar_id
+       WHERE ${where}
+       ORDER BY sd.base_date DESC LIMIT $2`,
+      params
+    );
+    return result.rows;
+  }
+
   // RLY-20260806-026 — 실 스키마(config/schema.sql SECTION 6) 정합. 구 `is_yearly` 컬럼은
   // 2026-08-01 결정으로 schema에서 삭제됐다(r_rule과 이중 진실) — "매년 반복"은 client가 보낸
   // `r_rule="FREQ=YEARLY"`를 그대로 저장할 뿐 서버가 합성하지 않는다(SC-special-day.md §7-1).

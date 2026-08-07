@@ -27,6 +27,32 @@ class EventDAO {
     return result.rows;
   }
 
+  // RLY-20260806-128 — SC-messaging.md §20-4 "GET /binders/{binderId}/items?type=EVENT_INSTANCE
+  // — L1 캘린더 항목 picker". event_instances에 binder_id가 없어(schema.sql) calendars 경유—
+  // EMBED_TARGET_VALIDATORS(messageService.js, RLY-20260806-100)의 EVENT_INSTANCE 검증과 같은
+  // JOIN·스코프(그 binder 소속이면 전부, instance_type 구분 없음 — 검증 쪽도 구분하지 않는다).
+  // 커서는 castDAO.findByCalId·postDAO.findByBinderId와 동일 관행(생성 시각이 아니라 이 테이블의
+  // 자연 시각인 start_date로 keyset) — 새 페이지네이션 방식을 만들지 않는다.
+  async findInstancesByBinder(conn, binderId, { cursor_at, limit = 20 } = {}) {
+    const params = [binderId, limit];
+    let where = 'c.binder_id = $1 AND ei.deleted_at IS NULL';
+    if (cursor_at) {
+      where += ' AND ei.start_date < $3';
+      params.push(cursor_at);
+    }
+    const result = await conn.query(
+      `SELECT ei.id, ei.event_id, ei.summary, ei.description, ei.color, ei.is_all_day,
+              ei.start_date, ei.end_date
+       FROM event_instances ei
+       JOIN events e ON e.id = ei.event_id
+       JOIN calendars c ON c.id = e.calendar_id
+       WHERE ${where}
+       ORDER BY ei.start_date DESC LIMIT $2`,
+      params
+    );
+    return result.rows;
+  }
+
   async createEvent(conn, data) {
     const eventQuery = `
       INSERT INTO events (

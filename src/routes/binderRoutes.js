@@ -86,4 +86,7 @@ router.post('/:binderId/groups', asyncHandler(async (req, res) => res.status(201
 // 검색 (binder 내 전체 검색)
 router.get("/:binderId/search", binderController.search);
 
+// 캘린더 항목 picker (SC-messaging.md §20-4 — 메시지 링크 카드 대상 선택)
+router.get("/:binderId/items", binderController.getItems);
+
 module.exports = router;

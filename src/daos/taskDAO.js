@@ -28,6 +28,28 @@ class TaskDAO {
     return result.rows;
   }
 
+  // RLY-20260806-128 — EventDAO.findInstancesByBinder와 동형(SC-messaging.md §20-4 picker).
+  // due_date가 NOT NULL(schema.sql)이라 start_date와 달리 NULLS LAST가 필요 없다.
+  async findInstancesByBinder(conn, binderId, { cursor_at, limit = 20 } = {}) {
+    const params = [binderId, limit];
+    let where = 'c.binder_id = $1 AND ti.deleted_at IS NULL';
+    if (cursor_at) {
+      where += ' AND ti.due_date < $3';
+      params.push(cursor_at);
+    }
+    const result = await conn.query(
+      `SELECT ti.id, ti.task_id, ti.summary, ti.description, ti.priority, ti.is_all_day,
+              ti.start_date, ti.due_date, ti.completed_at
+       FROM task_instances ti
+       JOIN tasks t ON t.id = ti.task_id
+       JOIN calendars c ON c.id = t.calendar_id
+       WHERE ${where}
+       ORDER BY ti.due_date DESC LIMIT $2`,
+      params
+    );
+    return result.rows;
+  }
+
   async createTask(conn, data) {
     const taskQuery = `
       INSERT INTO tasks (
