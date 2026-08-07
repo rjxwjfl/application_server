@@ -41,6 +41,18 @@ const STEPS = [
   //    다른 테이블과 FK 관계가 없어(참조하는 쪽도 참조받는 쪽도 없음) STEPS 순서 어디에 둬도
   //    무방하다 — binder_storage_usage처럼 자기 deleted_at이 없는 케이스라 custom으로 뺀다.
   { custom: 'reminders' },
+  // 0-1. RLY-20260806-173 — notifications는 연도별 파티션(PARTITION BY RANGE(created_at),
+  //      notifications_2026/2027/2028, config/schema.sql:1035-1041)인데 cleanupJobs.js
+  //      정리 대상에 아예 없었다 — soft delete(NotificationDAO.softDelete)로 deleted_at만
+  //      찍히고 행이 영구히 남아 있었다(Architect 확인). User 판정: 보관 1년.
+  //      ⚠️ 이 표는 다른 STEPS 항목처럼 "행 단위 DELETE"를 쓰지 않는다 — 파티션 테이블에서
+  //      대량 DELETE는 vacuum 부담·lock을 만든다. 대신 1년보다 완전히 지난 연도 파티션을
+  //      통째로 DROP한다(행 스캔 0). 자기 deleted_at 유무와 무관하게 파티션 전체가
+  //      사라진다 — 파티션 키가 created_at이라 deleted_at 기준으로 부분 DROP은 애초에
+  //      불가능하다(제거 대상을 고르는 게 아니라 "그 해에 만들어진 알림 전체"가 단위다).
+  //      other STEPS 항목의 "삭제(soft) 후 30일" 관행과 보존 의미가 다르다는 뜻을 그대로
+  //      드러낸다 — 유저가 개별로 지운 적 없는 활성 알림도 1년이 지나면 함께 사라진다.
+  { custom: 'notification_partitions' },
   // 1. 메시지 부속 (leaf, FK no cascade)
   { table: 'message_reactions', column: 'deleted_at' },
   { table: 'message_mentions',  column: 'deleted_at' },
@@ -157,6 +169,54 @@ async function cleanupReminders() {
   return result.rowCount;
 }
 
+// RLY-20260806-173 — notifications(연도별 파티션) 1년 보관. 행 단위 DELETE 대신 완전히
+// 지난 연도 파티션을 DROP TABLE로 통째로 없앤다.
+//
+// 파티션 목록은 하드코딩하지 않는다 — pg_inherits로 notifications의 실제 자식 파티션을
+// 조회해 이름(`notifications_YYYY`)에서 연도를 뽑는다. 스키마에 파티션이 추가·삭제돼도
+// 이 코드를 다시 손댈 필요가 없다. 이름이 그 패턴과 안 맞는 자식은(예상 못한 파티션) 건드리지
+// 않고 건너뛴다 — 방어적으로 남긴다.
+//
+// ⚠️ 경계 판단 — "1년 지난 연도 파티션"을 정확히 어떤 연도까지로 볼 것인가:
+// notifications_Y 파티션은 [Y-01-01, (Y+1)-01-01) 범위를 담는다. 이 파티션에 있을 수 있는
+// "가장 최근" 행은 (Y+1)-01-01 바로 직전에 생성됐을 수 있다. 그 행조차 1년이 지났다고
+// 확신하려면 지금 시각이 최소 (Y+1)-01-01 + 1년 = (Y+2)-01-01 이어야 한다 — 즉
+// `EXTRACT(YEAR FROM NOW()) >= Y + 2`(= `Y <= 현재 연도 - 2`)일 때만 그 파티션 전체를
+// 지운다. 이 기준을 만족하면 파티션 안의 어떤 행도(연초에 만들어졌든 연말에 만들어졌든)
+// 최소 1년은 보존된 뒤에만 지워진다 — "방금 만든 알림이 지워지는" 경계 사고가 파티션
+// 단위 granularity로는 구조적으로 불가능하다(현재 연도·직전 연도 파티션은 이 조건을
+// 만족할 수 없어 이 로직이 절대 건드리지 않는다).
+//
+// deleted_at은 이 판단에 관여하지 않는다 — 파티션 키가 created_at이라 deleted_at 기준
+// 부분 DROP은 애초에 불가능하다(위 STEPS 주석 참조).
+async function cleanupNotificationPartitions() {
+  const { rows: children } = await pool.query(`
+    SELECT child.relname
+    FROM pg_inherits
+    JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
+    JOIN pg_class child  ON pg_inherits.inhrelid  = child.oid
+    WHERE parent.relname = 'notifications'
+  `);
+  if (children.length === 0) return 0;
+
+  const { rows: nowRows } = await pool.query(`SELECT EXTRACT(YEAR FROM NOW())::int AS year`);
+  const currentYear = nowRows[0].year;
+
+  let dropped = 0;
+  for (const { relname } of children) {
+    const match = /^notifications_(\d{4})$/.exec(relname);
+    if (!match) continue; // 예상 패턴과 다른 자식은 건드리지 않는다(방어적).
+    const partitionYear = parseInt(match[1], 10);
+    if (partitionYear + 2 > currentYear) continue; // 아직 1년 보존 기간이 안 지났다.
+
+    // relname은 DB(pg_class)에서 직접 얻었고 위 정규식으로 검증했다 — 임의 문자열 삽입이 아니다.
+    await pool.query(`DROP TABLE IF EXISTS ${relname}`);
+    logger.info(`Cleanup: dropped notifications partition (1년 보관 경과)`, { partition: relname });
+    dropped += 1;
+  }
+  return dropped;
+}
+
 async function runCleanup() {
   logger.info('Cleanup job started');
   let totalDeleted = 0;
@@ -167,6 +227,8 @@ async function runCleanup() {
       let count;
       if (step.custom === 'reminders') {
         count = await cleanupReminders();
+      } else if (step.custom === 'notification_partitions') {
+        count = await cleanupNotificationPartitions();
       } else if (step.custom === 'attachments') {
         count = await cleanupAttachments();
       } else if (step.custom === 'binder_storage_usage') {
@@ -207,4 +269,7 @@ function startCleanupJobs() {
   logger.info('Cleanup jobs scheduled (daily 04:00 KST)');
 }
 
-module.exports = { startCleanupJobs, runCleanup };
+// cleanupNotificationPartitions — RLY-20260806-173 회귀(notificationPartitionRetentionRegression.test.js)가
+// 직접 구동하기 위해 export한다(다른 STEPS의 개별 cleanup*는 export 안 함 — 이 함수만 첫
+// 전용 회귀 파일의 대상이라 필요했다).
+module.exports = { startCleanupJobs, runCleanup, cleanupNotificationPartitions };
