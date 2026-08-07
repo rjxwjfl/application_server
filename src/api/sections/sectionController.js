@@ -113,11 +113,18 @@ const sectionController = {
   // Reactions
   // ============================================
 
+  // RLY-20260806-142 — 클라(section_repository.dart addReaction)가 반응 id를 스스로 만들어
+  // 로컬 MessageReactions(id-keyed, uk_message_reactions UNIQUE(message_id,user_id,emoji)
+  // WHERE deleted_at IS NULL)에 먼저 써 두고, 그 id를 body가 아니라 `X-Origin-UUID` 헤더로만
+  // 보낸다(SC-messaging.md:765 "origin_uuid=reactionId"). 서버가 헤더를 읽지 않고 새 id를
+  // 발급하면 다음 sync pull이 다른 id의 행을 또 삽입해 로컬 UNIQUE 인덱스를 위반한다 — 그
+  // 배치가 롤백돼 SyncToken이 전진하지 못하는 영구 동기화 정지의 실제 원인(140 실측).
   addReaction: asyncHandler(async (req, res) => {
     const { messageId } = req.params;
     const { emoji } = req.body;
+    const originUuid = req.headers['x-origin-uuid'] || null;
     await SectionService.assertMessageAccess(messageId, req.user_id);
-    const result = await MessageService.addReaction(messageId, emoji, { sender_id: req.user_id });
+    const result = await MessageService.addReaction(messageId, emoji, { sender_id: req.user_id, origin_uuid: originUuid });
     res.status(201).json({ success: true, data: result });
   }),
 

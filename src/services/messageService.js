@@ -335,10 +335,14 @@ class MessageService {
     return result;
   }
 
+  // RLY-20260806-142 — context.origin_uuid는 클라의 X-Origin-UUID 헤더값(로컬에 이미 그 id로
+  // 써 둔 반응 행) — 있으면 그대로 쓴다. calendarService.create의 `data.id || generateUUID()`와
+  // 같은 관행(클라 id 존중, 없으면 서버 발급 — 하위호환)이지만 여기는 채널이 body가 아니라
+  // 헤더라는 점만 다르다(클라가 emoji만 body로 보내므로).
   async addReaction(messageId, emoji, context) {
     return await withTransaction(async (client) => {
       return await MessageDAO.addReaction(client, {
-        id: generateUUID(),
+        id: context.origin_uuid || generateUUID(),
         message_id: messageId,
         user_id: context.sender_id,
         emoji,
