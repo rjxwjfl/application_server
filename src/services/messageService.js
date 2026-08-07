@@ -134,11 +134,24 @@ class MessageService {
         const embedsData = data.embeds.map((e) => ({ ...e, id: e.id || generateUUID() }));
         embeds = await MessageDAO.insertEmbeds(client, messageId, embedsData);
       }
-      if (data.mention_user_ids && data.mention_user_ids.length > 0) {
-        const mentionData = data.mention_user_ids.map((uid) => ({
-          id: generateUUID(),
-          user_id: uid,
-        }));
+      // RLY-20260806-153 — User 판정(가, 2026-08-07): 멘션은 클라가 로컬에 먼저 만들어
+      // "@" 강조를 즉시 보여준다 → system.md §10-2 판정 축의 조건①이 참으로 바뀌어 더는
+      // 파생물이 아니다(반응과 같은 축). 확정 형태는 `embeds[].id`·`poll.options[].id`와
+      // 같은 모양인 `mentions: [{id, user_id}]` — 새 패턴을 만들지 않았다.
+      // 하위호환: 구 형태(`mention_user_ids: [uuid, ...]` 평문 배열)도 계속 받는다 — 그
+      // 형태는 클라가 애초에 id를 안 보내므로(구버전 클라) 서버가 그대로 발급한다(기존 동작).
+      // MessageDAO.insertMentions는 이미 `uid.id || uid`·`uid.user_id || uid`로 문자열·
+      // 객체 둘 다 받아들이지만(직접 확인, DAO 미변경) 구 형태를 그 폴백에 맡기면
+      // `id === user_id`가 되는 값 없는 행이 생겨(문자열엔 `.id`가 없어 `uid` 자체가 두 자리
+      // 모두에 들어간다) 실제 멘션 row id로 부적절하다 — 그래서 구 형태는 여기서 명시적으로
+      // `generateUUID()`를 채워 기존 동작을 그대로 유지한다.
+      const mentionsInput = data.mentions ?? data.mention_user_ids;
+      if (mentionsInput && mentionsInput.length > 0) {
+        const mentionData = mentionsInput.map((m) => (
+          typeof m === 'string'
+            ? { id: generateUUID(), user_id: m }
+            : { id: m.id || generateUUID(), user_id: m.user_id }
+        ));
         mentions = await MessageDAO.insertMentions(client, messageId, mentionData);
       }
       // RLY-20260806-103 — 투표 생성 경로 자체가 없었다(087·094가 두 번 등재). SC-messaging.md
@@ -165,14 +178,20 @@ class MessageService {
       action: ActionType.CREATE, target_type: TargetType.SECTION_MESSAGE, target_id: messageId,
     });
 
-    if (data.mention_user_ids && data.mention_user_ids.length > 0) {
+    // RLY-20260806-153 — 신 형태(data.mentions)로 오면 data.mention_user_ids가 비어 있어 이
+    // 알림이 안 나갈 뻔했다 — 위 INSERT 분기와 같은 정규화(data.mentions ?? data.mention_user_ids)
+    // 로 target_user_ids를 뽑는다.
+    const mentionTargetUserIds = (data.mentions ?? data.mention_user_ids)?.map(
+      (m) => (typeof m === 'string' ? m : m.user_id)
+    ) || [];
+    if (mentionTargetUserIds.length > 0) {
       eventBus.emit('alert', {
         binder_id: section.binder_id,
         sender_id: context.sender_id,
         type: 'mention',
         title: section.title || '',
         body: data.content ? data.content.substring(0, 100) : '메시지에서 멘션되었습니다.',
-        target_user_ids: data.mention_user_ids,
+        target_user_ids: mentionTargetUserIds,
         requiredLevel: 2,
         routeData: { route_type: TargetType.SECTION_MESSAGE, route_id: messageId },
         device_uuid: context.device_uuid,
