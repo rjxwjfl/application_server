@@ -37,6 +37,11 @@ function freshDb() {
   return {
     messages,
     sections: { s1: { id: 's1', binder_id: 'b1', title: 'Sec', access_scope: 0, is_default: false, created_at: NOW, updated_at: NOW, deleted_at: null } },
+    // RLY-20260806-107 — togglePin이 이제 requireBinderMember(minRole:1)를 거친다.
+    // 이 스위트의 관심사(한도)와 무관해 호출자를 manager로 고정한다.
+    binder_members: {
+      'b1:manager1': { binder_id: 'b1', user_id: 'manager1', role: 1, deleted_at: null },
+    },
   };
 }
 
@@ -48,6 +53,12 @@ function makeMockDb(db) {
     if (s.startsWith('SELECT id, section_id, user_id, parent_id, content') && s.includes('FROM section_messages') && s.includes('WHERE id = $1')) {
       const row = db.messages[params[0]];
       return { rows: row && !row.deleted_at ? [row] : [] };
+    }
+
+    // BinderDAO.getMember (requireBinderMember 내부, RLY-20260806-107)
+    if (s.includes('FROM binder_members') && s.includes('WHERE binder_id = $1 AND user_id = $2')) {
+      const row = db.binder_members[`${params[0]}:${params[1]}`];
+      return { rows: row ? [row] : [] };
     }
 
     // MessageDAO.countPinned
