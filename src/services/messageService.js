@@ -7,6 +7,43 @@ const withTransaction = require('../core/withTransaction');
 const { NotFoundError, ForbiddenError, BadRequestError, ConflictError } = require('../core/errors');
 const { TargetType, ActionType } = require('../utils/typeDefinitions');
 
+// RLY-20260806-100 — F7 링크 카드(SC-messaging.md §20-2 L1~L6)의 target_type별 접근 검증.
+// L4가 "같은 binder 멤버는 events·tasks·special_days·casts·posts 자동 노출"이라 명시하므로
+// (Calendar 도메인은 binder 멤버=자동 접근, Section의 access_scope 게이트와 다름 —
+// standards/domain.md §3-6-B·SC-section-manage.md:60-63), 대상이 **이 메시지가 속한 섹션과
+// 같은 binder에 있는가**만 확인하면 된다 — 그 이상의 개별 권한 판정이 필요 없다. 발신자가
+// 이 binder 멤버라는 것은 createMessage 이전에 SectionService.assertContentAccess가 이미
+// 검증한다(section.binder_id가 그 binder). target_type 값은 activity_feeds·audit_logs와
+// 동일한 TargetType enum(SCREAMING_SNAKE_CASE)을 그대로 재사용한다 — 새 enum을 만들지 않았다.
+const EMBED_TARGET_VALIDATORS = {
+  [TargetType.EVENT_INSTANCE]: `
+    SELECT 1 FROM event_instances ei
+    JOIN events e ON e.id = ei.event_id
+    JOIN calendars c ON c.id = e.calendar_id
+    WHERE ei.id = $1 AND ei.deleted_at IS NULL AND c.binder_id = $2
+  `,
+  [TargetType.TASK_INSTANCE]: `
+    SELECT 1 FROM task_instances ti
+    JOIN tasks t ON t.id = ti.task_id
+    JOIN calendars c ON c.id = t.calendar_id
+    WHERE ti.id = $1 AND ti.deleted_at IS NULL AND c.binder_id = $2
+  `,
+  [TargetType.SPECIAL_DAY]: `
+    SELECT 1 FROM special_days sd
+    JOIN calendars c ON c.id = sd.calendar_id
+    WHERE sd.id = $1 AND sd.deleted_at IS NULL AND c.binder_id = $2
+  `,
+  [TargetType.CAST]: `
+    SELECT 1 FROM casts ca
+    JOIN calendars c ON c.id = ca.calendar_id
+    WHERE ca.id = $1 AND ca.deleted_at IS NULL AND c.binder_id = $2
+  `,
+  [TargetType.POST]: `
+    SELECT 1 FROM posts p
+    WHERE p.id = $1 AND p.deleted_at IS NULL AND p.binder_id = $2
+  `,
+};
+
 class MessageService {
   async getMessages(sectionId, query) {
     const messages = await MessageDAO.getBySectionId(pool, sectionId, query);
@@ -67,6 +104,7 @@ class MessageService {
         attachments = await MessageDAO.linkAttachments(client, messageId, section.binder_id, context.sender_id, data.attachments);
       }
       if (data.embeds && data.embeds.length > 0) {
+        await this._assertEmbedTargetsAccessible(client, data.embeds, section.binder_id);
         embeds = await MessageDAO.insertEmbeds(client, messageId, data.embeds);
       }
       if (data.mention_user_ids && data.mention_user_ids.length > 0) {
@@ -102,6 +140,23 @@ class MessageService {
     }
 
     return result;
+  }
+
+  // RLY-20260806-100 — target_type이 있는 임베드(F7 링크 카드)마다 target_id가 실제로
+  // 존재하고 이 메시지가 속한 binder 소속인지 검증한다. 검증 없이 INSERT하면 아무 UUID나
+  // 넣어 다른 binder의(권한 없는) 이벤트·태스크·게시글을 링크 카드로 만들 수 있다 — 그
+  // 카드 자체는 "권한 없음" placeholder로 렌더되겠지만(L4), target_id 존재 여부·소속
+  // binder를 응답 타이밍차·에러 유무로 추론하는 IDOR 탐색 표면 자체를 원천 차단한다.
+  // link/image/video(target_type 없음, 기존 임베드)는 검증 대상이 아니다.
+  async _assertEmbedTargetsAccessible(client, embeds, binderId) {
+    for (const e of embeds) {
+      if (!e.target_type) continue;
+      const validator = EMBED_TARGET_VALIDATORS[e.target_type];
+      if (!validator) throw new BadRequestError(`지원하지 않는 embed target_type입니다: ${e.target_type}`);
+      if (!e.target_id) throw new BadRequestError('target_type이 있으면 target_id가 필요합니다');
+      const { rowCount } = await client.query(validator, [e.target_id, binderId]);
+      if (rowCount === 0) throw new ForbiddenError('링크 카드 대상에 접근할 권한이 없습니다', 'SECTION_ACCESS_DENIED');
+    }
   }
 
   async updateMessage(messageId, data, context) {
