@@ -174,6 +174,12 @@ class MessageDAO {
   // Message Embeds 테이블
   // ============================================
 
+  // RLY-20260806-100 — target_type·target_id·embed_data가 INSERT 컬럼 목록에 없어(087이
+  // 판정) F7 링크 카드(캘린더/cast/feed 항목)가 항상 NULL로 저장됐다. link/image/video(기존
+  // 임베드)는 target_type이 없으므로 그대로 NULL — 셋 다 있어야 하는 게 아니라 카드 종류일
+  // 때만 채워진다(SC-messaging.md §20-2 L2). embed_data는 JSONB — 다른 JSONB 컬럼(eventDao.js
+  // locations)과 동일하게 JSON.stringify로 넘긴다. target_id 접근 검증은 호출부
+  // (messageService.createMessage)에서 INSERT 전에 수행한다 — 이 DAO는 검증된 값만 받는다.
   async insertEmbeds(conn, messageId, embeds) {
     if (!embeds || embeds.length === 0) return [];
 
@@ -182,17 +188,18 @@ class MessageDAO {
     let idx = 1;
 
     for (const e of embeds) {
-      values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
+      values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
       params.push(
         e.id, messageId, e.type || 'link', e.url,
         e.title || null, e.description || null, e.site_name || null, e.image_url || null,
+        e.target_type || null, e.target_id || null, e.embed_data ? JSON.stringify(e.embed_data) : null,
       );
     }
 
     const query = `
-      INSERT INTO message_embeds (id, message_id, type, url, title, description, site_name, image_url)
+      INSERT INTO message_embeds (id, message_id, type, url, title, description, site_name, image_url, target_type, target_id, embed_data)
       VALUES ${values.join(', ')}
-      RETURNING id, message_id, type, url, title, description, site_name, image_url
+      RETURNING id, message_id, type, url, title, description, site_name, image_url, target_type, target_id, embed_data
     `;
     const result = await conn.query(query, params);
     return result.rows;
@@ -201,7 +208,7 @@ class MessageDAO {
   async getEmbedsByMessageIds(conn, messageIds) {
     if (!messageIds || messageIds.length === 0) return [];
     const query = `
-      SELECT id, message_id, type, url, title, description, site_name, image_url
+      SELECT id, message_id, type, url, title, description, site_name, image_url, target_type, target_id, embed_data
       FROM message_embeds
       WHERE message_id = ANY($1) AND deleted_at IS NULL
     `;
