@@ -177,6 +177,13 @@ async function mockQuery(sql, params = []) {
   }
   // attachments insert(presign) — authz 통과 후에만 도달해야 함
   if (s.includes('INSERT INTO attachments')) return { rows: [] };
+  // AttachmentDAO.getTier(binderService.getBoost 재구현, RLY-20260806-099) — authz 통과 후
+  // 도달, Free tier(0)로 흉내낸다.
+  if (s.startsWith('SELECT COALESCE(bb.tier, 0) AS tier')) return { rows: [{ tier: 0 }] };
+  // AttachmentDAO.getBytesUsed(동일) — 집계 행 없음 → 0바이트.
+  if (s.startsWith('SELECT bytes_used FROM binder_storage_usage')) return { rows: [] };
+  // binderService.getBoost의 status·current_period_end 조회(동일) — 활성 Boost 없음(Free tier).
+  if (s.startsWith('SELECT status, current_period_end FROM binder_boosts')) return { rows: [] };
   // AttachmentDAO.findByContext(postService.withAttachments) — 응답 조립용, 인가와 무관
   if (s.includes('FROM attachments') && s.includes('context_type')) return { rows: [] };
   // EventDAO/TaskDAO.findInstanceById — split의 DAO 내부 호출(authz 통과 후에만 도달)
@@ -317,7 +324,10 @@ async function run() {
   await expectOk('Binder.getBinder 비멤버(공개 바인더 preview)', () => BinderService.getBinder('b2', OUT));
   await expectStatus('Binder.getBinder 비멤버(비공개 바인더)', () => BinderService.getBinder('b1', OUT), 403);
   await expectStatus('Binder.getBoost 비멤버', () => BinderService.getBoost('b1', OUT), 403);
-  await expectStatus('Binder.getBoost 멤버는 인가 통과 후 501(재구현 범위 밖)', () => BinderService.getBoost('b1', 'member1'), 501);
+  // RLY-20260806-099 — storage_bytes_used·storage_limit_bytes 전달을 위해 getBoost를
+  // 구현했다(구매 검증·이전·취소는 여전히 501 — 아래 checkBoost 이하 참조). 구 단언(501)을
+  // 새 단언(정상 응답)으로 교체한다 — 재구현 범위였음이 이제 확정됐다.
+  await expectOk('Binder.getBoost 멤버는 인가 통과 후 정상 응답(RLY-20260806-099로 구현됨)', () => BinderService.getBoost('b1', 'member1'));
   await expectStatus('Binder.checkBoost 비멤버', () => BinderService.checkBoost('b1', OUT), 403);
   await expectStatus('Binder.checkBoost 멤버는 인가 통과 후 501', () => BinderService.checkBoost('b1', 'member1'), 501);
   await expectStatus('Binder.transferBoost 비멤버', () => BinderService.transferBoost('b1', OUT, {}), 403);
