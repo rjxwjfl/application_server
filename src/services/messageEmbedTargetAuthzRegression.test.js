@@ -144,7 +144,13 @@ async function expectBlocked(desc, fn, expectedCode) {
 async function run() {
   let seq = 0;
   const msg = () => `msg-${++seq}`;
-  const embed = (targetType, targetId) => [{ id: `emb-${seq}`, type: 'link', url: null, target_type: targetType, target_id: targetId }];
+  // RLY-20260806-132 — 원래 이 helper가 `id: emb-${seq}`를 수동으로 채워, 클라 EmbedRequest
+  // DTO(embed_request.dart)에 애초에 없는 필드를 fixture가 대신 채워주고 있었다. 그래서 이
+  // 스위트가 계속 통과하는 동안 실제로는 message_embeds.id(NOT NULL, 기본값 없음)가 항상
+  // undefined로 INSERT 시도되는 Blocker가 숨어 있었다(130이 발견·수리 — messageService.js가
+  // 이제 `e.id || generateUUID()`로 채운다). id 없이 보내는 것으로 고쳐 클라가 실제로 보낼 수
+  // 있는 형태와 다시 맞춘다 — 이 fixture가 그 형태로 남아 있어야 같은 결함이 재발해도 잡힌다.
+  const embed = (targetType, targetId) => [{ type: 'link', url: null, target_type: targetType, target_id: targetId }];
 
   // ============ 5개 target_type × (같은 binder=허용 / 다른 binder=차단) 대조 쌍 ============
   const cases = [
@@ -171,6 +177,9 @@ async function run() {
   {
     const savedForEi1 = savedEmbeds.find((e) => e.target_id === 'ei1');
     check('허용된 카드의 target_type이 그대로 저장됨', savedForEi1 && savedForEi1.target_type === 'EVENT_INSTANCE');
+    // RLY-20260806-132 — id를 클라가 안 보내는 fixture로 바꿨으니, 서버가 실제로 채웠는지도
+    // 확인해야 이 파일이 130의 결함을 다시 잡을 수 있다(id만 undefined로 새는 것도 회귀다).
+    check('허용된 카드의 id를 서버가 채웠다(클라는 안 보냈다)', savedForEi1 && typeof savedForEi1.id === 'string' && savedForEi1.id.length > 0);
   }
 
   // ============ 존재하지 않는 target_id — 차단(cross-binder와 같은 취급, IDOR 탐색 신호 없음) ============
@@ -182,7 +191,7 @@ async function run() {
 
   // ============ target_type만 있고 target_id 없음 — 400 ============
   try {
-    await MessageService.createMessage('s1', { id: msg(), content: 'x', embeds: [{ id: `emb-${++seq}`, type: 'link', target_type: 'EVENT_INSTANCE' }] }, ctx());
+    await MessageService.createMessage('s1', { id: msg(), content: 'x', embeds: [{ type: 'link', target_type: 'EVENT_INSTANCE' }] }, ctx());
     fail++; failures.push('target_id 없이 target_type만 있으면 400을 기대했지만 통과함');
   } catch (err) {
     if (err.statusCode === 400) pass++; else { fail++; failures.push(`target_id 누락 400 기대, 실제 ${err.statusCode} ${err.message}`); }
@@ -190,7 +199,7 @@ async function run() {
 
   // ============ 알 수 없는 target_type — 400(새 카드 종류를 몰래 등록해 검증을 우회 못함) ============
   try {
-    await MessageService.createMessage('s1', { id: msg(), content: 'x', embeds: [{ id: `emb-${++seq}`, type: 'link', target_type: 'BINDER', target_id: 'b1' }] }, ctx());
+    await MessageService.createMessage('s1', { id: msg(), content: 'x', embeds: [{ type: 'link', target_type: 'BINDER', target_id: 'b1' }] }, ctx());
     fail++; failures.push('알 수 없는 target_type이면 400을 기대했지만 통과함');
   } catch (err) {
     if (err.statusCode === 400) pass++; else { fail++; failures.push(`알 수 없는 target_type 400 기대, 실제 ${err.statusCode} ${err.message}`); }
@@ -199,7 +208,7 @@ async function run() {
   // ============ 회귀 불변 — 기존 link 임베드(target_type 없음)는 검증을 거치지 않고 그대로 통과 ============
   await expectOk(
     '회귀 불변 — target_type 없는 기존 link 임베드는 검증 없이 통과',
-    () => MessageService.createMessage('s1', { id: msg(), content: 'x', embeds: [{ id: `emb-${++seq}`, type: 'link', url: 'https://example.com' }] }, ctx())
+    () => MessageService.createMessage('s1', { id: msg(), content: 'x', embeds: [{ type: 'link', url: 'https://example.com' }] }, ctx())
   );
 
   // ============ 회귀 불변 — 임베드 없는 일반 메시지 생성 자체는 그대로 동작 ============
