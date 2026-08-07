@@ -1,0 +1,12 @@
+-- RLY-20260806-147 — notifications.group_key 폐기 컬럼 삭제(T-1).
+-- design_intent.md §"notifications.group_key 처리 판정"(Architect 판정 2026-08-07 + User 판정
+-- 2026-08-07) — 알림을 묶지 않기로 확정돼(SC-notifications.md §16-4) 이 컬럼을 채울 규칙이
+-- 영구히 없다. 출시 전(프로덕션 행 0건)인 지금이 삭제 비용이 유일하게 0인 시점이라 컬럼 자체를
+-- 삭제한다("미사용" 표시로 남기지 않는다).
+--
+-- notifications는 PARTITION BY RANGE(created_at) 선언적 파티션 테이블(부모: notifications,
+-- 자식: notifications_2026·notifications_2027·notifications_2028)이다. PostgreSQL은 파티션된
+-- 부모 테이블에 대한 ADD/DROP COLUMN을 모든 자식 파티션에 자동으로 전파한다 — 자식 파티션마다
+-- 별도 ALTER를 낼 필요가 없다(개별 파티션에 독자적인 컬럼 구조를 허용하지 않는 선언적 파티션의
+-- 기본 동작). 이 한 줄로 부모 + 자식 3개 전부에서 컬럼이 제거된다.
+ALTER TABLE notifications DROP COLUMN IF EXISTS group_key;
