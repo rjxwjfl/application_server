@@ -169,6 +169,12 @@ const binderController = {
     const result = await BinderService.search(req.params.binderId, req.query, req.user_id);
     res.json({ success: true, data: result });
   }),
+
+  // RLY-20260806-128 — SC-messaging.md §20-4 링크 카드 picker.
+  getItems: asyncHandler(async (req, res) => {
+    const items = await BinderService.getItems(req.params.binderId, req.query, req.user_id);
+    res.json({ success: true, data: items });
+  }),
 };
 
 module.exports = binderController;

@@ -1,4 +1,4 @@
-const { BinderDAO, SectionDAO, CalendarDAO } = require('../daos');
+const { BinderDAO, SectionDAO, CalendarDAO, EventDAO, TaskDAO, SpecialDayDAO, CastDAO } = require('../daos');
 const { MediaService } = require('./mediaService');
 const { generateUUID } = require('../utils/uuid');
 const eventBus = require('../events/eventBus');
@@ -373,6 +373,50 @@ class BinderService {
     }
 
     return result;
+  }
+
+  // RLY-20260806-128 — SC-messaging.md §20-4 "GET /binders/{binderId}/items?type={ts}, L1 캘린더
+  // 항목 picker — 본인 시야 events·tasks·special_days·casts 통합 검색". 100(메시지 링크 카드
+  // 쓰기 경로)이 이 endpoint 부재를 등재했다 — target_type 5종(TargetType.EVENT_INSTANCE·
+  // TASK_INSTANCE·SPECIAL_DAY·CAST·POST) 중 POST는 여기 포함하지 않는다: §20-2 Gherkin이 L1
+  // "캘린더 항목"(이 4종, CalendarItemPickerScreen)과 L3 "포스트 게시물"(별도 PostPickerScreen)을
+  // 처음부터 분리된 화면·흐름으로 서술하고, §20-4 표 자체도 이 endpoint의 설명에 posts를 넣지
+  // 않는다 — POST는 이미 있는 `GET /binders/:binderId/posts`(바인더 스코프·cursor 페이지네이션
+  // 이미 구현됨, PostService.getPosts)를 그대로 재사용한다(새로 만들지 않는다).
+  // CAST는 `GET /calendars/:calId/casts`가 이미 있지만 캘린더 하나로 스코프되고, picker는 바인더
+  // 전체(여러 캘린더 가능, POST /binders/:id/calendars)를 훑어야 하므로 여기 새로 추가했다.
+  //
+  // 인가 — 100이 쓰기 경로에서 검증한 것과 같은 경계(그 target이 이 binder 소속인가)를 목록에도
+  // 그대로 적용한다: 아래 4개 DAO 쿼리가 전부 calendars.binder_id = $1로 스코프된다(EVENT_INSTANCE·
+  // TASK_INSTANCE·SPECIAL_DAY·CAST 전부 EMBED_TARGET_VALIDATORS와 동일 JOIN). 개인별 접근이 다른
+  // 것은 섹션 메시지뿐이다(access_scope·section_members, 098이 클라에서 확인) — 이 4종은 전부
+  // calendar/binder 스코프라 "그 binder 활성 멤버인가" 하나만 확인하면 된다(섹션별 별도 필터 없음).
+  //
+  // 페이지네이션 — cursor_at·limit(기존 관례, castDAO.findByCalId·postDAO.findByBinderId와 동일).
+  // "통합" 검색이지만 응답은 type 하나당 한 번 호출하는 동종 목록이다 — event·task·special_day·cast
+  // 4종을 한 응답에 섞어 반환하는 이종 목록 스키마는 §20-5 도메인 모델 어디에도 없어(각 카드
+  // 위젯이 타입별로 분리돼 있다 — EventListCard·TaskListCard 등) 새로 설계하지 않았다.
+  async getItems(binderId, { type, cursor_at, limit } = {}, userId) {
+    const member = await BinderDAO.getMember(pool, binderId, userId);
+    if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 조회할 수 있습니다');
+
+    const lim = Math.min(parseInt(limit, 10) || 20, 50);
+    const opts = { cursor_at, limit: lim };
+
+    switch (type) {
+      case TargetType.EVENT_INSTANCE:
+        return await EventDAO.findInstancesByBinder(pool, binderId, opts);
+      case TargetType.TASK_INSTANCE:
+        return await TaskDAO.findInstancesByBinder(pool, binderId, opts);
+      case TargetType.SPECIAL_DAY:
+        return await SpecialDayDAO.findByBinder(pool, binderId, opts);
+      case TargetType.CAST:
+        return await CastDAO.findByBinder(pool, binderId, opts);
+      default:
+        throw new BadRequestError(
+          `type은 ${[TargetType.EVENT_INSTANCE, TargetType.TASK_INSTANCE, TargetType.SPECIAL_DAY, TargetType.CAST].join('|')} 중 하나여야 합니다`
+        );
+    }
   }
 
   async getBinder(binderId, userId) {

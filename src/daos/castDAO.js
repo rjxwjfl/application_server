@@ -25,6 +25,27 @@ class CastDAO {
     return result.rows;
   }
 
+  // RLY-20260806-128 — SC-messaging.md §20-4 picker(GET /binders/{binderId}/items?type=CAST).
+  // findByCalId는 캘린더 하나로 스코프되지만(기존 캐스트 피드 화면용) picker는 바인더 전체
+  // ("본인 시야 ... casts 통합 검색") — 바인더에 캘린더가 여럿일 수 있어(POST /binders/:id/calendars)
+  // calId 하나로는 부족하다. EMBED_TARGET_VALIDATORS(messageService.js)의 CAST 검증과 같은 JOIN.
+  async findByBinder(conn, binderId, { cursor_at, limit = 20 } = {}) {
+    const params = [binderId, limit];
+    let where = 'c.binder_id = $1 AND ca.deleted_at IS NULL';
+    if (cursor_at) {
+      where += ' AND ca.created_at < $3';
+      params.push(cursor_at);
+    }
+    const result = await conn.query(
+      `SELECT ca.* FROM casts ca
+       JOIN calendars c ON c.id = ca.calendar_id
+       WHERE ${where}
+       ORDER BY ca.created_at DESC LIMIT $2`,
+      params
+    );
+    return result.rows;
+  }
+
   async create(conn, data) {
     const result = await conn.query(
       `INSERT INTO casts
