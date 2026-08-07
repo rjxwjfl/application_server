@@ -215,14 +215,30 @@ class SyncService {
     // 성질이다 — createMessage 트랜잭션 안에서만 생성되고 그 뒤 독립적으로 바뀌는 경로가
     // 없어(코드 전수 확인) "부모 불변+자식만 변경" 상황 자체가 지금 발생할 수 없다. 그래서
     // 둘은 기존 동작(messages 없으면 조회 안 함, messageIds 스코프만)을 그대로 뒀다.
-    const [attachments, embeds, reactions, mentions] = await Promise.all([
+    //
+    // RLY-20260806-094 — message_polls 3테이블이 델타 대상에서 통째로 빠져 있었다(투표를
+    // 만든 사람 기기 말고는 존재를 알 수 없었다). 조사 결과 셋의 성질이 또 갈렸다:
+    // message_polls는 reactions와 같다(closePoll이 독립적으로 updated_at을 바꾼다) — 같은
+    // 모양으로 배선. message_poll_options는 embeds·mentions와 같다(생성 후 불변, updated_at
+    // 컬럼조차 없음) — messageIds 스코프만. message_poll_votes는 겉보기엔 reactions와
+    // 같아 보이지만 다르다 — hard delete(no deleted_at)라 부분 델타를 그대로 흉내내면
+    // 클라의 poll 단위 delete-then-reinsert(sections_dao.dart:1085)가 다른 사용자 투표까지
+    // 지운다. 그래서 "새 투표가 있었던 poll"만 판정하고 그 poll의 현재 투표 전량을 싣는다
+    // (syncDAO.js getMessagePollVotes 주석 참조).
+    const [attachments, embeds, reactions, mentions, polls, pollOptions, pollVotes] = await Promise.all([
       SyncDAO.getMessageAttachments(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
       messages.length ? SyncDAO.getMessageEmbeds(pool, messageIds, relatedOldTs) : [],
       SyncDAO.getMessageReactions(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
       messages.length ? SyncDAO.getMessageMentions(pool, messageIds, relatedOldTs) : [],
+      SyncDAO.getMessagePolls(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
+      messages.length ? SyncDAO.getMessagePollOptions(pool, messageIds) : [],
+      SyncDAO.getMessagePollVotes(pool, messageIds, relatedOldTs, ctx.userId, ctx.currDIds),
     ]);
 
-    return { messages, attachments, message_embeds: embeds, message_reactions: reactions, message_mentions: mentions };
+    return {
+      messages, attachments, message_embeds: embeds, message_reactions: reactions, message_mentions: mentions,
+      message_polls: polls, message_poll_options: pollOptions, message_poll_votes: pollVotes,
+    };
   }
 
   async _fetchPersonalData(userId, currDIds, oldTs, msgWindowFrom) {
