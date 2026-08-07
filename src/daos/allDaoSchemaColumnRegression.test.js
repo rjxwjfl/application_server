@@ -320,8 +320,8 @@ console.log(`\n제외 파일(031 소유, 위 헤더 §7): ${[...EXCLUDED_FILES].
 // 합쳤다.
 //
 // ── 이 방향이 못 잡는 범위(§B와 같은 스캐너 한계를 그대로 물려받는다 — 지우지 말 것) ──
-// 파일 헤더의 "못 잡는 범위" 1~7과 전부 동일(같은 스캐너이므로). **이 §C에서 실제로 두 번
-// 부딪힌 구체 사례**(RLY-20260806-104 조사에서 발견, 둘 다 아래 화이트리스트에
+// 파일 헤더의 "못 잡는 범위" 1~7과 전부 동일(같은 스캐너이므로). **이 §C에서 실제로 세 번
+// 부딪힌 구체 사례**(RLY-20260806-104·163 조사에서 발견, 셋 다 아래 화이트리스트에
 // `동적SQL-확인됨`으로 태그돼 있다 — 지우지 말 것, 지우면 다음 사람이 "왜 여기 있지?" 하며
 // 다시 조사해야 한다):
 //   · `message_embeds.updated_at`·`deleted_at` — `sectionDAO.js`의
@@ -329,11 +329,19 @@ console.log(`\n제외 파일(031 소유, 위 헤더 §7): ${[...EXCLUDED_FILES].
 //       UPDATE ${table} child SET deleted_at = now()... }` 캐스케이드 루프(섹션 삭제 시)가
 //     실제로 쓴다 — `${table}` 동적 보간이라 정규식이 테이블명을 못 찾아(한계 6) 스캐너가
 //     이 문(statement) 전체를 스킵한다.
+//   · `message_mentions.updated_at`·`deleted_at` — 위와 동일한 캐스케이드 루프가 실제로
+//     쓴다. RLY-20260806-163 이전엔 `messageDAO.insertMentions`의 `ON CONFLICT ... DO
+//     UPDATE SET deleted_at = NULL, updated_at = now()`이라는 별도의 명시적 SET절이
+//     있어 이 공백이 우연히 가려져 있었다 — 163이 그 ON CONFLICT를 `DO NOTHING`으로
+//     고치면서(파샬 유니크 인덱스 predicate 불일치 실측 수정, message_mentions 자체는
+//     이 루프 말고는 개별 UPDATE 경로가 없어 revival 의미가 없음) 그 SET절이 사라져
+//     스캐너가 처음으로 이 공백을 드러냈다 — 결함이 아니라 **스캐너의 판별 한계**가
+//     이제야 노출된 것이다.
 //   · `user_settings`의 거의 모든 설정 컬럼 — `userSettingsDAO.updatePartial()`이
 //     `SET ${setClauses.join(', ')}`로 **런타임에** SQL을 조립한다(한계 6, 동일 이유). 스캐너는
 //     문자열 리터럴만 파싱하므로 이 동적 조립을 SET 컬럼으로 못 뽑는다.
-// 둘 다 RLY-20260806-104가 직접 소스를 읽어 실제로 정상 기록되는 것을 확인했다 — 결함이
-// 아니라 **스캐너의 판별 한계**다.
+// 셋 다 직접 소스를 읽어 실제로 정상 기록되는 것을 확인했다 — 결함이 아니라 **스캐너의
+// 판별 한계**다.
 //
 // ── 화이트리스트 vs 알려진 미해결 — 구조적으로 다르다(섞지 말 것) ──────────────────
 // `_writeGapWhitelist` = **의도적으로 안 써지는 컬럼(결함 아님)**. 사유 태그 5종
@@ -378,6 +386,8 @@ const _writeGapWhitelist = [
   // ── 동적SQL-확인됨(위 "못 잡는 범위" 참조 — 직접 소스를 읽어 정상 기록을 확인함) ──────
   { table: 'message_embeds', column: 'updated_at', reason: '동적SQL-확인됨', note: "sectionDAO.js의 `${table}` 캐스케이드 루프(섹션 삭제 시)가 실제로 쓴다." },
   { table: 'message_embeds', column: 'deleted_at', reason: '동적SQL-확인됨', note: '위와 동일 캐스케이드.' },
+  { table: 'message_mentions', column: 'updated_at', reason: '동적SQL-확인됨', note: "RLY-20260806-163 — 위와 동일 캐스케이드. insertMentions의 ON CONFLICT를 DO NOTHING으로 고치며(파샬 인덱스 predicate 불일치 실측 수정) 이전엔 있던 명시적 SET절이 없어져 이 공백이 드러났다." },
+  { table: 'message_mentions', column: 'deleted_at', reason: '동적SQL-확인됨', note: '위와 동일.' },
   { table: 'user_settings', column: 'language_code', reason: '동적SQL-확인됨', note: "userSettingsDAO.updatePartial()의 동적 SET 조립이 쓴다." },
   { table: 'user_settings', column: 'holidays_countries', reason: '동적SQL-확인됨', note: '위와 동일.' },
   { table: 'user_settings', column: 'timezone', reason: '동적SQL-확인됨', note: '위와 동일.' },
