@@ -1,0 +1,24 @@
+-- RLY-20260806-176 — activity_feeds를 target_id로 거르는 인덱스가 없었다(164 확인). 일정
+-- 상세 "[시간] 누가 수정함" 접이식 표시(User 판정)의 선행 조건 — 항목 단위(target_id) 조회가
+-- 인덱스 없이 activity_feeds 전체(파티션 통합) 시퀀셜 스캔이 된다.
+--
+-- 기존 인덱스 확인(수리 전 필수 확인): activity_feeds에는 idx_feed_binder_cursor
+-- (binder_id, created_at DESC, id DESC) 하나뿐이다(config/schema.sql) — 선두 컬럼이
+-- binder_id라 target_type/target_id로 거르는 이 쿼리와 전혀 안 겹친다. 새로 만들 필요가
+-- 있었다(재사용·순서 변경으로 해결 안 됨). audit_logs의 idx_al_target(target_type,
+-- target_id) — 2컬럼뿐 — 과 같은 성격이지만, 여긴 항목별 시간순 정렬까지 인덱스에서
+-- 바로 끝내려 created_at DESC를 3번째 컬럼으로 더했다(audit_logs는 이번 대상이 아니다).
+--
+-- 파티션 부모에 한 번만 낸다 — 자식 파티션(activity_feeds_2026·2027·2028)마다 따로 내지
+-- 않는다. PostgreSQL은 파티션된 부모 테이블에 낸 CREATE INDEX를 모든 기존 자식 파티션에
+-- 자동으로 전파하고, "그 이후 새로 붙는 파티션"에도 자동으로 같은 인덱스를 만든다 — 실측
+-- 확인(docker postgres:15-alpine, 임시 컨테이너, 검증 후 즉시 제거): 부모에 인덱스를 낸
+-- 다음 `CREATE TABLE IF NOT EXISTS activity_feeds_2028 PARTITION OF ...`로 새 파티션을
+-- 붙였더니 그 파티션에도 즉시 `activity_feeds_2028_target_type_target_id_created_at_idx`가
+-- 자동으로 생겼다. RLY-20260806-175의 자동 파티션 생성 경로(src/jobs/partitionJobs.js)는
+-- 그래서 이 인덱스와 관련해 추가로 손댈 코드가 없다 — Postgres가 알아서 붙인다.
+--
+-- CONCURRENTLY는 파티션 부모 테이블에 못 쓴다(실측: "ERROR: cannot create index on
+-- partitioned table ... concurrently"). 출시 전(프로덕션 트래픽 없음)이라 일반
+-- CREATE INDEX로 충분하다 — 잠깐의 쓰기 잠금이 문제 되지 않는다.
+CREATE INDEX IF NOT EXISTS idx_feed_target ON activity_feeds (target_type, target_id, created_at DESC);
