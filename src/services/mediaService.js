@@ -493,10 +493,17 @@ class MediaService {
     // 지워도 되는지 알 수 없다 — 판정은 cleanupJobs가 하드 삭제 시점에 가드(같은 storage_key를
     // 가리키는 다른 활성 행이 없음)를 걸고 수행한다.
     await withTransaction(async (client) => {
+      // RLY-20260806-093(S4) — media.md §2-3: 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·
+      // CAST_COVER)은 정체성 데이터라 삭제 대상이 아니다. `DELETE /binders/:binderId/attachments/
+      // :attachmentId`(파일함 개별 삭제, binderService 소관)는 attachmentDAO.findById에서 이미
+      // 막았지만, 이 함수가 처리하는 `DELETE /attachments/:attachmentId`(일반 경로)는 attachment_id
+      // 를 아는 누구나(본인 업로드 한정) 호출할 수 있는 별개 경로라 여기도 동일하게 막는다
+      // (defense-in-depth — 두 경로 중 하나만 막으면 다른 경로로 우회된다).
       const result = await client.query(
         `UPDATE attachments
          SET deleted_at = now(), updated_at = now()
          WHERE id = $1 AND uploader_id = $2 AND deleted_at IS NULL
+           AND context_type NOT IN ('USER_AVATAR','BINDER_AVATAR','CAST_COVER')
          RETURNING id, binder_id, storage_key, file_size`,
         [attachmentId, userId]
       );
