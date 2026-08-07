@@ -423,15 +423,14 @@ const _writeGapWhitelist = [
 ];
 
 // ⚠️ 화이트리스트가 아니다 — 실제 결함이다. 화이트리스트로 덮지 마라(AC).
-const _writeGapKnownIssues = [
-  {
-    table: 'notifications', column: 'group_key', reason: '실제결함-규칙미정',
-    note: 'RLY-20260806-108: SC-notifications.md §16-4가 "미해결·UI 표준 미정"이라 규칙을 '
-      + '정하지 않고 구현을 보류했다. 읽기(notificationDAO.getByRecipient의 SELECT 목록)·문서 '
-      + '계약(SC-notifications.md 시나리오 E20·design_intent.md)은 있는데 INSERT가 안 채운다. '
-      + '규칙이 정해지면 이 배열에서 항목을 빼라.',
-  },
-];
+// RLY-20260806-147(T-2) — notifications.group_key 항목을 여기서 삭제했다(design_intent.md
+// 판정 블록 — User 판정 2026-08-07 "채울 규칙이 영구히 없다" + Architect 컬럼 판정 2026-08-07).
+// ⚠️ _writeGapWhitelist로 옮기지 않았다 — 화이트리스트는 "쓰지 않는 것이 정상인 실재 컬럼"을
+// 담는데 이 컬럼은 T-1(같은 커밋)로 config/schema.sql에서 제거돼 더 이상 실재하지 않는다 —
+// 옮기면 아래 445행의 "화이트리스트/알려진 미해결 항목이 실재 컬럼을 가리킨다" 자가검증이
+// 깨진다. 지금 이 배열이 비어 있는 것은 "결함 없음"이 아니라 "이번 세션엔 없음"이다 — 새 미해결
+// 항목이 생기면 다시 채운다.
+const _writeGapKnownIssues = [];
 
 function writeGapWhitelistFor(table) {
   return new Set(_writeGapWhitelist.filter((w) => w.table === table).map((w) => w.column));

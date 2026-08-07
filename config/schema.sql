@@ -1023,7 +1023,6 @@ CREATE TABLE notifications (
   route_type        VARCHAR(30) NOT NULL,
   route_id          UUID,
   binder_id         UUID,
-  group_key         VARCHAR(100),
   title             TEXT,
   body              TEXT,
   payload           JSONB,

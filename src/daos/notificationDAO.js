@@ -123,9 +123,11 @@ class NotificationDAO {
     }
     params.push(limit);
 
+    // RLY-20260806-147 — group_key는 폐기 컬럼(T-1, design_intent.md 판정 블록)이라 SELECT
+    // 목록에서 제거했다. 채울 규칙이 영구히 없어 "미사용 표시"가 아니라 컬럼 자체를 지웠다.
     const query = `
       SELECT id, recipient_id, sender_id, notification_type, route_type, route_id,
-             binder_id, group_key, title, body, payload, is_read, created_at
+             binder_id, title, body, payload, is_read, created_at
       FROM notifications
       WHERE ${conditions.join(' AND ')}
       ORDER BY created_at DESC
