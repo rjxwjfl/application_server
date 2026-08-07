@@ -35,7 +35,13 @@ process.env.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'test';
 const NOW = new Date();
 
 // ── 가짜 DB ─────────────────────────────────────────────────────────────
-const db = { attachments: {}, binder_storage_usage: {} };
+// RLY-20260806-091(S3) — user_infos·binders·casts는 엔티티 포인터 갱신(Step5-c) 대상 테이블.
+const db = {
+  attachments: {}, binder_storage_usage: {},
+  user_infos: { 'user-1': { user_id: 'user-1', image_url: null, thumbnail_url: null } },
+  binders: { 'binder-1': { id: 'binder-1', image_url: null, thumbnail_url: null } },
+  casts: { 'cast-1': { id: 'cast-1', cover_image_url: null, thumbnail_url: null } },
+};
 
 let nextId = 1;
 function seedAttachment(fields) {
@@ -126,6 +132,21 @@ async function mockQuery(sql, params = []) {
     return { rows: candidates.map((a) => ({ ...a })) };
   }
 
+  // AttachmentDAO.markSuperseded — markReady와 SQL 접두사가 같으므로(둘 다 "status = 'ready',
+  // thumbnail_url"로 시작) 더 구체적인 이 패턴(deleted_at = now() 포함)을 먼저 검사한다.
+  if (s.startsWith("UPDATE attachments SET status = 'ready', thumbnail_url") && s.includes('deleted_at = now()')) {
+    const [id, claimToken, thumbnailUrl] = params;
+    const att = db.attachments[id];
+    if (!att || att.claim_token !== claimToken) return { rows: [] };
+    att.status = 'ready';
+    if (thumbnailUrl) att.thumbnail_url = thumbnailUrl;
+    att.claim_token = null;
+    att.claimed_at = null;
+    att.deleted_at = new Date().toISOString();
+    att.updated_at = new Date().toISOString();
+    return { rows: [{ id: att.id }] };
+  }
+
   // AttachmentDAO.markReady
   if (s.startsWith("UPDATE attachments SET status = 'ready', thumbnail_url")) {
     const [id, claimToken, thumbnailUrl] = params;
@@ -137,6 +158,55 @@ async function mockQuery(sql, params = []) {
     att.claimed_at = null;
     att.updated_at = new Date().toISOString();
     return { rows: [{ id: att.id }] };
+  }
+
+  // AttachmentDAO.findNewerActiveSibling — Step5(a) 순서 역전 가드
+  if (s.startsWith('SELECT id FROM attachments') && s.includes('created_at > $4')) {
+    const [contextType, contextId, excludeId, afterCreatedAt] = params;
+    const newer = Object.values(db.attachments).find((a) =>
+      a.context_type === contextType && a.context_id === contextId && a.id !== excludeId
+      && !a.deleted_at && new Date(a.created_at) > new Date(afterCreatedAt));
+    return { rows: newer ? [{ id: newer.id }] : [] };
+  }
+
+  // AttachmentDAO.updateEntityImagePointer — Step5(c), context_type별 대상 테이블 3종
+  if (s.startsWith('UPDATE user_infos SET image_url')) {
+    const [fullUrl, thumbUrl, userId] = params;
+    if (db.user_infos[userId]) {
+      db.user_infos[userId].image_url = fullUrl;
+      db.user_infos[userId].thumbnail_url = thumbUrl;
+    }
+    return { rows: [] };
+  }
+  if (s.startsWith('UPDATE binders SET image_url')) {
+    const [fullUrl, thumbUrl, binderId] = params;
+    if (db.binders[binderId]) {
+      db.binders[binderId].image_url = fullUrl;
+      db.binders[binderId].thumbnail_url = thumbUrl;
+    }
+    return { rows: [] };
+  }
+  if (s.startsWith('UPDATE casts SET cover_image_url')) {
+    const [fullUrl, thumbUrl, castId] = params;
+    if (db.casts[castId]) {
+      db.casts[castId].cover_image_url = fullUrl;
+      db.casts[castId].thumbnail_url = thumbUrl;
+    }
+    return { rows: [] };
+  }
+
+  // AttachmentDAO.markOtherGenerationsDeleted — Step5(d) 이전 세대 정리
+  if (s.startsWith('UPDATE attachments SET deleted_at = now(), updated_at = now()') && s.includes('context_type = $1 AND context_id = $2')) {
+    const [contextType, contextId, keepId] = params;
+    let count = 0;
+    Object.values(db.attachments).forEach((a) => {
+      if (a.context_type === contextType && a.context_id === contextId && a.id !== keepId && !a.deleted_at) {
+        a.deleted_at = new Date().toISOString();
+        a.updated_at = new Date().toISOString();
+        count += 1;
+      }
+    });
+    return { rows: [], rowCount: count };
   }
 
   // AttachmentDAO.markRejected
@@ -529,6 +599,168 @@ async function run() {
     assert.ok(gcsDeleteLog.includes(key), 'GCS 원본이 삭제돼야 한다(첨부와 동일 규약)');
     const quotaAfter = (db.binder_storage_usage.b1 && db.binder_storage_usage.b1.bytes_used) || 0;
     assert.strictEqual(quotaAfter, quotaBefore, '적립한 적 없는 바이트를 차감하면 안 된다 — binder_storage_usage가 음수로 흐르는 결함의 회귀');
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ⑧~⑫ RLY-20260806-091(S3) — media.md §4-4 Step4·5 엔티티 이미지 3종 확장.
+  // ═══════════════════════════════════════════════════════════════════
+
+  await check('⑧ USER_AVATAR 성공 — 파생 2종(thumb 720px·full 1080px) 생성 + 파생 키가 {attachment_id} 기반(불변)', async () => {
+    const jpegBytes = await makeJpegWithGpsAndOrientation();
+    const key = 'avatars/users/user-1/entity-success.jpg';
+    gcsMedia[key] = jpegBytes;
+    const id = seedAttachment({
+      status: 'processing', storage_key: key, content_type: 'image/jpeg', file_size: jpegBytes.length,
+      context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+    });
+
+    await dispatchMediaWorker();
+
+    const att = db.attachments[id];
+    assert.strictEqual(att.status, 'ready', 'Step1~4를 통과했으면 ready여야 한다');
+    assert.ok(gcsCdn[`derivatives/${id}/thumb.webp`], 'thumb.webp(720px)가 rally-cdn에 있어야 한다');
+    assert.ok(gcsCdn[`derivatives/${id}/full.webp`], 'full.webp(1080px)가 rally-cdn에 있어야 한다 — 첨부 6종엔 없는 엔티티 전용 파생');
+    // 파생 키 불변성 — attachment_id 기반이지 user_id 기반이 아니다(같은 URL이 다른 내용을
+    // 갖는 일이 없어야 CDN Invalidation이 원리적으로 불필요해진다, media.md §4-4).
+    assert.ok(att.thumbnail_url.includes(`derivatives/${id}/thumb.webp`), 'thumbnail_url이 {attachment_id} 기반 키를 가리켜야 한다');
+  });
+
+  await check('⑨ USER_AVATAR 성공 시에만 포인터가 옮겨진다 — user_infos.image_url=full, thumbnail_url=thumb', async () => {
+    db.user_infos['user-1'].image_url = null;
+    db.user_infos['user-1'].thumbnail_url = null;
+
+    const jpegBytes = await makeJpegWithGpsAndOrientation();
+    const key = 'avatars/users/user-1/pointer-move.jpg';
+    gcsMedia[key] = jpegBytes;
+    const id = seedAttachment({
+      status: 'processing', storage_key: key, content_type: 'image/jpeg', file_size: jpegBytes.length,
+      context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+    });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[id].status, 'ready');
+    assert.ok(db.user_infos['user-1'].image_url && db.user_infos['user-1'].image_url.includes(`derivatives/${id}/full.webp`), 'image_url이 full(1080px) 파생을 가리켜야 한다');
+    assert.ok(db.user_infos['user-1'].thumbnail_url && db.user_infos['user-1'].thumbnail_url.includes(`derivatives/${id}/thumb.webp`), 'thumbnail_url이 thumb(720px) 파생을 가리켜야 한다');
+  });
+
+  await check('⑨-b BINDER_AVATAR·CAST_COVER 포인터 매핑 — 실재하는 컬럼(binders.image_url·casts.cover_image_url)에 옮겨진다', async () => {
+    const jpegA = await makeJpegWithGpsAndOrientation();
+    const keyA = 'avatars/binders/binder-1/pointer-move.jpg';
+    gcsMedia[keyA] = jpegA;
+    const idA = seedAttachment({
+      status: 'processing', storage_key: keyA, content_type: 'image/jpeg', file_size: jpegA.length,
+      context_type: 'BINDER_AVATAR', context_id: 'binder-1', binder_id: 'binder-1',
+    });
+
+    const jpegB = await makeJpegWithGpsAndOrientation();
+    const keyB = 'covers/casts/cast-1/pointer-move.jpg';
+    gcsMedia[keyB] = jpegB;
+    const idB = seedAttachment({
+      status: 'processing', storage_key: keyB, content_type: 'image/jpeg', file_size: jpegB.length,
+      context_type: 'CAST_COVER', context_id: 'cast-1', binder_id: 'binder-1',
+    });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[idA].status, 'ready');
+    assert.ok(db.binders['binder-1'].image_url && db.binders['binder-1'].image_url.includes(`derivatives/${idA}/full.webp`), 'BINDER_AVATAR는 binders.image_url로 옮겨져야 한다(구 문서의 실재하지 않는 컬럼명이 아니라 실제 컬럼)');
+
+    assert.strictEqual(db.attachments[idB].status, 'ready');
+    assert.ok(db.casts['cast-1'].cover_image_url && db.casts['cast-1'].cover_image_url.includes(`derivatives/${idB}/full.webp`), 'CAST_COVER는 casts.cover_image_url로 옮겨져야 한다');
+  });
+
+  await check('⑩ 실패 시(콘텐츠 손상 → error) 포인터는 건드리지 않는다 — 이전 사진이 그대로 유지된다', async () => {
+    db.user_infos['user-1'].image_url = 'https://cdn.rallyapp.io/derivatives/old-gen/full.webp';
+    db.user_infos['user-1'].thumbnail_url = 'https://cdn.rallyapp.io/derivatives/old-gen/thumb.webp';
+
+    const garbage = Buffer.from('not a real jpeg but declared as one — garbage bytes for exif parsing (entity)');
+    const key = 'avatars/users/user-1/corrupt.jpg';
+    gcsMedia[key] = garbage;
+    const id = seedAttachment({
+      status: 'processing', storage_key: key, content_type: 'image/jpeg', file_size: garbage.length,
+      context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+    });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[id].status, 'error', '콘텐츠 처리 실패는 error로 종결돼야 한다(첨부 6종과 동일 규약)');
+    assert.strictEqual(db.user_infos['user-1'].image_url, 'https://cdn.rallyapp.io/derivatives/old-gen/full.webp', '실패했으면 이전 사진 URL이 그대로 남아야 한다 — 롤백 로직 없이도 성립(포인터를 애초에 안 건드렸으므로)');
+    assert.strictEqual(db.user_infos['user-1'].thumbnail_url, 'https://cdn.rallyapp.io/derivatives/old-gen/thumb.webp');
+  });
+
+  await check('⑪ 순서 역전 가드 — 늦게 끝난 옛 업로드가 최신 사진을 덮지 않는다', async () => {
+    db.user_infos['user-1'].image_url = null;
+    db.user_infos['user-1'].thumbnail_url = null;
+
+    const jpegOld = await makeJpegWithGpsAndOrientation();
+    const keyOld = 'avatars/users/user-1/race-old.jpg';
+    gcsMedia[keyOld] = jpegOld;
+    const olderCreatedAt = new Date(NOW.getTime() - 60 * 1000).toISOString();
+    const idOld = seedAttachment({
+      status: 'processing', storage_key: keyOld, content_type: 'image/jpeg', file_size: jpegOld.length,
+      context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+      created_at: olderCreatedAt,
+    });
+
+    const jpegNew = await makeJpegWithGpsAndOrientation();
+    const keyNew = 'avatars/users/user-1/race-new.jpg';
+    gcsMedia[keyNew] = jpegNew;
+    const idNew = seedAttachment({
+      status: 'processing', storage_key: keyNew, content_type: 'image/jpeg', file_size: jpegNew.length,
+      context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+      created_at: NOW.toISOString(), // idOld보다 최신 — claimProcessingBatch가 created_at ASC로 정렬해 idOld를 먼저 처리한다.
+    });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[idOld].status, 'ready', '늦게 끝난 옛 업로드 자체는 처리(검사·파생 생성)는 완료된다');
+    assert.ok(db.attachments[idOld].deleted_at, '다만 즉시 소프트 삭제돼 표시되지 않아야 한다(순서 역전 가드)');
+    assert.strictEqual(db.attachments[idNew].status, 'ready');
+    assert.strictEqual(db.attachments[idNew].deleted_at, null, '최신 업로드는 삭제되지 않아야 한다');
+    assert.ok(
+      db.user_infos['user-1'].image_url && db.user_infos['user-1'].image_url.includes(`derivatives/${idNew}/full.webp`),
+      '포인터는 최신 업로드(idNew)를 가리켜야 한다 — 옛 업로드(idOld)가 나중에 처리됐어도 최신 사진을 덮으면 안 된다'
+    );
+  });
+
+  await check('⑫ 이전 세대 정리 — 새 업로드가 성공하면 같은 대상의 이전 활성 세대가 소프트 삭제된다', async () => {
+    // 이미 존재하던 이전 세대(과거에 성공해 status='ready'로 남아 있는 행) — 이번 tick의 claim
+    // 대상이 아니다(status가 'processing'이 아니므로). Step5(d)가 claim 여부와 무관하게
+    // context_type·context_id 일치만으로 정리해야 한다는 것을 이 시나리오로 확인한다.
+    const prevId = seedAttachment({
+      status: 'ready', storage_key: 'avatars/users/user-1/prev-gen.jpg', content_type: 'image/jpeg',
+      file_size: 1000, context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+      thumbnail_url: 'https://cdn.rallyapp.io/derivatives/prev-gen/thumb.webp',
+      created_at: new Date(NOW.getTime() - 120 * 1000).toISOString(),
+    });
+
+    const jpegBytes = await makeJpegWithGpsAndOrientation();
+    const key = 'avatars/users/user-1/next-gen.jpg';
+    gcsMedia[key] = jpegBytes;
+    const currId = seedAttachment({
+      status: 'processing', storage_key: key, content_type: 'image/jpeg', file_size: jpegBytes.length,
+      context_type: 'USER_AVATAR', context_id: 'user-1', binder_id: null,
+    });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[currId].status, 'ready');
+    assert.strictEqual(db.attachments[currId].deleted_at, null, '새로 이긴 세대는 삭제되면 안 된다');
+    assert.ok(db.attachments[prevId].deleted_at, '이전 세대는 새 세대가 성공하면 소프트 삭제돼야 한다(새 정리 메커니즘을 만들지 않고 기존 30일 하드 삭제 배치 규약을 그대로 탄다)');
+  });
+
+  await check('⑬ 기존 6종 불변 — SECTION_MESSAGE 성공 경로는 여전히 full.webp를 만들지 않는다(엔티티 전용 파생과 분리)', async () => {
+    const jpegBytes = await makeJpegWithGpsAndOrientation();
+    const key = 'attachments/b1/2026/08/legacy-unchanged.jpg';
+    gcsMedia[key] = jpegBytes;
+    const id = seedAttachment({ status: 'processing', storage_key: key, content_type: 'image/jpeg', file_size: jpegBytes.length });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[id].status, 'ready');
+    assert.ok(gcsCdn[`derivatives/${id}/thumb.webp`], '첨부 6종은 여전히 thumb.webp를 만든다');
+    assert.ok(!gcsCdn[`derivatives/${id}/full.webp`], '첨부 6종은 full.webp를 만들지 않는다 — 1080px 파생은 엔티티 이미지 3종 전용');
   });
 
   console.log(`\n[mediaWorkerJobs] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
