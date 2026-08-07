@@ -305,13 +305,17 @@ class BinderService {
     return crypto.randomBytes(32).toString('hex');
   }
 
+  // RLY-20260806-135 — 128이 등재한 두 종류 누락(special_days·casts)을 128이 확정한 경계
+  // (calendars.binder_id JOIN, deleted_at IS NULL — EMBED_TARGET_VALIDATORS·getItems와 동일)로
+  // 채운다. events·tasks·posts·messages 4종의 기존 쿼리 모양(SELECT/JOIN/파라미터 순서)은
+  // 그대로 두고 옆에 같은 패턴으로 추가했다 — 리팩터하지 않았다.
   async search(binderId, { q, type, limit = 20 }, userId) {
     const member = await BinderDAO.getMember(pool, binderId, userId);
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버만 검색할 수 있습니다');
     if (!q || q.length < 2) throw new BadRequestError('2자 이상 입력해주세요');
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
-    const types = type ? type.split(',').map((t) => t.trim()) : ['events', 'tasks', 'posts', 'messages'];
+    const types = type ? type.split(',').map((t) => t.trim()) : ['events', 'tasks', 'posts', 'messages', 'special_days', 'casts'];
     const pattern = `%${q}%`;
     const result = {};
 
@@ -359,10 +363,15 @@ class BinderService {
     }
 
     if (types.includes('messages')) {
+      // RLY-20260806-135 — SectionDAO.hasAccess(섹션 접근의 단일 기준)와 대조해 이 쿼리에
+      // `s.deleted_at IS NULL`이 빠져 있던 것을 찾아 추가했다(Blocker) — access_scope·
+      // section_members 비공개 경계 자체는 이미 정확했지만(팀리드가 우려한 지점), 소프트
+      // 삭제된 섹션의 메시지는 걸러지지 않아 검색으로만 새어 나올 수 있었다. 다른 3종은
+      // 섹션이 아니라 binder_id·calendar_id로만 스코프되므로 이 필터가 필요 없다.
       const rows = await pool.query(
         `SELECT m.id, m.section_id, m.content, m.created_at
          FROM section_messages m JOIN sections s ON s.id = m.section_id
-         WHERE s.binder_id = $1 AND m.deleted_at IS NULL AND m.content ILIKE $2
+         WHERE s.binder_id = $1 AND s.deleted_at IS NULL AND m.deleted_at IS NULL AND m.content ILIKE $2
            AND (s.access_scope = 0 OR EXISTS (
              SELECT 1 FROM section_members sm WHERE sm.section_id = s.id
                AND sm.user_id = $3 AND sm.deleted_at IS NULL))
@@ -370,6 +379,36 @@ class BinderService {
         [binderId, pattern, userId, lim]
       );
       result.messages = rows.rows;
+    }
+
+    if (types.includes('special_days')) {
+      // RLY-20260806-135 — 128 등재분. special_days에는 binder_id가 없다(calendars 경유) —
+      // events·tasks 바로 위 두 분기와 같은 이유·같은 JOIN 모양. 128의 SpecialDayDAO.findByBinder·
+      // 100의 EMBED_TARGET_VALIDATORS[SPECIAL_DAY]와 동일 스코프(calendars.binder_id, deleted_at
+      // IS NULL) — 검색 결과와 picker·임베드 검증의 경계가 어긋나지 않는다.
+      const rows = await pool.query(
+        `SELECT sd.id, sd.name, sd.base_date
+         FROM special_days sd
+         JOIN calendars c ON c.id = sd.calendar_id
+         WHERE c.binder_id = $1 AND sd.deleted_at IS NULL AND sd.name ILIKE $2
+         ORDER BY sd.base_date ASC LIMIT $3`,
+        [binderId, pattern, lim]
+      );
+      result.special_days = rows.rows;
+    }
+
+    if (types.includes('casts')) {
+      // RLY-20260806-135 — 128 등재분. CastDAO.findByBinder(128)·EMBED_TARGET_VALIDATORS[CAST]
+      // (100)와 동일 스코프 — 위와 같은 이유.
+      const rows = await pool.query(
+        `SELECT ca.id, ca.title, ca.summary, ca.created_at
+         FROM casts ca
+         JOIN calendars c ON c.id = ca.calendar_id
+         WHERE c.binder_id = $1 AND ca.deleted_at IS NULL AND (ca.title ILIKE $2 OR ca.summary ILIKE $2)
+         ORDER BY ca.created_at DESC LIMIT $3`,
+        [binderId, pattern, lim]
+      );
+      result.casts = rows.rows;
     }
 
     return result;
