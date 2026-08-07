@@ -456,12 +456,38 @@ class BinderService {
   //
   // ⚠️ 인가는 501 이전에 통과시킨다 — 비멤버가 호출 가능하면 진입점 존재 자체가 새어 나간다.
 
+  // RLY-20260806-099 — api.md:2276-2289가 문서화한 응답 5개 필드 중 storage_bytes_used·
+  // storage_limit_bytes를 실제로 채운다. binder_storage_usage는 서버가 이미 정확히 유지하지만
+  // (mediaService·cleanupJobs가 갱신) 클라에 전달하는 채널이 이 엔드포인트 하나뿐이었고 그게
+  // 통째로 501이라 값 자체가 절대 도달하지 못했다(SC-binder-files.md §5 액션A·§16-5).
+  // tier·storage 두 값은 presign이 이미 쓰는 기존 헬퍼(AttachmentDAO.getTier·
+  // getStorageLimitBytes·getBytesUsed)를 그대로 재사용한다 — 새 쿼리·새 로직이 아니다.
+  // status·current_period_end는 binder_boosts 원본 행을 그대로 반환한다(구매 검증·발급 로직은
+  // 손대지 않았다 — verifyBoost·transferBoost·cancelBoost는 여전히 501, Boost 구매 흐름은
+  // 별도 Task). 활성 Boost 행이 없으면(Free tier) status·current_period_end는 null이다.
   async getBoost(binderId, userId) {
     await requireBinderMember(pool, binderId, userId);
-    throw new NotImplementedError(
-      'Binder Boost 조회 기능은 아직 구현되지 않았습니다',
-      'BINDER_BOOST_GET_NOT_IMPLEMENTED'
-    );
+    const { AttachmentDAO } = require('../daos/attachmentDAO');
+
+    const [tier, storageLimitBytes, bytesUsed, boostRow] = await Promise.all([
+      AttachmentDAO.getTier(pool, binderId),
+      AttachmentDAO.getStorageLimitBytes(pool, binderId),
+      AttachmentDAO.getBytesUsed(pool, binderId),
+      pool.query(
+        `SELECT status, current_period_end FROM binder_boosts WHERE binder_id = $1`,
+        [binderId]
+      ),
+    ]);
+    const boost = boostRow.rows[0] || null;
+
+    return {
+      binder_id: binderId,
+      tier,
+      status: boost ? boost.status : null,
+      current_period_end: boost ? boost.current_period_end : null,
+      storage_bytes_used: bytesUsed,
+      storage_limit_bytes: storageLimitBytes,
+    };
   }
 
   async checkBoost(binderId, userId) {
