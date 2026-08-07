@@ -27,9 +27,20 @@ class AttachmentDAO {
     return result.rows[0];
   }
 
+  /**
+   * RLY-20260806-093(S4) — 엔티티 이미지 3종(USER_AVATAR·BINDER_AVATAR·CAST_COVER)은 이
+   * 메서드로 조회할 수 없다(media.md §2-3 — 정체성 데이터, 숨김/삭제 부적절). 현재 코드베이스의
+   * 유일한 호출부가 `binderService.deleteAttachment`(파일함 개별 삭제)의 존재·소유 확인이다 —
+   * 여기서 못 찾게 하면 그 함수의 기존 `if (!attachment ...) throw NotFoundError`가 그대로
+   * 발동해 "파일함에서 프로필 사진을 지울 수 있던" 결함이 닫힌다(`binderService.js`는 다른
+   * Writer가 작업 중이라 직접 건드리지 않았다 — 이 DAO 메서드 안에서만 닫는다). 새 호출부가
+   * 필요해지면(예: 관리자 도구) 전용 메서드로 분리한다 — 지금은 유일 호출부라 분리하지 않는다.
+   */
   async findById(conn, id) {
     const result = await conn.query(
-      `SELECT * FROM attachments WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT * FROM attachments
+       WHERE id = $1 AND deleted_at IS NULL
+         AND context_type NOT IN ('USER_AVATAR','BINDER_AVATAR','CAST_COVER')`,
       [id]
     );
     return result.rows[0] || null;
@@ -52,6 +63,12 @@ class AttachmentDAO {
       'a.binder_id = $1',
       'a.deleted_at IS NULL',
       "a.status IN ('ready', 'hidden')",
+      // RLY-20260806-093(S4) — media.md §2-3: 엔티티 이미지 3종은 파일함 목록 대상이 아니다
+      // (정체성 데이터, 첨부처럼 다루면 안 된다). USER_AVATAR는 binder_id가 null이라 위
+      // 'a.binder_id = $1' 조건으로 이미 자연히 빠지지만, BINDER_AVATAR·CAST_COVER는
+      // binder_id가 그 바인더로 채워져 있어(§4-1 서버 Step7) 이 조건 없이는 새어 나온다 —
+      // S1·S2가 이 두 종류의 attachments 행을 만들기 시작한 순간부터 있던 결함이었다.
+      "a.context_type NOT IN ('USER_AVATAR','BINDER_AVATAR','CAST_COVER')",
       `(a.context_type <> 'SECTION_MESSAGE' OR EXISTS (
         SELECT 1 FROM section_messages sm
         JOIN sections s ON s.id = sm.section_id
@@ -205,6 +222,16 @@ class AttachmentDAO {
     return result.rowCount;
   }
 
+  /**
+   * RLY-20260806-093(S4) — media.md §2-3·§6: 엔티티 이미지 3종은 이 생명주기 cron의 대상이
+   * 아니다("정체성 데이터 — 숨김/삭제 부적절"). 이 제외가 빠지면 실제로 발생하는 결과: (1)
+   * BINDER_AVATAR·CAST_COVER는 binder_id가 채워져 있어 그 바인더에 활성 Boost가 없으면 이
+   * LEFT JOIN 조건(`db.binder_id IS NULL`)을 그대로 통과한다. (2) USER_AVATAR는 binder_id가
+   * null이라 `a.binder_id = db.binder_id`가 어떤 행과도 매치하지 않으므로 LEFT JOIN 결과도
+   * `db.binder_id IS NULL`이 되어 — **바인더가 아예 없는데도** 같은 조건을 통과해버린다. 즉
+   * 세 종류 다 이 필터 없이는 새어 나온다. 이 필터가 빠지면 1년 뒤 프로필 사진이 숨김
+   * 처리(hidden)돼 Boost 결제 없이는 볼 수 없게 된다(media.md §6 경고 그대로).
+   */
   async findExpiredFreeAttachments(conn) {
     const result = await conn.query(
       `SELECT a.id, a.storage_key, a.binder_id
@@ -216,18 +243,27 @@ class AttachmentDAO {
        WHERE a.status = 'ready'
          AND a.deleted_at IS NULL
          AND db.binder_id IS NULL
-         AND a.created_at < NOW() - INTERVAL '365 days'`
+         AND a.created_at < NOW() - INTERVAL '365 days'
+         AND a.context_type NOT IN ('USER_AVATAR','BINDER_AVATAR','CAST_COVER')`
     );
     return result.rows;
   }
 
+  /**
+   * RLY-20260806-093(S4) — 위와 같은 이유의 방어(defense-in-depth). `findExpiredFreeAttachments`
+   * 가 엔티티 이미지 3종을 애초에 `status='hidden'`으로 만들지 않으므로 이 쿼리(`status='hidden'`
+   * 조건)는 이론상 이 3종을 볼 일이 없지만, media.md §6이 "본 절의 모든 cron"이라고 명시적으로
+   * 못박은 대로 각 쿼리에 동일 제외를 반복해 둔다(§6 도입부 주석 — 가독성을 위해 문서엔 한 번만
+   * 적혀 있지만 코드는 각 쿼리에 반복하는 게 안전하다는 판단, 위 쿼리와 같은 근거).
+   */
   async findByStorageClassForTransition(conn, storageClass, hiddenInterval) {
     const result = await conn.query(
       `SELECT id, storage_key FROM attachments
        WHERE status = 'hidden'
          AND deleted_at IS NULL
          AND storage_class = $1
-         AND hidden_at < NOW() - INTERVAL '${hiddenInterval}'`,
+         AND hidden_at < NOW() - INTERVAL '${hiddenInterval}'
+         AND context_type NOT IN ('USER_AVATAR','BINDER_AVATAR','CAST_COVER')`,
       [storageClass]
     );
     return result.rows;
