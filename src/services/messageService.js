@@ -119,7 +119,20 @@ class MessageService {
       }
       if (data.embeds && data.embeds.length > 0) {
         await this._assertEmbedTargetsAccessible(client, data.embeds, section.binder_id);
-        embeds = await MessageDAO.insertEmbeds(client, messageId, data.embeds);
+        // RLY-20260806-130 — 종단 검증 중 발견(Blocker): 클라 `EmbedRequest` DTO
+        // (lib/data/dto/section_message/embed_request.dart)에 `id` 필드가 아예 없다. 그런데
+        // `message_embeds.id`는 `UUID NOT NULL PRIMARY KEY`이고 기본값이 없다(config/schema.sql:704)
+        // — `MessageDAO.insertEmbeds`가 `e.id`를 그대로 파라미터에 꽂는다. 클라가 실제로 보낼 수
+        // 있는 요청(EmbedRequest.toJson())에는 id가 없으므로 이 경로로 만들어지는 모든 임베드
+        // (F7 이전부터 있던 link·image·video 포함, F7의 5종도 전부)가 여기서 NOT NULL 위반으로
+        // 깨진다 — 기존 회귀(messageEmbedTargetAuthzRegression.test.js)는 fixture가 매번
+        // 수동으로 `id`를 채워 넣어 이 공백을 가려 왔다(실제 클라 DTO 형태를 반영하지 않음).
+        // 첨부(attachments)는 presign 단계에서 클라가 UUID v7을 미리 생성해 로컬 optimistic
+        // 행과 서버 행을 같은 id로 맞춰야 하지만, 임베드는 그 필요가 없다 — 아래 mentions와
+        // 정확히 같은 상황(클라가 id를 안 보내는 하위 엔티티)이라 그 처리를 그대로 따른다
+        // (data.mention_user_ids.map(... id: generateUUID() ...), 새 패턴을 만들지 않았다).
+        const embedsData = data.embeds.map((e) => ({ ...e, id: e.id || generateUUID() }));
+        embeds = await MessageDAO.insertEmbeds(client, messageId, embedsData);
       }
       if (data.mention_user_ids && data.mention_user_ids.length > 0) {
         const mentionData = data.mention_user_ids.map((uid) => ({
