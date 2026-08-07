@@ -49,6 +49,7 @@ function makeDb() {
     events: [],
     tasks: [],
     specialDays: [],
+    casts: [], // RLY-20260806-138 — events·tasks·special_days와 같은 축인데 cascade에서 빠져 있던 것
     eventInstances: [],
     taskInstances: [],
     eventParticipants: [],
@@ -89,6 +90,15 @@ function makeConn(db) {
       if (s.startsWith('UPDATE special_days SET deleted_at')) {
         const guarded = s.includes('deleted_at IS NULL');
         db.specialDays.filter((r) => r.calendar_id === p0 && (!guarded || !r.deleted_at))
+          .forEach((r) => { r.deleted_at = fakeNow(); r.updated_at = r.deleted_at; });
+        return { rows: [] };
+      }
+      // RLY-20260806-138 — cascadeSoftDelete가 casts도 이제 지운다(events·tasks·special_days와
+      // 같은 모양). 이 mock 분기가 없으면 실제 DAO가 낸 UPDATE casts 쿼리가 "Unhandled query"로
+      // 튕겨 이 스위트 전체가 죽는다 — 즉 이 분기 자체가 "cascade가 실제로 그 쿼리를 낸다"의 증거다.
+      if (s.startsWith('UPDATE casts SET deleted_at')) {
+        const guarded = s.includes('deleted_at IS NULL');
+        db.casts.filter((r) => r.calendar_id === p0 && (!guarded || !r.deleted_at))
           .forEach((r) => { r.deleted_at = fakeNow(); r.updated_at = r.deleted_at; });
         return { rows: [] };
       }
@@ -190,6 +200,7 @@ async function testCalendarCascadeAllTables() {
   db.events.push({ id: 'ev1', calendar_id: 'cal1', deleted_at: null });
   db.tasks.push({ id: 'tk1', calendar_id: 'cal1', deleted_at: null });
   db.specialDays.push({ id: 'sd1', calendar_id: 'cal1', deleted_at: null });
+  db.casts.push({ id: 'ca1', calendar_id: 'cal1', deleted_at: null });
   db.eventInstances.push({ id: 'ei1', event_id: 'ev1', deleted_at: null });
   db.taskInstances.push({ id: 'ti1', task_id: 'tk1', deleted_at: null });
   db.eventParticipants.push({ instance_id: 'ei1', user_id: 'u1', deleted_at: null });
@@ -204,6 +215,7 @@ async function testCalendarCascadeAllTables() {
   check('① events.deleted_at 세팅', !!db.events[0].deleted_at);
   check('① tasks.deleted_at 세팅', !!db.tasks[0].deleted_at);
   check('① special_days.deleted_at 세팅', !!db.specialDays[0].deleted_at);
+  check('① casts.deleted_at 세팅(RLY-20260806-138 — search()·getItems·EMBED_TARGET_VALIDATORS가 이 컬럼만 보고 판정하므로 여기서 안 지워지면 셋 다 새는 지점이었다)', !!db.casts[0].deleted_at);
   check('① event_instances.deleted_at 세팅', !!db.eventInstances[0].deleted_at);
   check('① task_instances.deleted_at 세팅', !!db.taskInstances[0].deleted_at);
   check('① event_participants.deleted_at 세팅', !!db.eventParticipants[0].deleted_at);
@@ -224,6 +236,8 @@ async function testBinderCascadeRecursive() {
   db.calendars.push({ id: 'calB', binder_id: 'bX', deleted_at: null });
   db.events.push({ id: 'evA', calendar_id: 'calA', deleted_at: null });
   db.events.push({ id: 'evB', calendar_id: 'calB', deleted_at: null });
+  db.casts.push({ id: 'caA', calendar_id: 'calA', deleted_at: null });
+  db.casts.push({ id: 'caB', calendar_id: 'calB', deleted_at: null });
 
   await BinderDAO.cascadeSoftDelete(makeConn(db), 'bX');
 
@@ -232,6 +246,8 @@ async function testBinderCascadeRecursive() {
   check('② calendars 둘 다 deleted_at(재귀 대상 전부)', db.calendars.every((r) => !!r.deleted_at));
   check('② 각 캘린더의 자식(events)까지 재귀적으로 deleted_at — calA', !!db.events.find((e) => e.id === 'evA').deleted_at);
   check('② 각 캘린더의 자식(events)까지 재귀적으로 deleted_at — calB', !!db.events.find((e) => e.id === 'evB').deleted_at);
+  check('② 바인더 삭제가 캘린더 경유로 casts까지 재귀 도달 — calA(138)', !!db.casts.find((c) => c.id === 'caA').deleted_at);
+  check('② 바인더 삭제가 캘린더 경유로 casts까지 재귀 도달 — calB(138)', !!db.casts.find((c) => c.id === 'caB').deleted_at);
   check('② binders.deleted_at 세팅', !!db.binders[0].deleted_at);
 }
 
@@ -243,11 +259,16 @@ async function testAlreadyDeletedNotOverwritten() {
   db.events.push({ id: 'ev1', calendar_id: 'cal1', deleted_at: 'T_OLD_FIXED', updated_at: 'T_OLD_FIXED' });
   // ev2는 아직 살아있음 — cascade로 새로 지워져야 함.
   db.events.push({ id: 'ev2', calendar_id: 'cal1', deleted_at: null });
+  // ca1도 같은 대조(138) — 새로 추가한 casts UPDATE에도 멱등 가드(deleted_at IS NULL)가 있는지.
+  db.casts.push({ id: 'ca1', calendar_id: 'cal1', deleted_at: 'T_OLD_FIXED', updated_at: 'T_OLD_FIXED' });
+  db.casts.push({ id: 'ca2', calendar_id: 'cal1', deleted_at: null });
 
   await CalendarDAO.cascadeSoftDelete(makeConn(db), 'cal1');
 
   check('④ 이미 삭제된 행(ev1)의 deleted_at은 그대로 T_OLD_FIXED', db.events[0].deleted_at === 'T_OLD_FIXED');
   check('④ 살아있던 행(ev2)은 새로 삭제됨(T_OLD_FIXED와 다른 값)', !!db.events[1].deleted_at && db.events[1].deleted_at !== 'T_OLD_FIXED');
+  check('④ 이미 삭제된 cast(ca1)의 deleted_at은 그대로 T_OLD_FIXED(138)', db.casts[0].deleted_at === 'T_OLD_FIXED');
+  check('④ 살아있던 cast(ca2)는 새로 삭제됨(138)', !!db.casts[1].deleted_at && db.casts[1].deleted_at !== 'T_OLD_FIXED');
 }
 
 // ── ⑤ 기본 캘린더(=바인더의 마지막 캘린더) 삭제 차단 — CalendarService.delete 실제 구동 ──────

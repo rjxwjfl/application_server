@@ -113,6 +113,20 @@ class CalendarDAO {
        WHERE calendar_id = $1 AND deleted_at IS NULL`,
       [calendarId]
     );
+    // RLY-20260806-138 — events·tasks·special_days와 같은 축(calendar_id 직접 소속)인데 casts만
+    // 이 cascade에서 빠져 있었다. 발견 경로: search()·getItems(128)·EMBED_TARGET_VALIDATORS(100)
+    // 전부 `JOIN calendars c ... WHERE c.binder_id = $1 AND ca.deleted_at IS NULL`처럼 캘린더
+    // 자신의 deleted_at은 안 보고 casts.deleted_at만 본다 — event/task/special_day는 그래도
+    // 안전한데(이 cascade가 그 셋은 이미 함께 지운다) casts만 지워지지 않아 **캘린더나 바인더가
+    // 소프트 삭제돼도 그 캘린더의 cast가 검색·picker·임베드 링크에 계속 살아 있었다**(정상 조회
+    // 경로 castService.getCasts는 requireBinderMemberByCalendarId가 먼저 캘린더 존재를 확인해
+    // 이 문제를 안 겪는다 — 우회 경로에서만 샌다). 이 한 줄로 세 호출부 전부가 한 번에 닫힌다
+    // (search()·getItems·EMBED_TARGET_VALIDATORS 코드 자체는 건드리지 않았다).
+    await conn.query(
+      `UPDATE casts SET deleted_at = now(), updated_at = now()
+       WHERE calendar_id = $1 AND deleted_at IS NULL`,
+      [calendarId]
+    );
     await conn.query(
       `UPDATE event_instances ei SET deleted_at = now(), updated_at = now()
        FROM events e
