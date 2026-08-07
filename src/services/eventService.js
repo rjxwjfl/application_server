@@ -623,14 +623,25 @@ class EventService {
     });
   }
 
+  // RLY-20260806-114 — 강퇴는 item_edit_role(editor, 이벤트 필드 수정·삭제 기준)이 아니라
+  // 별도의 더 엄격한 축이다. SC-event.md가 3곳에서(§1-Background:69·§8-1:565·§7 API맵:449)
+  // 일관되게 "apply 승인/거부·rejected 복원·강퇴는 승인 권한자(author 또는 role≤1=master·
+  // manager)만"이라고 명시하고, api.md:958도 동일("master·manager 또는 본인 탈퇴") — 편집
+  // 권한 정정(2026-08-06, §11 표 597-603행)과 달리 강퇴 쪽엔 상충·정정 이력이 없다. Task의
+  // "editor 이상"(SC-task.md:141)과는 의도적으로 다른 축이다 — 동형 문서라 착각하기 쉬운
+  // 지점(107·111이 이미 지적).
   async removeParticipant(event_id, instance_id, target_user_id, context) {
     const { binder_id } = await withTransaction(async (client) => {
       const instance = await EventDAO.findInstanceContext(client, event_id, instance_id);
       if (!instance) throw new NotFoundError('이벤트 인스턴스를 찾을 수 없습니다');
       const actor = await BinderDAO.getMember(client, instance.binder_id, context.sender_id);
       if (!actor || actor.deleted_at) throw new ForbiddenError('바인더 멤버만 제거할 수 있습니다');
-      if (target_user_id !== context.sender_id && actor.role > 2)
-        throw new ForbiddenError('편집자 이상만 타인을 제거할 수 있습니다');
+      if (target_user_id !== context.sender_id) {
+        const isAuthor = instance.author_id === context.sender_id;
+        if (!isAuthor && actor.role > 1) {
+          throw new ForbiddenError('작성자 또는 관리자(master·manager)만 참여자를 제거할 수 있습니다');
+        }
+      }
       await EventDAO.removeParticipant(client, instance_id, target_user_id);
       return { binder_id: instance.binder_id };
     });

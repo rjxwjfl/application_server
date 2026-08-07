@@ -44,6 +44,20 @@ async function syncSpecialDayReminders(conn, specialDay) {
   });
 }
 
+// RLY-20260806-114 — api.md:1173 "수정... 작성자 + Binder editor 이상"·DELETE 동일 축인데
+// update/delete가 role만 확인하고 작성자 예외가 없었다(과잉 제한 — 본인이 만든 기념일도
+// role<=2 아니면 못 고침). eventService·taskService의 assertCanEditItem과 동일 상수·구조
+// (이 저장소가 각 파일에 로컬 복제하는 기존 관행 — Event/Task도 공유 유틸이 아니라 파일마다
+// 독립 정의돼 있다. 여기서도 새 공유 유틸을 만들지 않고 그 관행을 따른다).
+const ITEM_EDIT_ROLE_DEFAULT = 2;
+
+function assertCanEditItem(authorId, userId, member) {
+  if (authorId === userId) return;
+  if (member.role > ITEM_EDIT_ROLE_DEFAULT) {
+    throw new ForbiddenError('작성자 또는 편집자 이상만 수정·삭제할 수 있습니다');
+  }
+}
+
 class SpecialDayService {
   async getById(id, userId) {
     const day = await SpecialDayDAO.findById(pool, id);
@@ -124,7 +138,8 @@ class SpecialDayService {
 
     const cal = await CalendarDAO.findById(pool, specialDay.calendar_id);
     const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
-    if (!member || member.deleted_at || member.role > 2) throw new ForbiddenError('권한이 없습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('권한이 없습니다');
+    assertCanEditItem(specialDay.author_id, context.sender_id, member);
 
     // base_date·reminder_offsets 변경 시 발송 원장을 다시 파생해야 하므로(지시 §2), 갱신 행
     // UPDATE와 파생을 한 트랜잭션으로 묶는다 — 부분 반영(행은 바뀌었는데 원장은 옛 값) 방지.
@@ -152,7 +167,8 @@ class SpecialDayService {
 
     const cal = await CalendarDAO.findById(pool, specialDay.calendar_id);
     const member = await BinderDAO.getMember(pool, cal.binder_id, context.sender_id);
-    if (!member || member.deleted_at || member.role > 2) throw new ForbiddenError('권한이 없습니다');
+    if (!member || member.deleted_at) throw new ForbiddenError('권한이 없습니다');
+    assertCanEditItem(specialDay.author_id, context.sender_id, member);
 
     // SC-reminder 액션D — 부모 삭제 시 발송 원장 hard delete(별도 history 테이블 없음).
     // eventDAO·taskDAO 쪽 동일 정리는 RLY-20260806-027(삭제 전파) 담당이라 여기서 건드리지 않는다
