@@ -148,14 +148,18 @@ class AttachmentDAO {
   // Step5 성공 종결 — status='ready' + thumbnail_url(파생 미디어 있는 타입만, 없으면 null 유지).
   // claim_token 일치를 WHERE에 건다 — lease 만료 후 다른 워커가 이미 재claim했으면 이 UPDATE는
   // 0행 매칭으로 조용히 무효화된다(reminderDAO.markSent와 동일 원리).
-  async markReady(conn, id, claimToken, thumbnailUrl) {
+  // RLY-20260806-108 — durationSecs 파라미터 추가(오디오·비디오 전용, media.md:356·367).
+  // 생략(undefined)이면 기존 값을 그대로 둔다(COALESCE) — 이미지·엔티티 이미지 3종의 기존
+  // 호출부는 5번째 인자를 넘기지 않으므로 동작 불변.
+  async markReady(conn, id, claimToken, thumbnailUrl, durationSecs) {
     const result = await conn.query(
       `UPDATE attachments
        SET status = 'ready', thumbnail_url = COALESCE($3, thumbnail_url),
+           duration_secs = COALESCE($4, duration_secs),
            claim_token = NULL, claimed_at = NULL, updated_at = now()
        WHERE id = $1 AND claim_token = $2
        RETURNING id`,
-      [id, claimToken, thumbnailUrl || null]
+      [id, claimToken, thumbnailUrl || null, durationSecs ?? null]
     );
     return result.rows.length > 0;
   }

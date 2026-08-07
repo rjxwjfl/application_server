@@ -56,6 +56,7 @@ function seedAttachment(fields) {
     display_order: 0,
     storage_class: 'standard',
     thumbnail_url: null,
+    duration_secs: null,
     claim_token: null,
     claimed_at: null,
     attempt_count: 0,
@@ -147,13 +148,14 @@ async function mockQuery(sql, params = []) {
     return { rows: [{ id: att.id }] };
   }
 
-  // AttachmentDAO.markReady
+  // AttachmentDAO.markReady — RLY-20260806-108: 4번째 파라미터(durationSecs)도 COALESCE로 반영.
   if (s.startsWith("UPDATE attachments SET status = 'ready', thumbnail_url")) {
-    const [id, claimToken, thumbnailUrl] = params;
+    const [id, claimToken, thumbnailUrl, durationSecs] = params;
     const att = db.attachments[id];
     if (!att || att.claim_token !== claimToken) return { rows: [] };
     att.status = 'ready';
     if (thumbnailUrl) att.thumbnail_url = thumbnailUrl;
+    if (durationSecs !== null && durationSecs !== undefined) att.duration_secs = durationSecs;
     att.claim_token = null;
     att.claimed_at = null;
     att.updated_at = new Date().toISOString();
@@ -468,6 +470,10 @@ async function run() {
     assert.strictEqual(att.status, 'ready');
     assert.ok(att.thumbnail_url.includes(`derivatives/${id}/poster.webp`), '비디오는 poster.webp를 써야 한다');
     assert.ok(gcsCdn[`derivatives/${id}/poster.webp`], 'rally-cdn에 포스터가 있어야 한다');
+    // RLY-20260806-108 — media.md:356·367: 재생 길이는 Worker가 원본에서 직접 뽑는다(클라가
+    // confirm 시점에 안 보내므로). 2초짜리 테스트 클립이라 근사값만 확인한다.
+    assert.ok(typeof att.duration_secs === 'number' && att.duration_secs > 1.5 && att.duration_secs < 2.5,
+      `duration_secs가 실제 길이(~2초)를 반영해야 한다 — 실제값=${att.duration_secs}`);
   });
 
   // ═══════════════════════════════════════════════════════════════════
@@ -761,6 +767,49 @@ async function run() {
     assert.strictEqual(db.attachments[id].status, 'ready');
     assert.ok(gcsCdn[`derivatives/${id}/thumb.webp`], '첨부 6종은 여전히 thumb.webp를 만든다');
     assert.ok(!gcsCdn[`derivatives/${id}/full.webp`], '첨부 6종은 full.webp를 만들지 않는다 — 1080px 파생은 엔티티 이미지 3종 전용');
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ⑭ RLY-20260806-108 — media.md:356·367(오디오 재생 길이). §16-13 등 클라 협의 없이
+  //   서버 판정만으로 구현했다(판정 근거는 이번 Task 보고서 참조 — media_api.dart의 confirm이
+  //   path 파라미터뿐이라 클라가 confirm 시점에 값을 안 보낸다, Worker가 원본에서 직접 뽑는
+  //   쪽으로 판정).
+  // ═══════════════════════════════════════════════════════════════════
+  await check('⑭ 오디오 재생 길이 — Worker가 원본에서 직접 뽑아 duration_secs에 채운다(파생 미디어는 없음)', async () => {
+    const { execFile } = require('child_process');
+    const ffmpegPath = require('ffmpeg-static');
+    const os = require('os');
+    const path = require('path');
+    const tmpAudio = path.join(os.tmpdir(), `rally-audio-test-${Date.now()}.mp3`);
+    await new Promise((resolve, reject) => {
+      execFile(ffmpegPath, ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', tmpAudio], (err) => (err ? reject(err) : resolve()));
+    });
+    const audioBytes = await fs.readFile(tmpAudio);
+    await fs.rm(tmpAudio, { force: true });
+
+    const key = 'attachments/b1/2026/08/voice.mp3';
+    gcsMedia[key] = audioBytes;
+    const id = seedAttachment({ status: 'processing', storage_key: key, content_type: 'audio/mpeg', file_size: audioBytes.length });
+
+    await dispatchMediaWorker();
+
+    const att = db.attachments[id];
+    assert.strictEqual(att.status, 'ready');
+    assert.strictEqual(att.thumbnail_url, null, '오디오는 파생 미디어(썸네일)가 없다(media.md:252) — duration_secs만 채운다');
+    assert.ok(typeof att.duration_secs === 'number' && att.duration_secs > 2.5 && att.duration_secs < 3.5,
+      `duration_secs가 실제 길이(~3초)를 반영해야 한다 — 실제값=${att.duration_secs}`);
+  });
+
+  await check('⑮ 대조군 — 이미지는 duration_secs를 안 건드린다(오디오·비디오 전용 로직이 이미지로 안 샌다)', async () => {
+    const jpegBytes = await makeJpegWithGpsAndOrientation();
+    const key = 'attachments/b1/2026/08/no-duration.jpg';
+    gcsMedia[key] = jpegBytes;
+    const id = seedAttachment({ status: 'processing', storage_key: key, content_type: 'image/jpeg', file_size: jpegBytes.length });
+
+    await dispatchMediaWorker();
+
+    assert.strictEqual(db.attachments[id].status, 'ready');
+    assert.strictEqual(db.attachments[id].duration_secs, null, '이미지는 duration_secs가 계속 null이어야 한다');
   });
 
   console.log(`\n[mediaWorkerJobs] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);

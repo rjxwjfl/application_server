@@ -299,6 +299,42 @@ function generateVideoPoster(inputFilePath, outputFilePath) {
   });
 }
 
+/**
+ * Step4 — 오디오·비디오의 재생 길이(초) 추출. media.md:356·367(RLY-20260806-108로 판정·구현) —
+ * 클라(`MediaApi.confirm`)는 path 파라미터 `id` 하나만 보내는 Retrofit 인터페이스라
+ * confirm 요청 바디 자체가 없다(`lib/data/sources/remote/apis/media_api.dart:17-18` 확인,
+ * 읽기만 — 클라 코드는 고치지 않았다) — "클라가 confirm 시점에 측정값을 보낸다"는 media.md:356의
+ * 전제가 지금 성립하지 않는다. 그래서 서버가 원본 파일에서 직접 뽑는 쪽(api.md:2463 "Worker
+ * 처리 후 갱신"과 같은 방향)으로 판정했다 — thumbnail_url·poster.webp와 동일하게 Step4가
+ * 원본에서 파생시키는 값 중 하나로 다룬다(이 저장소의 다른 파생값과 같은 처리 방식).
+ *
+ * `ffprobe`(전용 프로브 도구) 바이너리는 이 저장소에 없다 — `ffmpeg-static`은 `ffmpeg`
+ * 실행파일만 번들한다. 대신 `ffmpeg -i {input}`을 출력 파일 없이 실행하면 컨테이너 헤더만
+ * 읽고 stderr에 `Duration: HH:MM:SS.ms` 를 찍은 뒤 "출력 파일이 없다"는 에러로 즉시
+ * 종료한다(전체 디코드 없이 메타데이터만 읽는 표준적인 방법 — 새 바이너리 의존을 추가하지
+ * 않는다). 그래서 이 함수는 **항상 비영(non-zero) exit code로 끝나는 것이 정상**이며,
+ * `error` 유무가 아니라 stderr의 Duration 패턴 존재 여부로 성패를 가른다.
+ * @param {string} filePath - GCS에서 내려받은 임시 파일 경로.
+ * @returns {Promise<number|null>} 재생 길이(초, 소수점 포함). 못 찾으면 null(호출부가 로그만
+ *   남기고 넘어간다 — 재생시간은 부가 정보라 이것 때문에 첨부 처리 전체를 실패시키지 않는다).
+ */
+function getMediaDurationSecs(filePath) {
+  return new Promise((resolve) => {
+    execFile(
+      ffmpegPath,
+      ['-i', filePath],
+      { timeout: 30 * 1000 },
+      (_error, _stdout, stderr) => {
+        const match = /Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(stderr || '');
+        if (!match) { resolve(null); return; }
+        const [, hh, mm, ss] = match;
+        const secs = Number(hh) * 3600 + Number(mm) * 60 + Number(ss);
+        resolve(Number.isFinite(secs) && secs >= 0 ? secs : null);
+      }
+    );
+  });
+}
+
 module.exports = {
   detectActualMimeType,
   stripExif,
@@ -310,6 +346,7 @@ module.exports = {
   generateImageThumbnail,
   generateImageDerivative,
   generateVideoPoster,
+  getMediaDurationSecs,
   EXIF_STRIPPABLE_MIME_TYPES,
   PNG_METADATA_CHUNK_TYPES,
   ALLOWED_IMAGE_MIME_TYPES,
