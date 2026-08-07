@@ -44,6 +44,18 @@ const EMBED_TARGET_VALIDATORS = {
   `,
 };
 
+// RLY-20260806-103 — SC-messaging.md §20-1 Q2 "핀 한도: 섹션당 5개 고정 — BM tier 무관"·
+// §16-12 "초과 시 동작: ✅ 차단 + 사용자 명시 해제"(자동 최고령 unpin 아님). api.md:1902·1908이
+// PATCH .../pin에 "섹션당 5개 한도"·"Error 409 — 핀 한도 초과"를 이미 명시(HTTP 409는 기존
+// 계약 그대로 사용 — ConflictError). 해제(핀→비핀)는 이 한도 검증을 아예 타지 않는다.
+const PIN_LIMIT = 5;
+
+// RLY-20260806-103 — SC-messaging.md §20-2 V1 "TextField 질문(필수·최대 300자)"·
+// "ListView 옵션 N개(기본 2개·최대 10개)".
+const POLL_QUESTION_MAX_LENGTH = 300;
+const POLL_OPTIONS_MIN = 2;
+const POLL_OPTIONS_MAX = 10;
+
 class MessageService {
   async getMessages(sectionId, query) {
     const messages = await MessageDAO.getBySectionId(pool, sectionId, query);
@@ -99,6 +111,7 @@ class MessageService {
       let attachments = [];
       let embeds = [];
       let mentions = [];
+      let poll = null;
 
       if (data.attachments && data.attachments.length > 0) {
         attachments = await MessageDAO.linkAttachments(client, messageId, section.binder_id, context.sender_id, data.attachments);
@@ -114,8 +127,21 @@ class MessageService {
         }));
         mentions = await MessageDAO.insertMentions(client, messageId, mentionData);
       }
+      // RLY-20260806-103 — 투표 생성 경로 자체가 없었다(087·094가 두 번 등재). SC-messaging.md
+      // §20-2 V2 시나리오가 "[전송] 트랜잭션: section_messages INSERT + message_polls INSERT +
+      // message_poll_options bulk INSERT"를 메시지 생성과 **같은 트랜잭션**으로 명시하고,
+      // 클라 MessageCreateRequest에 이미 `poll` 필드(PollRequest)가 있다 — embeds와 동일하게
+      // inline 경로로 배선한다. §20-4가 별도 `POST /messages/{id}/poll`도 나열하지만 "메시지
+      // 작성 시점에 일괄 포함 가능"인 embeds와 달리 poll은 대안 언급이 없고, V2 시나리오 자체가
+      // 단일 트랜잭션을 전제해 별도 endpoint는 만들지 않았다(구현보고서 §근거).
+      // 인가는 새로 만들지 않는다 — 이 메서드에 도달했다는 것 자체가 컨트롤러의
+      // SectionService.assertContentAccess(§20-1 "투표 작성 권한: member 이상 — 메시지
+      // 작성 가능자")를 이미 통과했다는 뜻이다.
+      if (data.poll) {
+        poll = await this._createPoll(client, messageId, data.poll);
+      }
 
-      return { ...message, attachments, embeds, mentions };
+      return { ...message, attachments, embeds, mentions, poll };
     });
 
     eventBus.emit('sync', {
@@ -157,6 +183,52 @@ class MessageService {
       const { rowCount } = await client.query(validator, [e.target_id, binderId]);
       if (rowCount === 0) throw new ForbiddenError('링크 카드 대상에 접근할 권한이 없습니다', 'SECTION_ACCESS_DENIED');
     }
+  }
+
+  // RLY-20260806-103 — message_polls·message_poll_options INSERT. 094가 이미 파악해 둔
+  // 3테이블 관계(투표:옵션:기록)와 어긋나지 않게 한다 — 여기서는 poll·options만 만들고,
+  // message_poll_votes(투표 기록)는 건드리지 않는다(재투표 hard delete+재삽입은 기존
+  // votePoll 그대로). message_polls.UNIQUE(message_id) 제약이 "메시지당 최대 1 투표"를
+  // DB 레벨에서 이미 보장한다 — 이 경로는 새 messageId에만 호출되므로 위반 여지가 없다.
+  async _createPoll(client, messageId, pollData) {
+    const question = (pollData.question || '').trim();
+    if (!question) throw new BadRequestError('투표 질문은 필수입니다');
+    if (question.length > POLL_QUESTION_MAX_LENGTH) {
+      throw new BadRequestError(`투표 질문은 최대 ${POLL_QUESTION_MAX_LENGTH}자입니다`);
+    }
+
+    const options = pollData.options || [];
+    if (options.length < POLL_OPTIONS_MIN || options.length > POLL_OPTIONS_MAX) {
+      throw new BadRequestError(`투표 옵션은 ${POLL_OPTIONS_MIN}~${POLL_OPTIONS_MAX}개여야 합니다`);
+    }
+    if (options.some((o) => !o.option_text || !o.option_text.trim())) {
+      throw new BadRequestError('투표 옵션 텍스트는 비어 있을 수 없습니다');
+    }
+
+    const pollId = pollData.id || generateUUID();
+    const pollResult = await client.query(
+      `INSERT INTO message_polls (id, message_id, question, allow_multiple, is_anonymous, closes_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+       RETURNING id, message_id, question, allow_multiple, is_anonymous, closes_at, closed_at, created_at, updated_at`,
+      [pollId, messageId, question, !!pollData.allow_multiple, !!pollData.is_anonymous, pollData.closes_at || null]
+    );
+    const poll = pollResult.rows[0];
+
+    const values = [];
+    const params = [];
+    let idx = 1;
+    options.forEach((o, i) => {
+      values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, now())`);
+      params.push(o.id || generateUUID(), pollId, o.option_text.trim(), o.display_order ?? i);
+    });
+    const optionsResult = await client.query(
+      `INSERT INTO message_poll_options (id, poll_id, option_text, display_order, created_at)
+       VALUES ${values.join(', ')}
+       RETURNING id, poll_id, option_text, display_order, created_at`,
+      params
+    );
+
+    return { ...poll, options: optionsResult.rows };
   }
 
   async updateMessage(messageId, data, context) {
@@ -202,6 +274,17 @@ class MessageService {
     const { result, binder_id } = await withTransaction(async (client) => {
       const message = await MessageDAO.findById(client, messageId);
       if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
+
+      // RLY-20260806-103 — 한도는 "지금부터 핀을 거는" 액션에만 적용한다(해제는 무관,
+      // §16-12). message.is_pinned는 갱신 전(현재) 값 — 이게 false일 때만 곧 true로
+      // 바뀔 액션이므로 이 분기에서만 카운트를 확인한다.
+      if (!message.is_pinned) {
+        const pinnedCount = await MessageDAO.countPinned(client, message.section_id);
+        if (pinnedCount >= PIN_LIMIT) {
+          throw new ConflictError(`핀 한도(섹션당 ${PIN_LIMIT}개)를 초과했습니다`, 'PIN_LIMIT_EXCEEDED');
+        }
+      }
+
       const result = await MessageDAO.togglePin(client, messageId, context.sender_id);
       const section = await SectionDAO.findById(client, message.section_id);
       return { result, binder_id: section ? section.binder_id : null };

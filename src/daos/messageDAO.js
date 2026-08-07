@@ -98,6 +98,18 @@ class MessageDAO {
     return result.rows[0];
   }
 
+  // RLY-20260806-103 — 핀 한도(섹션당 5개, SC-messaging.md §20-1 Q2·§16-12) 사전 체크용.
+  // 호출부(messageService.togglePin)가 "지금부터 핀을 거는 액션"일 때만 이 카운트를 쓴다 —
+  // 해제는 한도 검증 대상이 아니다.
+  async countPinned(conn, sectionId) {
+    const { rows } = await conn.query(
+      `SELECT COUNT(*)::int AS count FROM section_messages
+       WHERE section_id = $1 AND is_pinned = TRUE AND deleted_at IS NULL`,
+      [sectionId]
+    );
+    return rows[0].count;
+  }
+
   // ============================================
   // Attachments (attachments 테이블 — context_type='SECTION_MESSAGE')
   // ============================================
