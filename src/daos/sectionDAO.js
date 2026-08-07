@@ -74,10 +74,22 @@ class SectionDAO {
     return rowCount > 0;
   }
 
-  async addMember(conn, sectionId, userId, id) {
+  // RLY-20260806-159 — 복원(restored) 경로가 기존 id를 무조건 유지해 클라가 낙관적으로
+  // 먼저 만든 로컬 행의 id를 반영하지 못했다(156이 등재, 멘션·반응과 동형 함정). id를 바꿔도
+  // 되는지 먼저 확인했다: section_members.id를 참조하는 FK가 없고(schema.sql 전수 확인 —
+  // "REFERENCES section_members" 0건), activity_feeds·audit_logs·reminders 같은 폴리모픽
+  // target_id로도 참조되지 않는다(TargetType에 SECTION_MEMBER 자체가 없음, grep 확인) —
+  // 참조가 전혀 없는 리프 PK라 안전하다.
+  //
+  // clientId(신규 5번째 인자, nullable)는 "클라가 실제로 이 id를 원한다"는 명시적 의도만
+  // 담는다 — 구 형태(평문 user_id 배열) 호출은 이 인자를 안 보내(null) 기존 id를 그대로
+  // 둔다(하위호환, §16-12 mentions/reactions와 동일 원칙: 클라가 안 보내면 서버가 손대지
+  // 않는다). id(4번째, 기존 인자)는 신규 INSERT 경로 전용 — NOT NULL 컬럼이라 여전히 항상
+  // 값이 필요하다(신 형태든 구 형태든 서비스가 이미 채워서 넘긴다).
+  async addMember(conn, sectionId, userId, id, clientId = null) {
     const { rows } = await conn.query(
       `WITH restored AS (
-         UPDATE section_members SET deleted_at = NULL, updated_at = now()
+         UPDATE section_members SET id = COALESCE($4, id), deleted_at = NULL, updated_at = now()
          WHERE id = (SELECT id FROM section_members
            WHERE section_id = $1 AND user_id = $2 AND deleted_at IS NOT NULL
            ORDER BY updated_at DESC LIMIT 1 FOR UPDATE)
@@ -90,7 +102,7 @@ class SectionDAO {
          ON CONFLICT (section_id, user_id) WHERE deleted_at IS NULL DO NOTHING
          RETURNING user_id
        ) SELECT user_id FROM restored UNION ALL SELECT user_id FROM inserted`,
-      [sectionId, userId, id]
+      [sectionId, userId, id, clientId]
     );
     return rows.length > 0;
   }

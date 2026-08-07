@@ -94,10 +94,12 @@ class SectionService {
   // 형태(`user_ids: [uuid]` 평문 배열)도 하위호환으로 받는다 — 새 패턴을 만들지 않았다.
   async addMembers(sectionId, membersInput, context) {
     if (!Array.isArray(membersInput) || membersInput.length === 0) throw new BadRequestError('user_ids 배열이 필요합니다');
+    // clientId — "클라가 실제로 이 id를 원한다"는 명시적 의도만 담는다(신 형태에서만 존재).
+    // id — 신규 INSERT 경로에 항상 필요한 값(신 형태면 clientId와 동일, 구 형태면 서버 발급).
     const normalized = membersInput.map((m) => (
       typeof m === 'string'
-        ? { id: generateUUID(), user_id: m }              // 구 형태 — 서버가 발급(기존 동작 유지)
-        : { id: m.id || generateUUID(), user_id: m.user_id } // 신 형태 — 클라 id 존중
+        ? { id: generateUUID(), user_id: m, clientId: null }             // 구 형태 — 서버가 발급(기존 동작 유지)
+        : { id: m.id || generateUUID(), user_id: m.user_id, clientId: m.id || null } // 신 형태 — 클라 id 존중
     ));
     // user_id 기준 중복 제거 — 신 형태는 객체라 Set으로 못 거른다(참조가 매번 달라 중복이
     // 하나도 안 걸러짐). 값(user_id) 기준으로 직접 거른다.
@@ -114,11 +116,11 @@ class SectionService {
       for (const m of uniqueMembers) {
         const target = await BinderDAO.getMember(client, section.binder_id, m.user_id);
         if (!target || target.deleted_at) throw new BadRequestError('모든 user_id는 활성 바인더 멤버여야 합니다');
-        // ⚠️ SectionDAO.addMember의 "복원(restored)" 경로(sectionDAO.js:79-84)는 소프트 삭제된
-        // 기존 행을 되살릴 때 그 행의 **기존 id를 그대로 유지**하고 여기서 넘긴 m.id는 쓰지
-        // 않는다(UPDATE에 id가 없음) — 신규 삽입일 때만 m.id가 실제로 쓰인다. 이 복원 경로의
-        // 계약(새 클라 id를 반영할지)은 이번 Task 범위가 아니라 그대로 뒀다 — 보고서에 명시.
-        if (await SectionDAO.addMember(client, sectionId, m.user_id, m.id)) added.push(m.user_id);
+        // RLY-20260806-159 — "복원(restored)" 경로도 이제 clientId가 있으면 그 id로 반영한다
+        // (section_members.id는 참조하는 FK·폴리모픽 target_id가 없어 안전하다고 확인했다 —
+        // sectionDAO.js addMember 주석 참조). clientId가 null(구 형태)이면 기존 id를 그대로
+        // 둔다(하위호환).
+        if (await SectionDAO.addMember(client, sectionId, m.user_id, m.id, m.clientId)) added.push(m.user_id);
       }
       return { binderId: section.binder_id, added_user_ids: added, member_count: await SectionDAO.countMembers(client, sectionId) };
     });
