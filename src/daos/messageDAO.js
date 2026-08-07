@@ -232,11 +232,29 @@ class MessageDAO {
   // Message Reactions 테이블
   // ============================================
 
+  // RLY-20260806-163 — uk_message_reactions_active(message_id,user_id,emoji)는 파샬 유니크
+  // (WHERE deleted_at IS NULL)인데 이 ON CONFLICT 절엔 그 predicate가 없었다. Postgres는
+  // 파샬 유니크 인덱스를 ON CONFLICT 추론 대상으로 잡으려면 동일한 predicate의 WHERE절이
+  // 반드시 있어야 한다 — 없으면 그 자체가 "there is no unique or exclusion constraint
+  // matching the ON CONFLICT specification"으로 던진다(실측: Postgres 15 컨테이너, 검증
+  // 후 즉시 제거). 즉 이미 활성 반응이 있는 상태에서 같은 사용자가 같은 이모지로 다시
+  // 반응을 추가하면(오프라인 큐 재전송, 더블탭 등) 그 즉시 예외 → asyncHandler를 거쳐
+  // 500. transport.md §7-1상 5xx는 재시도 대상이라 "다시 시도해도 절대 성공할 수 없는"
+  // 요청을 오프라인 큐가 영원히 재시도하며 막힌다.
+  //
+  // 의도는 그대로 "중복=성공, 기존 행 반환"(DO UPDATE) — WHERE절만 추가해 파샬
+  // 인덱스와 매칭시켰다. ⚠️ 단 `SET deleted_at = NULL`은 이 경로에서 실제로 소프트
+  // 삭제된 행을 되살리는 게 아니다 — 파샬 인덱스 predicate상 이 ON CONFLICT는 이미
+  // deleted_at IS NULL인(즉 항상 활성인) 행에만 매칭되므로 no-op이다(159의 GroupDAO
+  // 수정과 동일 사실, 실측 확인). removeReaction 후 재추가는 소프트 삭제된 행이
+  // 더는 파샬 인덱스에 안 걸려 충돌 자체가 안 나고, 매번 새 물리 행(새 id)이
+  // 만들어진다 — 옛 행은 소프트 삭제 상태로 남는다(반응은 section_members처럼
+  // "복원" CTE가 없어 원래도 재사용하지 않았다, 이번에 새로 생긴 차이가 아니다).
   async addReaction(conn, { id, message_id, user_id, emoji }) {
     const query = `
       INSERT INTO message_reactions (id, message_id, user_id, emoji, created_at, updated_at)
       VALUES ($1, $2, $3, $4, now(), now())
-      ON CONFLICT (message_id, user_id, emoji) DO UPDATE
+      ON CONFLICT (message_id, user_id, emoji) WHERE deleted_at IS NULL DO UPDATE
       SET deleted_at = NULL, updated_at = now()
       RETURNING id, message_id, user_id, emoji, created_at
     `;
@@ -268,6 +286,21 @@ class MessageDAO {
   // Message Mentions 테이블
   // ============================================
 
+  // RLY-20260806-163 — uk_message_mentions_active(message_id,user_id)도 파샬 유니크
+  // (WHERE deleted_at IS NULL)라 addReaction과 동형 결함이 있었다: predicate 없는
+  // ON CONFLICT는 그 자체가 던진다(실측: Postgres 15 컨테이너, 검증 후 즉시 제거).
+  //
+  // ⚠️ 의도는 반응과 다르게 잡았다 — DO UPDATE(중복=성공, 되살리기)가 아니라
+  // DO NOTHING이다. insertMentions는 createMessage 트랜잭션 안에서 **메시지 하나당
+  // 정확히 한 번, 한 배치로만** 호출된다(다른 호출부 없음, updateMessage도 멘션을
+  // 건드리지 않음 — 직접 확인). 반응처럼 "제거 후 재추가"가 일어날 통로 자체가 없어
+  // 되살릴 대상이 없다 — 이 ON CONFLICT는 클라가 같은 메시지의 mentions 배열에
+  // 같은 user_id를 중복으로 보낸 경우에 대한 방어용일 뿐이라 "성공이되 아무 것도
+  // 갱신하지 않는다"가 맞다. 실무 이유도 있다 — DO UPDATE는 **같은 INSERT 문 안에서
+  // 동일 키가 3번 이상 반복되면** "ON CONFLICT DO UPDATE command cannot affect row
+  // a second time"로 별도로 던진다(실측 확인) — mentions는 한 배열을 한 번에
+  // 다중 VALUES로 넣는 벌크 삽입이라 이 실패 모드에 그대로 노출된다. DO NOTHING은
+  // 같은 문 안의 중복이 몇 개든 안전하다.
   async insertMentions(conn, messageId, userIds) {
     if (!userIds || userIds.length === 0) return [];
 
@@ -283,7 +316,7 @@ class MessageDAO {
     const query = `
       INSERT INTO message_mentions (id, message_id, user_id)
       VALUES ${values.join(', ')}
-      ON CONFLICT (message_id, user_id) DO UPDATE SET deleted_at = NULL, updated_at = now()
+      ON CONFLICT (message_id, user_id) WHERE deleted_at IS NULL DO NOTHING
       RETURNING id, message_id, user_id
     `;
     const result = await conn.query(query, params);
