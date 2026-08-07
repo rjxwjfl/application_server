@@ -480,6 +480,24 @@ class MediaService {
       return;
     }
 
+    // RLY-20260806-096(S5) — USER_AVATAR는 binder_id가 null이라(§4-1 서버 Step7, 귀속 바인더
+    // 없음) 이 함수 끝의 기본 분기(requireBinderMember)로 떨어지면 본인을 포함해 누구에게도
+    // 항상 403이었다 — presign(_authorizeUserAvatarPresign)은 "본인만"으로 쓰기를 허용하는데
+    // 읽기(이 함수)는 그 누구도 못 읽는 비대칭이 있었다. 표시 자체는 CDN 공개 URL(image_url·
+    // thumbnail_url, media.md §5 "Signed URL 불필요")로 이미 되므로 이 엔드포인트(원본 signed
+    // URL)를 실제로 쓰는 클라 기능은 없어 보이지만, "아무도 못 읽는" 상태를 문서 근거 없이
+    // 그대로 방치하면 다음 사람이 왜 그런지 몰라 다시 조사해야 한다 — 존재하는 write 대칭
+    // (본인만)을 그대로 read에 적용해 닫는다. 인가를 느슨하게 만들지 않는다 — 본인만 통과.
+    if (context_type === 'USER_AVATAR') {
+      if (context_id !== userId) {
+        throw new ForbiddenError('본인 프로필 사진만 접근할 수 있습니다', 'AVATAR_FORBIDDEN');
+      }
+      return;
+    }
+    // BINDER_AVATAR·CAST_COVER는 binder_id가 채워져 있어(§4-1 서버 Step7 — BINDER_AVATAR는
+    // context_id와 동일, CAST_COVER는 그 캐스트가 속한 바인더) 아래 기본 분기로 이미 올바르게
+    // 걸린다(그 바인더 멤버면 통과) — 별도 분기가 필요 없다. 새로 추가하지 않는다.
+
     // EVENT · TASK · POST 등 나머지 binder 소속 컨텍스트 — 업로드 시점에 저장된 binder_id로 검증한다.
     await requireBinderMember(pool, binder_id, userId);
   }
