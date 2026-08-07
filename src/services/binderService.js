@@ -226,10 +226,19 @@ class BinderService {
     eventBus.emit('member:left', { user_id: userId, binder_id: binderId, device_uuid });
   }
 
+  // RLY-20260806-124 — Info(name·description·image_url·thumbnail_url)·Settings(is_public·
+  // is_searchable·require_approval) 둘 다 SC-binder-manage.md:14-15·api.md:329가 master·manager
+  // 라고 명시하는데(§7-1) 여기는 master(role===0)만 허용해 manager가 바인더 이름조차 못 고치는
+  // 과잉 제한이었다(User 판정 2026-08-07). requireBinderMember(minRole:1) — 다른 서비스가 쓰는
+  // 기존 관행 재사용, 새 게이트 아님. image_url·thumbnail_url은 이 함수를 거쳐도 null(제거)·
+  // undefined(미포함)만 통과하고(바로 아래 assertServerOnlyImageFields) 실제 값 대입은 여전히
+  // presign/confirm 경로(mediaService, master 전용 유지)로만 이뤄진다 — 이 변경으로 manager가
+  // 새 이미지를 "지정"할 수 있게 되는 건 아니고, 기존 이미지를 "제거"할 수 있게 되는 것뿐이다.
+  // deleteBinder·transferBinderMaster는 각자 독립된 role===0 검사를 그대로 유지한다(이 함수와
+  // 무관 — 여기서 넓히는 것과 별개로 손대지 않았다).
   async updateBinder(binderId, updateData, userId) {
     const result = await withTransaction(async (client) => {
-      const member = await BinderDAO.getMember(client, binderId, userId);
-      if (!member || member.role !== 0) throw new ForbiddenError('권한이 없습니다');
+      await requireBinderMember(client, binderId, userId, { minRole: 1 });
 
       // RLY-20260806-084 — image_url·thumbnail_url은 서버 전용 필드다(media.md §4-4 Step5·
       // api.md:146-150). null(사진 제거)·undefined(미포함)만 허용, 그 외 값은 400.
