@@ -539,6 +539,16 @@ class BinderService {
     if (!member || member.deleted_at) throw new ForbiddenError('바인더 멤버가 아닙니다');
     const attachment = await AttachmentDAO.findById(pool, attachmentId);
     if (!attachment || attachment.binder_id !== binderId) throw new NotFoundError('첨부 파일을 찾을 수 없습니다');
+
+    // RLY-20260806-121 — SC-binder-files.md:19·46·276·382-383 "파일 삭제 — 본인 업로드: 본인.
+    // 전체: master·manager." 가 전혀 집행되지 않아 role 무관하게 활성 멤버 아무나 서로의
+    // 업로드를 지울 수 있었다 — 위 548-550행 주석이 "master·manager가 타인 업로드를 지우는
+    // 경로"라고 이미 서술해 뒀는데 실제 인가 코드가 없었다. postService.delete 등 기존
+    // 작성자-or-role 관행과 동일 형태로 채운다(새 인가 설계 아님).
+    if (attachment.uploader_id !== userId && member.role > 1) {
+      throw new ForbiddenError('본인 업로드 또는 관리자(master·manager)만 삭제할 수 있습니다');
+    }
+
     if (attachment.context_type === 'SECTION_MESSAGE') {
       const sectionId = await SectionDAO.findSectionIdByMessage(pool, attachment.context_id);
       if (!sectionId || !(await SectionDAO.hasAccess(pool, sectionId, userId))) {
