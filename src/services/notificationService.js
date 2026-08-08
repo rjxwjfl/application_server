@@ -46,6 +46,18 @@ class NotificationService {
   /**
    * ALERT 푸시: notification+data, Multicast
    *
+   * RLY-20260806-190 — User 판정: 알림은 두 채널이다.
+   *   · 기기 푸시(FCM)      — notification_level(선호)을 따른다. "안 받음"이면 안 간다.
+   *   · 인앱 알림센터(notifications 행) — 항상 남는다. 모든 상황에.
+   * 가시성(볼 수 없는 섹션인가 등)과 선호(notification_level)는 다른 축이다 — 가시성은
+   * 두 채널 모두에 적용하고(볼 수 없으면 애초에 알림 자체가 성립하지 않는다), 선호는
+   * 푸시에만 적용한다. 아래 흐름이 그 구분을 그대로 코드로 옮긴 것이다:
+   *   1) visibleUserIds — 가시성만 통과(자기 자신 제외 + SECTION_MESSAGE 접근 좁히기).
+   *      이 목록 그대로 인앱 notifications INSERT 대상이 된다 — 기기 등록 여부·
+   *      notification_level과 무관하게 항상 여기까지 도달한 사람은 기록이 남는다.
+   *   2) pushUserIds — visibleUserIds에 notification_level 필터를 추가로 적용한 부분집합.
+   *      FCM 발송 대상만 이걸로 좁힌다.
+   *
    * @param {string} params.binder_id
    * @param {string} params.sender_id
    * @param {string} params.type - 알림 유형 (assignment, mention, invitation, approval, reminder, message 등)
@@ -68,46 +80,63 @@ class NotificationService {
     device_uuid,
   }) {
     try {
-      let userIds = target_user_ids;
-      if (!userIds || userIds.length === 0) {
-        const members = await NotificationDAO.getMembersForAlert(pool, binder_id, requiredLevel);
-        userIds = members.map((m) => m.user_id).filter((id) => id !== sender_id);
+      // ── ① 가시성(visibility) — 두 채널 모두에 적용 ──────────────────────────
+      let visibleUserIds = target_user_ids;
+      if (!visibleUserIds || visibleUserIds.length === 0) {
+        // 브로드캐스트(target_user_ids 미지정) — 활성 멤버 전원(가시성만, 선호는 아직 안 봄).
+        const memberIds = await NotificationDAO.getActiveMemberIds(pool, binder_id);
+        visibleUserIds = memberIds.filter((id) => id !== sender_id);
       } else {
-        userIds = userIds.filter((id) => id !== sender_id);
-        // RLY-20260806-184 — target_user_ids를 명시로 받는 경로(멘션·반응·배정·강퇴 등)는
-        // 그동안 notification_level을 전혀 안 봤다 — 위 브로드캐스트 분기(getMembersForAlert)
-        // 는 SQL WHERE절 자체에 필터가 있어 항상 적용됐지만, 이 분기는 필터를 아예 타지
-        // 않았다(SC-notifications.md E7 "notification_level=none — 해당 binder의 모든
-        // 알림 차단"이 명시하는 것과 어긋났다 — 수신자가 그 binder 알림을 꺼도 멘션·반응
-        // 알림은 그대로 갔다는 뜻). binder_id가 있는 알림에만 적용한다 — subscription
-        // 알림(billingHandler.js)처럼 binder 스코프가 아예 없는 알림은 notification_level
-        // 개념 자체가 성립하지 않아(§16-7·설계상 user 단위) 그대로 둔다.
-        if (binder_id) {
-          userIds = await NotificationDAO.filterUserIdsByNotificationLevel(pool, binder_id, userIds, requiredLevel);
-        }
+        visibleUserIds = visibleUserIds.filter((id) => id !== sender_id);
       }
 
       if (routeData.route_type === TargetType.SECTION_MESSAGE && routeData.route_id) {
+        // role >= 0 — 방어적 필터(RLY-20260806-018). visibleUserIds는 이미 브로드캐스트
+        // 경로에서 pending을 걸렀지만, target_user_ids로 직접 넘어온 경우까지 대비한다.
+        // 이건 "이 메시지가 속한 비공개 섹션을 볼 수 있는가" — 가시성이라 두 채널 모두에
+        // 적용해야 맞다(선호 필터가 아니다).
         const { rows } = await pool.query(
-          // role >= 0 — 방어적 필터(RLY-20260806-018). userIds는 이미 getMembersForAlert에서
-          // pending을 걸렀지만, target_user_ids로 직접 넘어온 경우까지 대비한다.
           `SELECT bm.user_id FROM section_messages m
            JOIN sections s ON s.id = m.section_id
            JOIN binder_members bm ON bm.binder_id = s.binder_id AND bm.deleted_at IS NULL AND bm.role >= 0
            WHERE m.id = $1 AND bm.user_id = ANY($2::uuid[]) AND (s.access_scope = 0 OR
              EXISTS (SELECT 1 FROM section_members sm WHERE sm.section_id = s.id
                  AND sm.user_id = bm.user_id AND sm.deleted_at IS NULL))`,
-          [routeData.route_id, userIds]
+          [routeData.route_id, visibleUserIds]
         );
-        userIds = rows.map((row) => row.user_id);
+        visibleUserIds = rows.map((row) => row.user_id);
       }
 
-      if (userIds.length === 0) return;
+      if (visibleUserIds.length === 0) return;
 
-      const devices = await NotificationDAO.getActiveTokensByUserIds(pool, userIds);
+      // ── ② 인앱 알림센터 — 가시성만 통과하면 항상 기록한다(User 판정: "모든 상황에") ──
+      const notification_type = ALERT_TYPE_MAP[type] || ActionType.CREATE;
+      const notifications = visibleUserIds.map((userId) => ({
+        id: generateUUID(),
+        recipient_id: userId,
+        sender_id,
+        notification_type,
+        route_type: routeData.route_type || TargetType.SECTION_MESSAGE,
+        route_id: routeData.route_id || null,
+        binder_id,
+        title,
+        body,
+        payload: { ...routeData, device_uuid },
+      }));
+      await NotificationDAO.insertNotificationsBulk(pool, notifications);
+
+      // ── ③ 선호(preference) — notification_level, 기기 푸시에만 적용 ──────────
+      // binder_id가 없는 알림(구독 등, billingHandler.js)은 notification_level 개념 자체가
+      // 성립하지 않아(user 단위, binder 스코프 없음) 필터 없이 그대로 푸시 대상이 된다.
+      let pushUserIds = visibleUserIds;
+      if (binder_id) {
+        pushUserIds = await NotificationDAO.filterUserIdsByNotificationLevel(pool, binder_id, visibleUserIds, requiredLevel);
+      }
+      if (pushUserIds.length === 0) return;
+
+      const devices = await NotificationDAO.getActiveTokensByUserIds(pool, pushUserIds);
       const tokens = devices.map((d) => d.device_token);
-
-      if (tokens.length === 0) return;
+      if (tokens.length === 0) return; // 인앱 기록은 이미 ②에서 끝났다 — 여기서 return해도 손실 없음.
 
       const data = {
         type: 'ALERT',
@@ -125,21 +154,6 @@ class NotificationService {
         await NotificationDAO.deactivateTokens(pool, result.staleTokens);
         logger.info('Deactivated stale tokens', { count: result.staleTokens.length });
       }
-
-      const notification_type = ALERT_TYPE_MAP[type] || ActionType.CREATE;
-      const notifications = userIds.map((userId) => ({
-        id: generateUUID(),
-        recipient_id: userId,
-        sender_id,
-        notification_type,
-        route_type: routeData.route_type || TargetType.SECTION_MESSAGE,
-        route_id: routeData.route_id || null,
-        binder_id,
-        title,
-        body,
-        payload: { ...routeData, device_uuid },
-      }));
-      await NotificationDAO.insertNotificationsBulk(pool, notifications);
     } catch (error) {
       logger.error('ALERT push failed', { binder_id, type, error: error.message });
     }
