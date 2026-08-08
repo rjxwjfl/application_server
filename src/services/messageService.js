@@ -358,21 +358,99 @@ class MessageService {
   // 써 둔 반응 행) — 있으면 그대로 쓴다. calendarService.create의 `data.id || generateUUID()`와
   // 같은 관행(클라 id 존중, 없으면 서버 발급 — 하위호환)이지만 여기는 채널이 body가 아니라
   // 헤더라는 점만 다르다(클라가 emoji만 body로 보내므로).
+  //
+  // RLY-20260806-179 — addReaction·removeReaction 둘 다 eventBus.emit('sync') 자체가 아예
+  // 없었다. design_intent.md "이벤트 버스 흐름"·§16-7(H4)이 ActionType 30~33(PIN·UNPIN·
+  // REACT·UNREACT)을 "메시징 → 피드 INSERT"로 명시하고 "모든 도메인 이벤트는 audit_logs와
+  // activity_feeds 양쪽에 동시 기록된다"고 규정한다 — PIN·UNPIN(togglePin)은 이미 emit하는데
+  // REACT·UNREACT만 빠져 있었다(정책 침묵이 아니라 명시된 규정 누락 — 153과 같은 부류).
+  // 그 결과 반응 추가·제거가 ①activity_feeds에 안 남고 ②audit_logs에도 안 남고
+  // ③다른 기기에 실시간 sync push(FCM SYNC, 2초 디바운스)도 안 갔다 — 다음 정기 pull까지는
+  // 아무도 몰랐다. target_type은 TargetType.MESSAGE_REACTION(44, message_reactions 테이블
+  // 전용 — design_intent.md TargetType표, PIN처럼 SECTION_MESSAGE를 재사용하지 않는다.
+  // PIN은 message_reactions 같은 자기 테이블이 없어(is_pinned 컬럼뿐) SECTION_MESSAGE를
+  // 썼지만, REACT는 message_reactions.id라는 실제 PK가 있고 그 전용 TargetType이 이미
+  // 정의돼 있다 — 있는 것을 그대로 썼다.
+  //
+  // ⚠️ addReaction에만 alert(사용자 대면 푸시)도 추가했다 — "발송 정책을 바꾸지 마라"가
+  // 아니라 "문서가 이미 규정했는데 emit이 없는" 경우다: SC-notifications.md E17 "target_type=
+  // SECTION_MESSAGE(41)+action_type=REACT(32) — Given 내 메시지에 반응 추가됨 Then 섹션
+  // 메시징 화면 진입"이 명시돼 있고, notificationService.ALERT_TYPE_MAP에도 이미
+  // `reaction: ActionType.REACT`가 있었다(미리 준비돼 있었으나 호출부가 끝내 없었던 것 —
+  // 이 자체가 누락의 증거). 메시지 "작성자"에게만 보낸다(mention과 동일하게 explicit
+  // target_user_ids, sendAlert의 자기-필터가 자기 메시지 자기 반응은 자동으로 걸러준다).
+  // routeData.route_type은 E17이 명시한 그대로 SECTION_MESSAGE(41) — sync/feed의
+  // MESSAGE_REACTION과 다른 것이 맞다(라우팅 대상은 "탭하면 이동할 화면"이라 메시지가
+  // 맞고, feed/audit의 target_type은 "무엇이 바뀌었는가"라 반응 자체가 맞다 — 둘의
+  // 관심사가 다르다). requiredLevel:1(relatedOnly)로 잡았다 — E9가 "본인 작성 메시지의
+  // 반응·답글"을 relatedOnly 등급으로 명시한다(mention의 requiredLevel:2/mentionOnly보다
+  // 낮은, 더 널리 받는 등급). ⚠️ 단 이 값은 target_user_ids를 명시로 넘기는 현재
+  // sendAlert 경로에서 실제로는 참조되지 않는다(getMembersForAlert의 requiredLevel 필터는
+  // target_user_ids가 비어 있을 때만 탄다) — mention 등 다른 explicit-target alert도
+  // 전부 같은 상태다. 이건 sendAlert 자체의 구조적 공백(수신자 개인의 notification_level을
+  // explicit-target 경로가 아예 안 본다)이라 이번 태스크(emit 누락) 범위를 넘어 별도로
+  // 보고만 한다 — 여기서 고치지 않았다.
+  // 반응 "제거"(removeReaction)는 alert를 추가하지 않았다 — E17은 "추가됨"만 명시한다.
   async addReaction(messageId, emoji, context) {
-    return await withTransaction(async (client) => {
-      return await MessageDAO.addReaction(client, {
+    const { result, binder_id, authorId, sectionTitle } = await withTransaction(async (client) => {
+      const message = await MessageDAO.findById(client, messageId);
+      if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
+      const section = await SectionDAO.findById(client, message.section_id);
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+
+      const result = await MessageDAO.addReaction(client, {
         id: context.origin_uuid || generateUUID(),
         message_id: messageId,
         user_id: context.sender_id,
         emoji,
       });
+      return { result, binder_id: section.binder_id, authorId: message.user_id, sectionTitle: section.title };
     });
+
+    eventBus.emit('sync', {
+      binder_id,
+      sender_id: context.sender_id,
+      device_uuid: context.device_uuid,
+      action: ActionType.REACT, target_type: TargetType.MESSAGE_REACTION, target_id: result.id,
+    });
+
+    eventBus.emit('alert', {
+      binder_id,
+      sender_id: context.sender_id,
+      type: 'reaction',
+      title: sectionTitle || '',
+      body: `메시지에 ${emoji} 반응이 달렸습니다.`,
+      target_user_ids: [authorId],
+      requiredLevel: 1,
+      routeData: { route_type: TargetType.SECTION_MESSAGE, route_id: messageId },
+      device_uuid: context.device_uuid,
+    });
+
+    return result;
   }
 
   async removeReaction(messageId, emoji, context) {
-    await withTransaction(async (client) => {
-      await MessageDAO.removeReaction(client, messageId, context.sender_id, emoji);
+    const { removed, binder_id } = await withTransaction(async (client) => {
+      const message = await MessageDAO.findById(client, messageId);
+      if (!message) throw new NotFoundError('메시지를 찾을 수 없습니다');
+      const section = await SectionDAO.findById(client, message.section_id);
+      if (!section) throw new NotFoundError('섹션을 찾을 수 없습니다');
+
+      const removed = await MessageDAO.removeReaction(client, messageId, context.sender_id, emoji);
+      return { removed, binder_id: section.binder_id };
     });
+
+    // removed가 null이면(이미 없던/이미 지워진 반응 — 멱등 재시도 등) 실제로 바뀐 게
+    // 없으므로 이벤트를 내지 않는다 — 아무 변화 없는 요청까지 활동 피드·sync push를
+    // 발생시키지 않는다.
+    if (removed) {
+      eventBus.emit('sync', {
+        binder_id,
+        sender_id: context.sender_id,
+        device_uuid: context.device_uuid,
+        action: ActionType.UNREACT, target_type: TargetType.MESSAGE_REACTION, target_id: removed.id,
+      });
+    }
   }
 
   async getPinnedMessages(sectionId) {

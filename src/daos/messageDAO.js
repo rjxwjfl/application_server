@@ -262,13 +262,19 @@ class MessageDAO {
     return result.rows[0];
   }
 
+  // RLY-20260806-179 — id를 RETURNING한다: 서비스 계층이 activity_feeds/audit_logs에 이
+  // 반응 행 자체를 target_id로 남기려면(TargetType.MESSAGE_REACTION) 어떤 행이 실제로
+  // 지워졌는지 알아야 한다. 이미 삭제됐거나 애초에 없던 반응이면 rows가 비어(멱등, 기존
+  // 동작과 동일) 호출부가 null을 받는다.
   async removeReaction(conn, messageId, userId, emoji) {
     const query = `
       UPDATE message_reactions
       SET deleted_at = now(), updated_at = now()
       WHERE message_id = $1 AND user_id = $2 AND emoji = $3 AND deleted_at IS NULL
+      RETURNING id
     `;
-    await conn.query(query, [messageId, userId, emoji]);
+    const result = await conn.query(query, [messageId, userId, emoji]);
+    return result.rows[0] || null;
   }
 
   async getReactionsByMessageIds(conn, messageIds) {

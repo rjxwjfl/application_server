@@ -13,6 +13,9 @@
  * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`, config/db를 가짜 connection으로
  * 교체해 실제 서비스 코드(MessageService.addReaction)를 그대로 구동한다.
  *
+ * ⚠️ RLY-20260806-179 갱신 — addReaction이 이제 eventBus.emit('sync')를 위해 메시지·섹션을
+ * 먼저 조회한다(binder_id가 필요해서다 — 179 참조). 그 두 조회에 대한 mock 분기를 추가했다.
+ *
  * 실행: node src/services/originUuidReactionRegression.test.js
  */
 
@@ -23,12 +26,24 @@ const path = require('path');
 const dbPath = require.resolve('../../config/db');
 const NOW = new Date('2026-08-07T00:00:00Z').toISOString();
 
+const messages = { m1: { id: 'm1', section_id: 's1', user_id: 'author1', parent_id: null, content: 'hi', mention_everyone: false, is_pinned: false, deleted_at: null } };
+const sections = { s1: { id: 's1', binder_id: 'b1', title: 'sec1', access_scope: 0, is_default: false, deleted_at: null } };
 const savedReactions = [];
 
 async function mockQuery(sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] };
 
+  // MessageDAO.findById (RLY-20260806-179 — addReaction이 binder_id를 위해 조회)
+  if (s.startsWith('SELECT id, section_id, user_id, parent_id, content') && s.includes('FROM section_messages')) {
+    const row = messages[params[0]];
+    return { rows: row ? [row] : [] };
+  }
+  // SectionDAO.findById (위와 동일 이유)
+  if (s.startsWith('SELECT id, binder_id, title, access_scope, is_default') && s.includes('FROM sections')) {
+    const row = sections[params[0]];
+    return { rows: row ? [row] : [] };
+  }
   // MessageDAO.addReaction
   if (s.startsWith('INSERT INTO message_reactions')) {
     const [id, message_id, user_id, emoji] = params;

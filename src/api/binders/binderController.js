@@ -21,17 +21,17 @@ const binderController = {
   }),
 
   updateBinder: asyncHandler(async (req, res) => {
-    const result = await BinderService.updateBinder(req.params.binderId, req.body, req.user_id);
+    const result = await BinderService.updateBinder(req.params.binderId, req.body, req.user_id, req.device_uuid);
     res.json({ success: true, data: result, message: '바인더가 수정되었습니다' });
   }),
 
   deleteBinder: asyncHandler(async (req, res) => {
-    await BinderService.deleteBinder(req.params.binderId, req.user_id);
+    await BinderService.deleteBinder(req.params.binderId, req.user_id, req.device_uuid);
     res.json({ success: true, message: '바인더가 삭제되었습니다' });
   }),
 
   issueBinderInvitation: asyncHandler(async (req, res) => {
-    const invitation = await BinderService.issueBinderInvitation(req.params.binderId, req.user_id);
+    const invitation = await BinderService.issueBinderInvitation(req.params.binderId, req.user_id, req.device_uuid);
     res.status(201).json({ success: true, data: invitation, message: '초대 토큰이 생성되었습니다' });
   }),
 
@@ -67,7 +67,7 @@ const binderController = {
     if (!['approve', 'reject', 'block'].includes(action)) {
       throw new BadRequestError('action은 approve|reject|block 중 하나여야 합니다');
     }
-    const result = await BinderService.decideJoinRequest(req.params.binderId, req.params.requestId, action, req.user_id);
+    const result = await BinderService.decideJoinRequest(req.params.binderId, req.params.requestId, action, req.user_id, req.device_uuid);
     res.json({ success: true, data: { id: result.id, status: result.status, decided_at: result.decided_at } });
   }),
 
@@ -87,7 +87,7 @@ const binderController = {
     const { binderId, userId } = req.params;
     const { role } = req.body;
     if (role === undefined) throw new BadRequestError('role이 필요합니다');
-    await BinderService.updateBinderMemberRole(binderId, userId, role, req.user_id);
+    await BinderService.updateBinderMemberRole(binderId, userId, role, req.user_id, req.device_uuid);
     res.json({ success: true, message: '멤버 역할이 수정되었습니다' });
   }),
 
@@ -112,12 +112,12 @@ const binderController = {
     const { new_master_id, new_master_user_id } = req.body;
     const targetId = new_master_user_id || new_master_id;
     if (!targetId) throw new BadRequestError('new_master_user_id가 필요합니다');
-    await BinderService.transferBinderMaster(req.params.binderId, targetId, req.user_id);
+    await BinderService.transferBinderMaster(req.params.binderId, targetId, req.user_id, req.device_uuid);
     res.json({ success: true, message: '마스터 권한이 이전되었습니다' });
   }),
 
   updateBinderSettings: asyncHandler(async (req, res) => {
-    const result = await BinderService.updateBinder(req.params.binderId, req.body, req.user_id);
+    const result = await BinderService.updateBinder(req.params.binderId, req.body, req.user_id, req.device_uuid);
     res.json({ success: true, data: result, message: '바인더 설정이 수정되었습니다' });
   }),
 
