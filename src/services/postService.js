@@ -49,6 +49,22 @@ class PostService {
       target_id: post.id,
     });
 
+    // RLY-20260806-203(T-N1) — "바인더에 새 게시글" 알림, SC-notifications.md §16-2-A #1 ·
+    // SC-post.md §16-9 (User 판정 2026-08-07): 바인더 멤버 전원에게 보내되(브로드캐스트 —
+    // target_user_ids 미지정), 공지형·콘텐츠형을 구분하지 않고 requiredLevel: 0(가장 좁은
+    // 등급 — "모든 활동" 설정한 사람에게만 기기 푸시, allActivity 이외에는 인앱 알림함에만
+    // 남는다). "가장 많이 늘어나는 항목이라 조용히 시작한다"(§16-2-B) — 넓히지 말 것.
+    eventBus.emit('alert', {
+      binder_id: member.binder_id,
+      sender_id: context.sender_id,
+      type: 'post_created',
+      title: '새 게시글',
+      body: '바인더에 새 게시글이 올라왔습니다.',
+      requiredLevel: 0,
+      routeData: { route_type: TargetType.POST, route_id: post.id },
+      device_uuid: context.device_uuid,
+    });
+
     return await this.withAttachments(post);
   }
 

@@ -203,6 +203,22 @@ class BinderService {
       sender_id: requesterId,
       action: ActionType.ROLE_CHANGE, target_type: TargetType.BINDER_MEMBER, target_id: targetUserId,
     });
+
+    // RLY-20260806-203(T-N2) — "내 역할이 바뀜"은 SC-notifications.md §16-2-C "나에게 직접
+    // 일어난 일"(당사자 1명·지위 변경·본인이 하지 않음, 강퇴와 같은 분류) — requiredLevel: 1
+    // 고정(§16-2-C, User 판정 "나와 관련된 것만"까지). 대상은 target_user_ids로 당사자 1명만
+    // 지정하므로 §16-5의 "의미 판정"(relatedOnly 필터링 기준) 미결과 무관하다(§16-5 표 참고).
+    eventBus.emit('alert', {
+      binder_id: binderId,
+      sender_id: requesterId,
+      type: 'role_change',
+      title: '역할 변경',
+      body: '바인더에서의 역할이 변경되었습니다.',
+      target_user_ids: [targetUserId],
+      requiredLevel: 1,
+      routeData: { route_type: TargetType.BINDER_MEMBER, route_id: targetUserId },
+      device_uuid,
+    });
   }
 
   async kickBinderMember(binderId, targetUserId, requesterId, device_uuid) {

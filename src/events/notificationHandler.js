@@ -54,6 +54,23 @@ eventBus.on('member:left', ({ user_id, binder_id, actor_id, action }) => {
       requiredLevel: 1,
       routeData: { route_type: 1, route_id: binder_id },
     });
+  } else {
+    // RLY-20260806-203(T-N3) — 자진 탈퇴(binderService.leaveBinder는 action을 넘기지 않는다
+    // — 강퇴만 ActionType.KICK을 지정하는 기존 관례, 위 분기와 대칭). SC-notifications.md
+    // §16-2-A #3 · §16-2-B: "판정이 아니라 유도다 — member_joined(바로 위 분기)가
+    // requiredLevel 미지정=기본값 0이고, 이 둘은 같은 사건의 짝이다. 한쪽만 다르면
+    // '들어온 건 안 알리고 나간 건 알린다'가 된다" — 그래서 requiredLevel을 member_joined와
+    // 동일하게 명시하지 않는다(기본값 0, sendAlert의 default). 잔여 멤버 전원에게 브로드캐스트
+    // (target_user_ids 미지정) — sender_id는 탈퇴한 본인(member_joined의 관례와 동일, 강퇴의
+    // actor_id=처리한 관리자와 다름 — 여기선 actor_id 자체가 없다).
+    notificationService.sendAlert({
+      binder_id,
+      sender_id: user_id,
+      type: 'member_left',
+      title: '멤버 탈퇴',
+      body: '바인더에서 멤버가 탈퇴했습니다.',
+      routeData: { route_type: 1, route_id: binder_id },
+    });
   }
 });
 
