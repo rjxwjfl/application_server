@@ -13,6 +13,10 @@
  * 자체가 안 생겼다. 아래 revert-verify 실측(구현 보고서 참조)이 "지금은 셋 다 인앱 기록이
  * 안 생긴다"를 실제로 재현했다.
  *
+ * ⚠️ RLY-20260806-194 갱신 — 190에서 강퇴의 `requiredLevel`을 3(Writer 판단)으로 잡았으나,
+ * User 판정 "나에게 직접 일어난 일은 나와 관련된 것만까지"에 따라 **1**(relatedOnly까지
+ * 푸시)로 정정했다. ④·⑥이 이 정정을 4등급 전수로 검증한다.
+ *
  * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`. config/db·@utils/fcm을
  * 가짜로 교체(pendingApplicantFilterCoverageRegression.test.js와 동일 패턴).
  *
@@ -45,12 +49,22 @@ require.cache[fcmPath] = {
 const binderMembers = {
   'b1:none1':      { user_id: 'none1',      notification_level: 3 },
   'b1:noDevice1':  { user_id: 'noDevice1',  notification_level: 0 },
-  'b1:kicked1':    { user_id: 'kicked1',    notification_level: 3 }, // 강퇴 시점엔 이미 소프트 삭제됐을 수 있지만 마지막 값은 남는다
+  // RLY-20260806-194 — 강퇴 4등급 전수(User 판정: "나에게 직접 일어난 일"은 "나와 관련된
+  // 것만"까지 — allActivity·relatedOnly는 푸시, mentionOnly·none은 푸시 없음).
+  'b1:kickAllActivity1': { user_id: 'kickAllActivity1', notification_level: 0 },
+  'b1:kickRelatedOnly1': { user_id: 'kickRelatedOnly1', notification_level: 1 },
+  'b1:kickMentionOnly1': { user_id: 'kickMentionOnly1', notification_level: 2 },
+  'b1:kickNone1':        { user_id: 'kickNone1',        notification_level: 3 },
   'b1:bcastAll1':  { user_id: 'bcastAll1',  notification_level: 0 },
   'b1:bcastNone1': { user_id: 'bcastNone1', notification_level: 3 },
 };
-const allActiveMembersOfB1 = ['none1', 'noDevice1', 'kicked1', 'bcastAll1', 'bcastNone1'];
-const devices = { none1: 'tok-none1', kicked1: 'tok-kicked1', bcastAll1: 'tok-bcastAll1', bcastNone1: 'tok-bcastNone1' };
+const allActiveMembersOfB1 = ['none1', 'noDevice1', 'kickAllActivity1', 'kickRelatedOnly1', 'kickMentionOnly1', 'kickNone1', 'bcastAll1', 'bcastNone1'];
+const devices = {
+  none1: 'tok-none1',
+  kickAllActivity1: 'tok-kickAllActivity1', kickRelatedOnly1: 'tok-kickRelatedOnly1',
+  kickMentionOnly1: 'tok-kickMentionOnly1', kickNone1: 'tok-kickNone1',
+  bcastAll1: 'tok-bcastAll1', bcastNone1: 'tok-bcastNone1',
+};
 // noDevice1은 의도적으로 devices에 없음 — 등록된 기기 0대 시나리오.
 
 // 비공개 섹션(access_scope=1) — outsider1은 이 섹션의 section_members가 아니다(볼 수 없음).
@@ -153,16 +167,25 @@ async function run() {
     `실제=${JSON.stringify(insertedNotificationsLog)}`);
   check('③ 푸시 0건', fcmSendMulticastCalls === 0);
 
-  // ============ ④ 강퇴(member_kicked, requiredLevel:3) — 수준을 낮춘 사람도 푸시를 받는다 ============
+  // ============ ④ 강퇴(member_kicked, requiredLevel:1) — 4등급 전수(핵심, User 판정 정정) ============
+  // "나에게 직접 일어난 일"은 "나와 관련된 것만"까지 — allActivity·relatedOnly는 푸시를
+  // 받고, mentionOnly·none은 안 받는다. 알림함(인앱) 기록은 190에 따라 네 등급 전부 남는다.
   reset();
   await notificationService.sendAlert({
     binder_id: 'b1', sender_id: 'kicker1', type: 'member_kicked', title: 't', body: 'b',
-    target_user_ids: ['kicked1'], requiredLevel: 3, routeData: {},
+    target_user_ids: ['kickAllActivity1', 'kickRelatedOnly1', 'kickMentionOnly1', 'kickNone1'],
+    requiredLevel: 1, routeData: {},
   });
-  check('④ 인앱 기록 1건', insertedNotificationsLog.includes('kicked1'));
-  check('④ 푸시 — notification_level=none(3)으로 낮춰 둔 사람도 강퇴 알림은 받는다(requiredLevel:3)',
-    pushRequestedUserIds && pushRequestedUserIds.includes('kicked1'), `실제=${JSON.stringify(pushRequestedUserIds)}`);
-  check('④ FCM이 실제로 호출됐다(토큰이 있으므로)', fcmSendMulticastCalls === 1);
+  check('④ 알림함(인앱) 기록 — 네 등급 전부 남는다', ['kickAllActivity1', 'kickRelatedOnly1', 'kickMentionOnly1', 'kickNone1']
+    .every((id) => insertedNotificationsLog.includes(id)), `실제=${JSON.stringify(insertedNotificationsLog)}`);
+  check('④ 푸시 — allActivity(0)는 받는다', pushRequestedUserIds && pushRequestedUserIds.includes('kickAllActivity1'));
+  check('④ 푸시 — relatedOnly(1)는 받는다(경계 포함, "나와 관련된 것"의 마지노선)',
+    pushRequestedUserIds && pushRequestedUserIds.includes('kickRelatedOnly1'));
+  check('④ 푸시 — mentionOnly(2)는 받지 않는다(수정 대상이었던 지점)',
+    pushRequestedUserIds && !pushRequestedUserIds.includes('kickMentionOnly1'), `실제=${JSON.stringify(pushRequestedUserIds)}`);
+  check('④ 푸시 — none(3)은 받지 않는다',
+    pushRequestedUserIds && !pushRequestedUserIds.includes('kickNone1'));
+  check('④ FCM이 실제로 호출됐다(allActivity·relatedOnly 최소 1명은 토큰이 있으므로)', fcmSendMulticastCalls === 1);
 
   // ============ ⑤ 브로드캐스트 분기(target_user_ids 미지정)도 동일하게 두 채널이 갈린다 ============
   reset();
@@ -178,8 +201,8 @@ async function run() {
     pushRequestedUserIds && pushRequestedUserIds.includes('bcastAll1') && !pushRequestedUserIds.includes('bcastNone1'),
     `실제=${JSON.stringify(pushRequestedUserIds)}`);
 
-  // ============ ⑥ notificationHandler.js가 실제로 requiredLevel:3을 강퇴 emit에 싣는지(구조 확인) ============
-  // ④는 sendAlert를 직접 호출해 requiredLevel:3 자체의 효과만 검증했다 — notificationHandler.js가
+  // ============ ⑥ notificationHandler.js가 실제로 requiredLevel:1을 강퇴 emit에 싣는지(구조 확인) ============
+  // ④는 sendAlert를 직접 호출해 requiredLevel:1 자체의 효과만 검증했다 — notificationHandler.js가
   // 진짜 그 값을 넘기는지는 별도로 확인해야 한다(eventBus를 통해 실제로 타는 경로).
   reset();
   const eventBus = require('../events/eventBus');
@@ -188,11 +211,11 @@ async function run() {
   let capturedAlertPayload = null;
   const originalSendAlert = notificationService.sendAlert.bind(notificationService);
   notificationService.sendAlert = async (payload) => { capturedAlertPayload = payload; return originalSendAlert(payload); };
-  eventBus.emit('member:left', { user_id: 'kicked1', binder_id: 'b1', actor_id: 'kicker1', action: ActionType.KICK });
+  eventBus.emit('member:left', { user_id: 'kickRelatedOnly1', binder_id: 'b1', actor_id: 'kicker1', action: ActionType.KICK });
   await new Promise((resolve) => setImmediate(resolve)); // sendAlert는 emit 핸들러 안에서 fire-and-forget으로 호출됨
   notificationService.sendAlert = originalSendAlert;
-  check('⑥ notificationHandler.js의 강퇴 알림이 requiredLevel:3을 실제로 싣는다',
-    capturedAlertPayload && capturedAlertPayload.type === 'member_kicked' && capturedAlertPayload.requiredLevel === 3,
+  check('⑥ notificationHandler.js의 강퇴 알림이 requiredLevel:1을 실제로 싣는다(194 정정)',
+    capturedAlertPayload && capturedAlertPayload.type === 'member_kicked' && capturedAlertPayload.requiredLevel === 1,
     `실제=${JSON.stringify(capturedAlertPayload)}`);
 
   console.log(`\n[sendAlertTwoChannelRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
