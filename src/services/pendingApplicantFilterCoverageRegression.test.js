@@ -417,6 +417,14 @@ async function testSendAlertSectionMessageTargeting() {
           .map((uid) => ({ user_id: uid }));
         return { rows };
       }
+      // NotificationDAO.filterUserIdsByNotificationLevel (RLY-20260806-184 신규) — 이
+      // 회귀의 관심사는 pending 배제뿐이라 notification_level은 다루지 않는다. 후보를
+      // 그대로 통과시켜(전부 기본값 0=allActivity로 취급) 그 뒤의 SECTION_MESSAGE 전용
+      // 필터가 pending을 배제하는 것만 검증한다.
+      if (s.startsWith('SELECT dm.user_id') && s.includes('FROM binder_members') && s.includes('notification_level <= $3')) {
+        const [, userIds] = params;
+        return { rows: userIds.map((uid) => ({ user_id: uid })) };
+      }
       if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] };
       return { rows: [] };
     },
