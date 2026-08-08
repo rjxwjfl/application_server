@@ -74,6 +74,17 @@ class NotificationService {
         userIds = members.map((m) => m.user_id).filter((id) => id !== sender_id);
       } else {
         userIds = userIds.filter((id) => id !== sender_id);
+        // RLY-20260806-184 — target_user_ids를 명시로 받는 경로(멘션·반응·배정·강퇴 등)는
+        // 그동안 notification_level을 전혀 안 봤다 — 위 브로드캐스트 분기(getMembersForAlert)
+        // 는 SQL WHERE절 자체에 필터가 있어 항상 적용됐지만, 이 분기는 필터를 아예 타지
+        // 않았다(SC-notifications.md E7 "notification_level=none — 해당 binder의 모든
+        // 알림 차단"이 명시하는 것과 어긋났다 — 수신자가 그 binder 알림을 꺼도 멘션·반응
+        // 알림은 그대로 갔다는 뜻). binder_id가 있는 알림에만 적용한다 — subscription
+        // 알림(billingHandler.js)처럼 binder 스코프가 아예 없는 알림은 notification_level
+        // 개념 자체가 성립하지 않아(§16-7·설계상 user 단위) 그대로 둔다.
+        if (binder_id) {
+          userIds = await NotificationDAO.filterUserIdsByNotificationLevel(pool, binder_id, userIds, requiredLevel);
+        }
       }
 
       if (routeData.route_type === TargetType.SECTION_MESSAGE && routeData.route_id) {

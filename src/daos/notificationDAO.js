@@ -74,6 +74,34 @@ class NotificationDAO {
     return result.rows;
   }
 
+  // RLY-20260806-184 — notificationService.sendAlert가 target_user_ids를 명시로 받는 경로
+  // (멘션·반응·배정·강퇴 등)에서 그동안 notification_level을 전혀 안 봤다. 위
+  // getMembersForAlert(브로드캐스트 — target_user_ids 없이 전체 멤버를 훑는 경로)와 같은
+  // 기준(notification_level <= maxLevel)을 이미 정해진 후보 목록(target_user_ids)에
+  // 적용한다.
+  //
+  // ⚠️ deleted_at IS NULL을 넣지 않았다 — 브로드캐스트 경로와 다르다. 강퇴(member_kicked)
+  // 알림은 대상이 이미 binder_members에서 소프트 삭제된 뒤(kickBinderMember 트랜잭션
+  // 커밋 후) 발송된다 — deleted_at IS NULL을 넣으면 강퇴된 바로 그 사람이 자기 강퇴
+  // 알림 대상에서 걸러져 "강퇴됐다는 사실 자체를 통보받지 못하는" 새로운 결함이 생긴다.
+  // binder_members.PRIMARY KEY(binder_id,user_id)라 이 조회는 소프트 삭제 여부와 무관하게
+  // 그 사람이 마지막으로 가졌던 notification_level을 그대로 읽는다 — 목적(수신자 개인의
+  // 알림 강도 설정을 반영)에 정확히 부합한다. role >= 0도 넣지 않았다 — chk_bm_role
+  // CHECK(role BETWEEN 0 AND 3)로 음수 role 자체가 스키마에서 불가능해져(RLY-20260806-024)
+  // 이제 항상 참인 죽은 조건이다.
+  async filterUserIdsByNotificationLevel(conn, binderId, userIds, maxLevel) {
+    if (!userIds || userIds.length === 0) return [];
+    const query = `
+      SELECT dm.user_id
+      FROM binder_members dm
+      WHERE dm.binder_id = $1
+        AND dm.user_id = ANY($2::uuid[])
+        AND dm.notification_level <= $3
+    `;
+    const result = await conn.query(query, [binderId, userIds, maxLevel]);
+    return result.rows.map((row) => row.user_id);
+  }
+
   /**
    * 알림 벌크 INSERT (새 스키마)
    */

@@ -1,0 +1,150 @@
+/**
+ * src/services/sendAlertNotificationLevelRegression.test.js
+ * =========================================
+ * RLY-20260806-184 — `NotificationService.sendAlert`가 `target_user_ids`를 명시로 받는
+ * 경로(멘션·반응·배정·강퇴 등)에서 `requiredLevel`(notification_level)을 전혀 안 봤다.
+ * `SC-notifications.md` E7 "notification_level=none — 해당 binder의 모든 알림 차단"이
+ * 명시하는데, 브로드캐스트 경로(`getMembersForAlert`, `target_user_ids` 미지정 시)만 SQL
+ * WHERE절 자체에 필터가 있어 적용됐고 explicit-target 경로는 아예 필터를 안 탔다 —
+ * 수신자가 그 binder 알림을 꺼도 멘션·반응 알림은 그대로 갔다.
+ *
+ * `NotificationDAO.filterUserIdsByNotificationLevel`을 추가해 explicit-target 경로에도
+ * (binder_id가 있는 경우에만) 같은 기준을 적용했다. binder 스코프가 없는 알림(구독 등,
+ * billingHandler.js)은 notification_level 개념 자체가 없어 그대로 둔다 — 회귀 ④가 확인.
+ *
+ * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`. config/db·@utils/fcm을
+ * 가짜로 교체(pendingApplicantFilterCoverageRegression.test.js와 동일 패턴 — fcm.js가
+ * firebase.js를 통해 실 env를 요구해서 스텁 필요).
+ *
+ * 실행: node src/services/sendAlertNotificationLevelRegression.test.js
+ */
+
+const assert = require('assert');
+
+process.env.PGHOST = process.env.PGHOST || 'localhost';
+process.env.PGUSER = process.env.PGUSER || 'test';
+process.env.PGPASSWORD = process.env.PGPASSWORD || 'test';
+process.env.PGDATABASE = process.env.PGDATABASE || 'test';
+process.env.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'test';
+
+const dbPath = require.resolve('../../config/db');
+const fcmPath = require.resolve('../utils/fcm');
+
+require.cache[fcmPath] = {
+  id: fcmPath, filename: fcmPath, loaded: true,
+  exports: {
+    sendToTopic: async () => 'stub',
+    sendMulticast: async () => ({ successCount: 0, failureCount: 0, staleTokens: [] }),
+    subscribeToTopic: async () => {},
+    unsubscribeFromTopic: async () => {},
+  },
+};
+
+// notification_level: 0=allActivity 1=relatedOnly 2=mentionOnly 3=none
+const binderMembers = {
+  'b1:allActivity1':  { user_id: 'allActivity1',  notification_level: 0 },
+  'b1:relatedOnly1':  { user_id: 'relatedOnly1',  notification_level: 1 },
+  'b1:mentionOnly1':  { user_id: 'mentionOnly1',  notification_level: 2 },
+  'b1:none1':         { user_id: 'none1',         notification_level: 3 },
+};
+const allUserIds = ['allActivity1', 'relatedOnly1', 'mentionOnly1', 'none1'];
+const devices = allUserIds.reduce((acc, id) => { acc[id] = `token-${id}`; return acc; }, {});
+
+const insertedNotificationsLog = [];
+
+async function mockQuery(sql, params = []) {
+  const s = sql.replace(/\s+/g, ' ').trim();
+
+  // NotificationDAO.filterUserIdsByNotificationLevel (RLY-20260806-184 신규)
+  if (s.startsWith('SELECT dm.user_id') && s.includes('FROM binder_members') && s.includes('notification_level <= $3')) {
+    const [binderId, userIds, maxLevel] = params;
+    const rows = userIds
+      .map((uid) => binderMembers[`${binderId}:${uid}`])
+      .filter((row) => row && row.notification_level <= maxLevel)
+      .map((row) => ({ user_id: row.user_id }));
+    return { rows };
+  }
+  // NotificationDAO.getActiveTokensByUserIds
+  if (s.startsWith('SELECT user_id, device_token, device_uuid') && s.includes('FROM user_devices')) {
+    const [userIds] = params;
+    const rows = userIds.filter((uid) => devices[uid]).map((uid) => ({ user_id: uid, device_token: devices[uid], device_uuid: 'dev' }));
+    return { rows };
+  }
+  // NotificationDAO.insertNotificationsBulk — id만 흉내(recipient_id를 확인 대상으로 삼는다)
+  if (s.startsWith('INSERT INTO notifications')) {
+    // params는 10개씩 반복: id, recipient_id, sender_id, notification_type, route_type, route_id, binder_id, title, body, payload
+    for (let i = 0; i < params.length; i += 10) {
+      insertedNotificationsLog.push(params[i + 1]); // recipient_id
+    }
+    return { rows: [] };
+  }
+
+  throw new Error(`[mock] Unhandled query: ${s.slice(0, 140)} params=${JSON.stringify(params)}`);
+}
+
+const mockDb = { query: mockQuery, connect: async () => ({ query: mockQuery, release() {} }) };
+require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: mockDb };
+
+const notificationService = require('./notificationService');
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+function check(desc, cond, detail) { if (cond) pass++; else { fail++; failures.push(detail ? `${desc}: ${detail}` : desc); } }
+
+async function run() {
+  // ============ ① requiredLevel:2(mentionOnly, 멘션과 동일) — allActivity·relatedOnly·mentionOnly만 받는다 ============
+  insertedNotificationsLog.length = 0;
+  await notificationService.sendAlert({
+    binder_id: 'b1', sender_id: 'sender1', type: 'mention', title: 't', body: 'b',
+    target_user_ids: allUserIds, requiredLevel: 2, routeData: {},
+  });
+  check('① requiredLevel:2 — allActivity(0)는 받는다', insertedNotificationsLog.includes('allActivity1'));
+  check('① requiredLevel:2 — relatedOnly(1)는 받는다', insertedNotificationsLog.includes('relatedOnly1'));
+  check('① requiredLevel:2 — mentionOnly(2)는 받는다(경계 포함, <=)', insertedNotificationsLog.includes('mentionOnly1'));
+  check('① requiredLevel:2 — none(3)은 못 받는다(E7 "모든 알림 차단")', !insertedNotificationsLog.includes('none1'),
+    `실제=${JSON.stringify(insertedNotificationsLog)}`);
+
+  // ============ ② requiredLevel:1(relatedOnly, 반응과 동일) — allActivity·relatedOnly만 받는다 ============
+  insertedNotificationsLog.length = 0;
+  await notificationService.sendAlert({
+    binder_id: 'b1', sender_id: 'sender1', type: 'reaction', title: 't', body: 'b',
+    target_user_ids: allUserIds, requiredLevel: 1, routeData: {},
+  });
+  check('② requiredLevel:1 — allActivity(0)는 받는다', insertedNotificationsLog.includes('allActivity1'));
+  check('② requiredLevel:1 — relatedOnly(1)는 받는다(경계 포함)', insertedNotificationsLog.includes('relatedOnly1'));
+  check('② requiredLevel:1 — mentionOnly(2)는 못 받는다(수정 전엔 여기서도 갔다 — 결함의 핵심)',
+    !insertedNotificationsLog.includes('mentionOnly1'), `실제=${JSON.stringify(insertedNotificationsLog)}`);
+  check('② requiredLevel:1 — none(3)은 못 받는다', !insertedNotificationsLog.includes('none1'));
+
+  // ============ ③ requiredLevel:0(allActivity만) — allActivity만 받는다(가장 좁음) ============
+  insertedNotificationsLog.length = 0;
+  await notificationService.sendAlert({
+    binder_id: 'b1', sender_id: 'sender1', type: 'member_kicked', title: 't', body: 'b',
+    target_user_ids: ['none1'], requiredLevel: 0, routeData: {},
+  });
+  check('③ requiredLevel:0 — notification_level=none(3)인 사람은 못 받는다', insertedNotificationsLog.length === 0);
+
+  // ============ ④ binder_id가 없으면(구독 알림 등 user 단위) 필터를 아예 안 탄다 ============
+  insertedNotificationsLog.length = 0;
+  await notificationService.sendAlert({
+    sender_id: 'system1', type: 'subscription', title: 't', body: 'b',
+    target_user_ids: ['none1'], routeData: {},
+    // binder_id 없음 — none1은 notification_level=3(binder b1 기준)이지만, 이 알림은
+    // binder 스코프가 아예 없어(구독은 user 단위) 그 값이 적용될 대상 자체가 아니다.
+  });
+  check('④ binder_id 없는 알림(구독 등)은 notification_level과 무관하게 나간다',
+    insertedNotificationsLog.includes('none1'), `실제=${JSON.stringify(insertedNotificationsLog)}`);
+
+  console.log(`\n[sendAlertNotificationLevelRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
+  if (failures.length) {
+    console.log('--- 실패 목록 ---');
+    failures.forEach((f) => console.log(' - ' + f));
+    process.exitCode = 1;
+  }
+}
+
+run().catch((error) => {
+  console.error('[sendAlertNotificationLevelRegression] 실행 실패:', error);
+  process.exitCode = 1;
+});
