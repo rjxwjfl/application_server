@@ -38,6 +38,12 @@ const NOW = new Date('2026-08-07T00:00:00Z').toISOString();
 const sections = {
   s1: { id: 's1', binder_id: 'b1', title: 'sec', access_scope: 0, is_default: false, deleted_at: null },
 };
+// RLY-20260806-179 갱신 — addReaction·removeReaction이 이제 binder_id를 위해 메시지를 먼저
+// 조회한다. 이 파일의 ①②(반응 회귀)는 createMessage를 거치지 않고 messageId 'm1'을 직접
+// 참조하므로 fixture를 미리 채워 둔다.
+const messages = {
+  m1: { id: 'm1', section_id: 's1', user_id: 'u1', parent_id: null, content: 'hi', mention_everyone: false, is_pinned: false, deleted_at: null },
+};
 
 // 인메모리 message_reactions / message_mentions.
 const reactionsTable = [];
@@ -47,9 +53,14 @@ async function mockQuery(sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] };
 
-  // SectionDAO.findById (createMessage가 조회)
+  // SectionDAO.findById (createMessage·addReaction·removeReaction 전부 조회)
   if (s.startsWith('SELECT id, binder_id, title, access_scope, is_default') && s.includes('FROM sections')) {
     const row = sections[params[0]];
+    return { rows: row ? [row] : [] };
+  }
+  // MessageDAO.findById (RLY-20260806-179 — addReaction·removeReaction이 binder_id를 위해 조회)
+  if (s.startsWith('SELECT id, section_id, user_id, parent_id, content') && s.includes('FROM section_messages')) {
+    const row = messages[params[0]];
     return { rows: row ? [row] : [] };
   }
 

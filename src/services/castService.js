@@ -166,13 +166,21 @@ class CastService {
     return await CastDAO.updateComment(pool, commentId, data.content);
   }
 
+  // RLY-20260806-179 — binder_id를 인가 분기(타인 댓글 삭제) 안에서만 조회하고 있었다.
+  // 본인 댓글을 지우는(가장 흔한) 경로는 그 분기를 안 타 cast/calendar 조회 자체가 아예
+  // 안 됐고, 그 결과 emit의 binder_id가 항상 undefined였다 — feedHandler는 binder_id를
+  // 필수로 요구해(`!data.binder_id`면 즉시 return) 활동 피드에 전혀 안 남았고,
+  // notificationService.sendSync가 만드는 FCM 토픽도 `binder_undefined`가 돼 아무도 구독
+  // 안 한 토픽으로 나가 실시간 sync push가 사실상 허공에 발송됐다. 인가 분기와 무관하게
+  // 항상 cast/calendar를 조회하도록 고쳤다.
   async deleteComment(commentId, context) {
     const comment = await CastDAO.findCommentById(pool, commentId);
     if (!comment) throw new NotFoundError('댓글을 찾을 수 없습니다');
 
+    const cast = await CastDAO.findById(pool, comment.cast_id);
+    const cal = cast ? await CalendarDAO.findById(pool, cast.calendar_id) : null;
+
     if (comment.user_id !== context.sender_id) {
-      const cast = await CastDAO.findById(pool, comment.cast_id);
-      const cal = cast ? await CalendarDAO.findById(pool, cast.calendar_id) : null;
       const member = cal ? await BinderDAO.getMember(pool, cal.binder_id, context.sender_id) : null;
       if (!member || member.deleted_at || member.role > 1)
         throw new ForbiddenError('권한이 없습니다');
@@ -181,6 +189,7 @@ class CastService {
     await CastDAO.deleteComment(pool, commentId);
 
     eventBus.emit('sync', {
+      binder_id: cal ? cal.binder_id : undefined,
       sender_id: context.sender_id,
       device_uuid: context.device_uuid,
       action: ActionType.DELETE,

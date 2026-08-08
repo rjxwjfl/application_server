@@ -70,7 +70,12 @@ class BinderService {
     return await BinderDAO.getMyBinders(pool, userId);
   }
 
-  async issueBinderInvitation(binderId, userId) {
+  // RLY-20260806-179 — device_uuid 파라미터 자체가 없었다(createBinder·joinBinderByInvitation
+  // 등 다른 메서드는 전부 받는데 여기만 빠짐). authMiddleware가 모든 인증 요청에 예외 없이
+  // req.device_uuid를 채워서(x-device-id 헤더) 못 받을 구조적 이유가 없었다 — 그 결과
+  // sync 이벤트의 device_uuid가 항상 undefined였고, 초대 토큰을 발급한 바로 그 기기도
+  // 자기 기기 에코 억제(156 확인)가 안 돼 자기 액션에 대한 sync push를 스스로 받았다.
+  async issueBinderInvitation(binderId, userId, device_uuid) {
     const invitation = await withTransaction(async (client) => {
       const member = await BinderDAO.getMember(client, binderId, userId);
       if (!member || member.role !== 0) throw new ForbiddenError('초대 권한이 없습니다');
@@ -85,6 +90,7 @@ class BinderService {
     eventBus.emit('sync', {
       binder_id: binderId,
       sender_id: userId,
+      device_uuid,
       action: ActionType.CREATE, target_type: TargetType.BINDER_INVITATION, target_id: invitation.id,
     });
 
@@ -174,7 +180,8 @@ class BinderService {
     return await BinderDAO.getMembers(pool, binderId);
   }
 
-  async updateBinderMemberRole(binderId, targetUserId, role, requesterId) {
+  // RLY-20260806-179 — device_uuid 미수신(위 issueBinderInvitation과 동일 결함·동일 근거).
+  async updateBinderMemberRole(binderId, targetUserId, role, requesterId, device_uuid) {
     await withTransaction(async (client) => {
       const validRoles = [0, 1, 2, 3];
       if (!validRoles.includes(role)) throw new BadRequestError('유효하지 않은 역할입니다');
@@ -192,6 +199,7 @@ class BinderService {
 
     eventBus.emit('sync', {
       binder_id: binderId,
+      device_uuid,
       sender_id: requesterId,
       action: ActionType.ROLE_CHANGE, target_type: TargetType.BINDER_MEMBER, target_id: targetUserId,
     });
@@ -236,7 +244,8 @@ class BinderService {
   // 새 이미지를 "지정"할 수 있게 되는 건 아니고, 기존 이미지를 "제거"할 수 있게 되는 것뿐이다.
   // deleteBinder·transferBinderMaster는 각자 독립된 role===0 검사를 그대로 유지한다(이 함수와
   // 무관 — 여기서 넓히는 것과 별개로 손대지 않았다).
-  async updateBinder(binderId, updateData, userId) {
+  // RLY-20260806-179 — device_uuid 미수신(issueBinderInvitation과 동일 결함·동일 근거).
+  async updateBinder(binderId, updateData, userId, device_uuid) {
     const result = await withTransaction(async (client) => {
       await requireBinderMember(client, binderId, userId, { minRole: 1 });
 
@@ -255,13 +264,15 @@ class BinderService {
     eventBus.emit('sync', {
       binder_id: binderId,
       sender_id: userId,
+      device_uuid,
       action: ActionType.UPDATE, target_type: TargetType.BINDER, target_id: binderId,
     });
 
     return result;
   }
 
-  async transferBinderMaster(binderId, newMasterId, userId) {
+  // RLY-20260806-179 — device_uuid 미수신(issueBinderInvitation과 동일 결함·동일 근거).
+  async transferBinderMaster(binderId, newMasterId, userId, device_uuid) {
     await withTransaction(async (client) => {
       const members = await BinderDAO.getMembersForUpdate(client, binderId, [userId, newMasterId]);
       const currentMaster = members.find((member) => member.user_id === userId);
@@ -280,11 +291,13 @@ class BinderService {
     eventBus.emit('sync', {
       binder_id: binderId,
       sender_id: userId,
+      device_uuid,
       action: ActionType.ROLE_CHANGE, target_type: TargetType.BINDER_MEMBER, target_id: newMasterId,
     });
   }
 
-  async deleteBinder(binderId, userId) {
+  // RLY-20260806-179 — device_uuid 미수신(issueBinderInvitation과 동일 결함·동일 근거).
+  async deleteBinder(binderId, userId, device_uuid) {
     await withTransaction(async (client) => {
       const member = await BinderDAO.getMember(client, binderId, userId);
       if (!member || member.role !== 0) throw new ForbiddenError('권한이 없습니다');
@@ -297,6 +310,7 @@ class BinderService {
     eventBus.emit('sync', {
       binder_id: binderId,
       sender_id: userId,
+      device_uuid,
       action: ActionType.DELETE, target_type: TargetType.BINDER, target_id: binderId,
     });
   }
@@ -502,7 +516,13 @@ class BinderService {
   // 승인·거절·차단 공용. api.md:500-521 — action: approve|reject|block.
   // approve만 동일 트랜잭션에서 binder_members INSERT(role=3). block은 idx_bjr_blocked로
   // 영구 재신청 차단에 쓰인다(BinderDAO.hasActiveBlock).
-  async decideJoinRequest(binderId, requestId, action, deciderId) {
+  // RLY-20260806-179 — device_uuid 미수신. 이 device_uuid는 "가입하는 사람"이 아니라
+  // "승인·거절·차단을 실행한 관리자"의 기기다(다른 member:joined 발신지 — createBinder·
+  // joinBinderByInvitation·requestBinderJoin — 는 행위자=가입자 본인이라 자연스레 같은
+  // 값이었지만, 여기는 행위자(deciderId)와 결과의 주체(joinRequest.requester_id)가 다른
+  // 사람이다). 그래도 원칙은 같다 — 승인 액션을 실행한 그 기기 자신에게는 그 액션에 대한
+  // sync push가 에코로 돌아올 필요가 없다(156과 같은 원칙, 행위자 기준).
+  async decideJoinRequest(binderId, requestId, action, deciderId, device_uuid) {
     const newStatus = ACTION_TO_STATUS[action];
     if (!newStatus) throw new BadRequestError('유효하지 않은 action입니다');
 
@@ -525,7 +545,7 @@ class BinderService {
     });
 
     if (action === 'approve') {
-      eventBus.emit('member:joined', { user_id: decided.requester_id, binder_id: binderId });
+      eventBus.emit('member:joined', { user_id: decided.requester_id, binder_id: binderId, device_uuid });
     }
 
     return decided;

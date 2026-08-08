@@ -125,14 +125,18 @@ const sectionController = {
     const { emoji } = req.body;
     const originUuid = req.headers['x-origin-uuid'] || null;
     await SectionService.assertMessageAccess(messageId, req.user_id);
-    const result = await MessageService.addReaction(messageId, emoji, { sender_id: req.user_id, origin_uuid: originUuid });
+    const result = await MessageService.addReaction(messageId, emoji, { sender_id: req.user_id, origin_uuid: originUuid, device_uuid: req.device_uuid });
     res.status(201).json({ success: true, data: result });
   }),
 
   removeReaction: asyncHandler(async (req, res) => {
     const { messageId, emoji } = req.params;
     await SectionService.assertMessageAccess(messageId, req.user_id);
-    await MessageService.removeReaction(messageId, emoji, { sender_id: req.user_id });
+    // RLY-20260806-179 — device_uuid가 빠져 있었다(다른 메시지 컨트롤러 메서드는 전부
+    // req.device_uuid를 넘긴다). 이게 없으면 sync 이벤트의 device_uuid가 undefined가 돼
+    // 자기 기기 에코 억제(156 확인)가 이 경로에서만 작동하지 않는다 — 반응을 추가·제거한
+    // 바로 그 기기도 "누군가 바꿨다"는 sync push를 스스로에게 받게 된다.
+    await MessageService.removeReaction(messageId, emoji, { sender_id: req.user_id, device_uuid: req.device_uuid });
     res.json({ success: true, message: '리액션이 제거되었습니다' });
   }),
 
