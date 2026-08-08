@@ -23,7 +23,6 @@
  * 실행: node src/services/linkCardEndToEndRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 const NOW = new Date('2026-08-07T00:00:00Z').toISOString();
@@ -205,8 +204,12 @@ let fail = 0;
 const failures = [];
 function check(desc, cond, detail) { if (cond) pass++; else { fail++; failures.push(detail ? `${desc}: ${detail}` : desc); } }
 
+// RLY-20260806-199 — lint(no-unreachable)로 발견: `return await fn(); pass++;` 순서라
+// pass++가 항상 죽은 코드였다(정상 통과해도 카운터가 안 올라갔다) — 실패는 그대로
+// fail++·failures로 잡히니 이 파일의 빨강/초록 판정 자체는 안 틀렸지만, 화면에 찍히는
+// PASS 총량이 실제보다 적게 나왔다. 카운트가 먼저 되도록 순서를 바꿨다.
 async function expectOk(desc, fn) {
-  try { return await fn(); pass++; } catch (err) { fail++; failures.push(`${desc}: 정상 통과 기대했지만 에러 — ${err.statusCode || ''} ${err.message}`); return undefined; }
+  try { const result = await fn(); pass++; return result; } catch (err) { fail++; failures.push(`${desc}: 정상 통과 기대했지만 에러 — ${err.statusCode || ''} ${err.message}`); return undefined; }
 }
 async function expectBlocked(desc, fn, expectedStatus = 403) {
   try {

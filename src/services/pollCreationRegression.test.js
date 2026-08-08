@@ -16,7 +16,6 @@
  * 실행: node src/services/pollCreationRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 const NOW_ISO = new Date('2026-08-07T00:00:00Z').toISOString();

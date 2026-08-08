@@ -18,7 +18,6 @@
 const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
-const NOW = new Date().toISOString();
 
 const db = {
   user_infos: {

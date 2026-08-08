@@ -19,7 +19,6 @@
  * 실행: node src/services/messageEmbedTargetAuthzRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 const NOW = new Date('2026-08-07T00:00:00Z').toISOString();
@@ -40,7 +39,6 @@ const specialDays = { sd1: { id: 'sd1', calendar_id: 'cal1', deleted_at: null },
 const casts = { ca1: { id: 'ca1', calendar_id: 'cal1', deleted_at: null }, ca2: { id: 'ca2', calendar_id: 'cal2', deleted_at: null } };
 const posts = { p1: { id: 'p1', binder_id: 'b1', deleted_at: null }, p2: { id: 'p2', binder_id: 'b2', deleted_at: null } };
 
-let messageSeq = 0;
 const savedMessages = {};
 const savedEmbeds = [];
 

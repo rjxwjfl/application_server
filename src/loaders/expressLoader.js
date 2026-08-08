@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-const { NotFoundError, UnauthorizedError } = require('../core/errors');
+const { NotFoundError } = require('../core/errors');
 const errorHandler = require('../core/errorHandler');
 
 function buildCorsOptions(config) {

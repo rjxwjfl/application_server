@@ -15,7 +15,6 @@
  * 실행: node src/services/binderJoinApprovalRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 

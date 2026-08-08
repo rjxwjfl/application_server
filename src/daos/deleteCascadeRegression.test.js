@@ -12,7 +12,6 @@
  * 실행: node src/daos/deleteCascadeRegression.test.js
  */
 
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { CalendarDAO } = require('./calendarDAO');
@@ -307,8 +306,22 @@ async function testLastCalendarBlockedViaService() {
   };
   require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: fakePool };
 
+  // RLY-20260806-199 — lint(no-unused-vars)로 이 require를 "결과를 안 쓴다"며 한 번
+  // 지웠다가 ⑤가 깨져서 실측으로 원인을 찾고 복원했다: calendarService.js는 pool을
+  // require 시점에 한 번만 바인딩하는데, calendarService.js가 내부에서 쓰는
+  // withTransaction.js도 마찬가지로 자기 자신이 처음 require되는 시점의 config/db
+  // exports를 캡처해 붙들고 있는다 — require.cache[dbPath]를 나중에 fakePool로
+  // 바꿔치기해도 이미 캐시된 withTransaction.js의 pool 참조 자체는 안 바뀐다. 이
+  // require(결과는 실제로 안 씀)가 "이 프로세스에서 calendarService.js·withTransaction.js가
+  // 처음 로드되는 시점"을 여기(binder 'bY'용 fakePool이 걸려 있는 시점)로 고정해 준다 —
+  // 지우면 그 첫 로드가 아래 (a) 블록(다른 binder용 fakePool2)에서 대신 일어나며
+  // withTransaction.js가 fakePool2에 영구히 묶여, (b) 블록의 CalendarServiceTwo.delete가
+  // (자기 pool은 새로 바인딩해도) 트랜잭션 내부는 여전히 fakePool2/db2를 써서 cascade가
+  // db2 쪽에만 반영되고 이 테스트가 보는 db는 안 바뀌는 결함이 재현됐다(실측: 원복 전
+  // "⑤ 삭제 허용된 캘린더는 실제로 cascade됨" 실패). 결과를 변수에 담지 않고 순수
+  // 부수효과(재로드)만 쓴다는 것을 그대로 드러낸다 — no-unused-vars 자체가 안 걸린다.
   delete require.cache[require.resolve('../services/calendarService')];
-  const { CalendarService } = require('../services/calendarService');
+  require('../services/calendarService');
 
   // (a) 마지막 캘린더(onlyCal 삭제 시도 전 secondCal도 존재하므로 실제 "마지막"은 각 삭제 시나리오
   // 별로 별개 fixture가 필요하다 — onlyCal 하나만 있는 바인더로 별도 구성)
@@ -511,9 +524,9 @@ async function testEventSectionsLeftJoinExcludesDeletedLink() {
       async query(sql, params) {
         const s = norm(sql);
         const branches = s.split('UNION ALL');
-        const [oldDIds, oldCIds, oldTs, newDIds, newCIds, calWindowFrom] = params;
+        const [oldDIds, oldCIds, , newDIds, newCIds] = params;
 
-        function evalBranch(branchText, binderIds, calIds) {
+        function evalBranch(branchText, binderIds, _calIds) {
           const joinToWhere = branchText.split('JOIN calendars c ON e.calendar_id = c.id');
           const onClause = joinToWhere[0]; // "LEFT JOIN event_sections es ON ..." 부분
           const whereClause = joinToWhere[1] || '';

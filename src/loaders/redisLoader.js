@@ -1,7 +1,5 @@
 const logger = require('../utils/logger');
 
-let redisClient = null;
-
 async function redisLoader() {
   logger.info('Redis has been removed.');
   return null;

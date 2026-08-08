@@ -14,7 +14,6 @@
  * 실행: node src/jobs/reminderDispatchRegression.test.js
  */
 
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
@@ -53,7 +52,7 @@ async function expectOk(desc, fn) {
 // ════════════════════════════════════════════════════════════════════════
 (function assertClaimIsAtomic() {
   const src = fs.readFileSync(path.join(__dirname, '../daos/reminderDAO.js'), 'utf8');
-  const m = src.match(/async claimDueBatch\(conn, \{[^}]*\}\) \{([\s\S]*?)\n  \}/);
+  const m = src.match(/async claimDueBatch\(conn, \{[^}]*\}\) \{([\s\S]*?)\n {2}\}/);
   check('claimDueBatch 메서드를 찾음', !!m);
   const body = m ? m[1].replace(/\s+/g, ' ') : '';
   // "조회 후 갱신"이 아니라 단일 UPDATE 문 하나뿐이어야 한다 — SELECT가 그 UPDATE의
@@ -147,7 +146,6 @@ const SC_REMINDER_2A1_MAPPING = [
 // ════════════════════════════════════════════════════════════════════════
 const dbPath = require.resolve('../../config/db');
 const fcmPath = require.resolve('../utils/fcm');
-const NOW = new Date();
 
 const db = {
   reminders: {},

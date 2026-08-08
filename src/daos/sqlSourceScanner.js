@@ -227,7 +227,6 @@ function scanOneStatement(rawSql, allTables) {
   const skipped = [];
   const bump = (reason, count = 1) => { if (count > 0) skipped.push({ reason, count }); };
 
-  const isDml = /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql.trim()) || /\bINSERT\s+INTO\b/i.test(sql) || /\bUPDATE\b[\s\S]*\bSET\b/i.test(sql);
   const primaryResolvable = primaryTable && allTables.has(primaryTable);
 
   // ① INSERT 컬럼 목록

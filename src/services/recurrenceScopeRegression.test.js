@@ -21,7 +21,6 @@
  * 실행: node src/services/recurrenceScopeRegression.test.js
  */
 
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
@@ -386,7 +385,7 @@ db.calendars.c1 = { id: 'c1', binder_id: 'b1', title: 'Cal', description: null, 
 db.binder_members['b1:editor1'] = { binder_id: 'b1', user_id: 'editor1', role: 2, deleted_at: null };
 db.binder_members['b1:author1'] = { binder_id: 'b1', user_id: 'author1', role: 3, deleted_at: null };
 
-function makeSeries(prefix, count, ownerFields, table, instTable, dueOrEnd) {
+function makeSeries(prefix, count, ownerFields, table, instTable) {
   db[table][prefix] = {
     id: prefix, calendar_id: 'c1', author_id: 'author1',
     ...ownerFields, forked_from: null, created_at: 'NOW', updated_at: 'NOW', deleted_at: null,

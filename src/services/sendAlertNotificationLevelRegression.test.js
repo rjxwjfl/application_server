@@ -29,7 +29,6 @@
  * 실행: node src/services/sendAlertNotificationLevelRegression.test.js
  */
 
-const assert = require('assert');
 
 process.env.PGHOST = process.env.PGHOST || 'localhost';
 process.env.PGUSER = process.env.PGUSER || 'test';
@@ -94,8 +93,9 @@ const { NotificationDAO } = require('../daos/notificationDAO');
 const notificationService = require('./notificationService');
 
 // pendingApplicantFilterCoverageRegression.test.js ⑬과 동일한 monkey-patch 캡처 —
-// "누가 실제로 푸시 후보(토큰 조회)까지 도달했는가"가 이 파일의 진짜 관심사다.
-const originalGetActiveTokensByUserIds = NotificationDAO.getActiveTokensByUserIds;
+// "누가 실제로 푸시 후보(토큰 조회)까지 도달했는가"가 이 파일의 진짜 관심사다. 이
+// 파일은 단일 목적 스크립트라(원본 복원이 필요한 다른 테스트와 공유하지 않는다)
+// 원본을 따로 저장해 두지 않는다.
 NotificationDAO.getActiveTokensByUserIds = async (_conn, userIds) => {
   pushRequestedUserIds = userIds;
   return userIds.filter((uid) => devices[uid]).map((uid) => ({ user_id: uid, device_token: devices[uid], device_uuid: 'dev' }));

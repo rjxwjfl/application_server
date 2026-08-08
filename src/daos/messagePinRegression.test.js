@@ -16,7 +16,6 @@
  * 실행: node src/daos/messagePinRegression.test.js
  */
 
-const assert = require('assert');
 const { MessageDAO } = require('./messageDAO');
 
 const NOW_SEQ = [];

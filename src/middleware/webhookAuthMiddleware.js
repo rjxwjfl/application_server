@@ -12,9 +12,8 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
 
-// Apple Root CA G3 인증서 (DER → PEM 변환 후 하드코딩 또는 파일 로드)
-// 프로덕션에서는 환경변수 또는 파일 경로로 관리
-const APPLE_ROOT_CA_G3_URL = 'https://www.apple.com/certificateauthority/AppleRootCA-G3.cer';
+// Apple Root CA G3 인증서 — 실제로는 아래 _getAppleRootCert()가 APPLE_ROOT_CA_PATH
+// 환경변수(파일 경로)로만 로드한다. URL에서 직접 받아오는 경로는 없다.
 let _appleRootCert = null;
 
 /**

@@ -17,7 +17,6 @@
  * 실행: node src/services/eventParticipantRemovalRoleRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 
@@ -45,7 +44,7 @@ function makeMockDb(db) {
 
     // EventDAO.findInstanceContext
     if (s.startsWith('SELECT ei.id, ei.deleted_at, e.calendar_id, e.author_id, c.binder_id')) {
-      const [instanceId, eventId] = params;
+      const [instanceId] = params;
       if (instanceId !== db.instance.id) return { rows: [] };
       return { rows: [db.instance] };
     }

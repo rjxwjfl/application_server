@@ -19,7 +19,6 @@
  * 실행: node src/services/originUuidReactionRegression.test.js
  */
 
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
