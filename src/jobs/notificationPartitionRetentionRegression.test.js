@@ -21,7 +21,6 @@
  * 실행: node src/jobs/notificationPartitionRetentionRegression.test.js
  */
 
-const assert = require('assert');
 const Module = require('module');
 
 process.env.PGHOST = process.env.PGHOST || 'localhost';

@@ -29,7 +29,6 @@
  * 실행: node src/daos/messageAttachmentSyncRegression.test.js
  */
 
-const assert = require('assert');
 
 process.env.PGHOST = process.env.PGHOST || 'localhost';
 process.env.PGUSER = process.env.PGUSER || 'test';

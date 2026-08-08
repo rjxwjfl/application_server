@@ -22,7 +22,6 @@
  * 실행: node src/services/membershipLossPurgeRegression.test.js
  */
 
-const assert = require('assert');
 
 // src/configs/db.js가 모듈 로드 시점에 PGHOST 등을 eager 검증한다(syncService.js가 logger를
 // require → configs/index.js → configs/db.js 체인을 태운다). pendingApplicantFilterCoverage

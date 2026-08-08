@@ -14,7 +14,6 @@ const eventBus = require('../events/eventBus');
 const withTransaction = require('../core/withTransaction');
 const logger = require('../utils/logger');
 const {
-  Plans,
   ProductIdMap,
   SubscriptionStatus,
   SubscriptionEventType,
@@ -539,7 +538,13 @@ class WebhookService {
     }
   }
 
-  async _getGoogleSubscriptionState(purchaseToken, subscriptionId) {
+  // RLY-20260806-199 — subscriptionId는 호출부(this._getGoogleSubscriptionState(purchaseToken,
+  // subscriptionId), line ~355)가 넘기지만 이 메서드 본문(Google Play API 호출)은 packageName·
+  // purchaseToken만 쓴다 — 결제 로직 자체를 만지지 말라는 이번 태스크 지시에 따라 시그니처·
+  // 호출 로직은 그대로 두고 이름만 밑줄 접두어로 "의도적으로 안 씀"을 표시했다. Google Play
+  // API 연동이 실제로 완전한지(subscriptionId가 애초에 필요 없는지, 아니면 빠진 사용처가
+  // 있는지)는 결제 도메인 판단이 필요해 조사·수정하지 않았다 — 구현 보고서에 등재.
+  async _getGoogleSubscriptionState(purchaseToken, _subscriptionId) {
     const { google } = require('googleapis');
     const auth = new google.auth.GoogleAuth({
       keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH,

@@ -15,7 +15,6 @@
  * 실행: node src/services/emitBinderIdRegression.test.js
  */
 
-const assert = require('assert');
 
 // ── config/db.js를 가짜 커넥션으로 교체(require.cache 주입) ───────────────────
 const dbPath = require.resolve('../../config/db');

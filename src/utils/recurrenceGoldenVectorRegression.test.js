@@ -41,7 +41,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const assert = require('assert');
 const { expandOccurrences } = require('./recurrenceExpansion');
 
 let pass = 0;

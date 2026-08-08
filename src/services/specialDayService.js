@@ -89,6 +89,13 @@ class SpecialDayService {
     return await SpecialDayDAO.findHolidays(pool, { country_code, year });
   }
 
+  // RLY-20260806-199 — lint 정리 중 발견: 이 메서드를 호출하는 controller·route가 코드베이스
+  // 어디에도 없다(grep 0건) — 죽은(미배선) 메서드다. userId 인자가 있는데 본문에서 인가 검사에
+  // 안 쓰인다 — "살아있는 엔드포인트인데 인가가 빠졌다"가 아니라 "애초에 아무도 안 부른다"는
+  // 뜻이라 지금 당장 보안 결함은 아니지만, 나중에 라우트를 연결할 때 인가 검사를 빠뜨리기 쉬운
+  // 자리다. 이번 태스크는 동작을 바꾸지 말라는 지시라 손대지 않았다 — 구현 보고서(③ 죽은
+  // 코드 목록)에 등재.
+  // eslint-disable-next-line no-unused-vars
   async getByCalendar(calId, userId) {
     const cal = await CalendarDAO.findById(pool, calId);
     if (!cal) throw new NotFoundError('캘린더를 찾을 수 없습니다');

@@ -14,7 +14,6 @@
  * 실행: node src/utils/recurrenceExpansion.test.js
  */
 
-const assert = require('assert');
 const { expandOccurrences, assertOccurrencesMatchRule } = require('./recurrenceExpansion');
 
 let pass = 0;

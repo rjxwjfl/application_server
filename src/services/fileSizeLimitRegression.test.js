@@ -23,7 +23,6 @@
  * 실행: node src/services/fileSizeLimitRegression.test.js
  */
 
-const assert = require('assert');
 const Module = require('module');
 
 process.env.PGHOST = process.env.PGHOST || 'localhost';

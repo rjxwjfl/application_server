@@ -13,7 +13,6 @@
  * 실행: node src/services/reminderGenerationRegression.test.js
  */
 
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 // RLY-20260806-035 — 이 파서는 저장소 전체 DAO 정적 대조로 확장되며 공용 모듈로 뽑혔다

@@ -24,7 +24,6 @@
  * 실행: node src/daos/activityFeedTargetIndexRegression.test.js
  */
 
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 

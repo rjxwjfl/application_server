@@ -613,7 +613,7 @@ class BinderService {
   // verifyBoost는 RLY-20260806-010에서 죽은 호출(TypeError)은 이미 501로 막았으나 인가는
   // 그때도 붙지 않았다 — 형제 넷(getBoost 등)과 순서를 맞춘다(인가 → 501). 비멤버가 501
   // 자체는 받아도 진입점 존재를 확인할 수 없어야 한다.
-  async verifyBoost(binderId, userId, data) {
+  async verifyBoost(binderId, userId, _data) {
     await requireBinderMember(pool, binderId, userId);
     throw new NotImplementedError(
       'Binder Boost 구매 검증 기능은 아직 구현되지 않았습니다',
@@ -621,7 +621,7 @@ class BinderService {
     );
   }
 
-  async transferBoost(binderId, userId, data) {
+  async transferBoost(binderId, userId, _data) {
     // 기존 role 게이트(manager 이상)는 유지 — 501로 응답을 바꾸는 것이지 인가 기준을 바꾸는 게 아니다.
     await requireBinderMember(pool, binderId, userId, { minRole: 1 });
     throw new NotImplementedError(

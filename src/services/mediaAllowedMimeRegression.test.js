@@ -18,11 +18,9 @@
  * 실행: node src/services/mediaAllowedMimeRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 
-const db = {};
 const queryLog = [];
 
 async function mockQuery(sql, params = []) {

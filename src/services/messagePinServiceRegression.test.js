@@ -10,7 +10,6 @@
  * 실행: node src/services/messagePinServiceRegression.test.js
  */
 
-const assert = require('assert');
 
 const dbPath = require.resolve('../../config/db');
 
