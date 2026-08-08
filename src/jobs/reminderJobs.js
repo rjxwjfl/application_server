@@ -130,6 +130,14 @@ async function retryOrGiveUp(reminder, claimToken, error) {
   await ReminderDAO.markFailed(pool, reminder.id, claimToken, nextAttemptAt);
 }
 
+// RLY-20260806-194 — sendAlert(190이 가시성/선호로 분리)와 달리 여기는 recipientIds
+// 하나(ReminderDAO.getRecipients — 접근권 AND notification_level<=1)로 푸시·아래
+// insertNotificationsBulk를 둘 다 처리한다. 190이 고친 "혼합"과 겉모습은 같지만 결함이
+// 아니다 — SC-reminder.md §2-A-2(확정 2026-08-03, 결정 63)가 notification_level<=1을
+// 리마인더 "수신자" 정의 자체에 포함시킨다(reminderDAO.js 상단 주석 참조). 조사해 확인,
+// 고치지 않았다. tokens.length===0 조기 return도 없다 — 아래 insertNotificationsBulk는
+// tokens가 아니라 recipientIds 기준이라 등록 기기가 없어도 그대로 진행된다(190의 ②에
+// 해당하는 결함 자체가 여기엔 없음).
 async function dispatchOne(reminder, claimToken) {
   try {
     const recipientIds = await ReminderDAO.getRecipients(pool, reminder.target_type, reminder.target_id);

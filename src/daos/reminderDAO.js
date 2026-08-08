@@ -3,14 +3,34 @@ const { generateUUID } = require('../utils/uuid');
 // 【결정 63】 리마인더는 notification_level <= 1(모두·관련만)까지 수신한다(SC-reminder §2-A-2).
 // notificationDAO가 알림 종류 전반에 쓰는 것과 같은 값 체계(0=모두·1=관련만·2=멘션만·
 // 3=수신거부) — 신규 필터가 아니다.
-// ⚠️ RLY-20260806-190 — sendAlert는 "가시성(항상 인앱 기록)"과 "선호(notification_level,
+//
+// ⚠️ RLY-20260806-190/194 — sendAlert는 "가시성(항상 인앱 기록)"과 "선호(notification_level,
 // 푸시만)"를 분리했다(notificationDAO.getActiveMemberIds·filterUserIdsByNotificationLevel
-// 참조, 예전 getMembersForAlert는 삭제됨). 이 파일의 getRecipients는 그 분리를 적용받지
-// 않은 채 아래에서 여전히 notification_level을 리마인더 발송 대상 조회 SQL에 직접 걸어
-// 대상 자체를 좁힌다 — 리마인더 인앱 기록도 이 파일이 함께 만든다면(reminderJobs.js가
-// insertNotificationsBulk를 재사용) 같은 부류(가시성·선호 미분리)의 결함일 수 있다.
-// 이번 태스크(sendAlert 두 채널 분리) 범위 밖이라 여기는 손대지 않았다 — 구현 보고서에
-// 별도 발견으로 남겼다.
+// 참조). 190 직후엔 이 파일의 getRecipients가 notification_level을 발송 대상 SQL에 직접
+// 걸어 대상 자체를 좁히는 것이 같은 부류의 결함일 수 있다고 잠정 등재했었다 — 194가 직접
+// 조사해 결론을 냈다: **같은 부류가 아니다.**
+//
+// SC-reminder.md §2-A "**발송 대상 = 접근권 × 수신 선호(notification_level<=1)**"·§2-A-2
+// "리마인더는 그 바인더의 notification_level 설정을 따른다"(✅ 확정 2026-08-03, 결정 63)가
+// **리마인더의 "수신자" 자체를 이 곱으로 정의한다** — sendAlert의 "가시성으로 알림함 대상을
+// 정하고 선호는 푸시만 추가로 좁힌다"는 사후 판정(190)과 달리, 리마인더는 애초에
+// **notification_level이 "누가 이 리마인더의 수신자인가"라는 정의 자체에 포함된 채로
+// 이미 확정돼 있었다**(190보다 먼저, User가 직접 승인한 결정). §5-23·SC-notifications가
+// "발화된 reminder가 알림함에 표시된다"고 할 때의 "발화됨"도 이 수신자 집합에 든 사람
+// 기준으로 읽는 것이 §2-A의 문언과 일관된다 — "캘린더에 보이는 모든 사람"이 아니라
+// "발송 대상(접근권 AND 수신 선호)에 든 사람"이 알림함 기록의 대상이라는 뜻이다.
+// 그래서 reminderJobs.js의 dispatchOne이 getRecipients의 결과(이미 notification_level로
+// 좁혀진 목록) 하나로 푸시·insertNotificationsBulk를 둘 다 처리하는 것은 190이 고친
+// "혼합" 이 아니라 §2-A-2가 명시적으로 확정한 그대로다 — 고치지 않았다.
+// (참고로 tokens.length===0 조기 return도 이 파일엔 없다 — for 루프가 tokens가 비어도
+// 그냥 0회 반복만 하고 insertNotificationsBulk(recipientIds 기준, tokens 기준이 아님)로
+// 그대로 진행된다. 190의 ②(조기 return을 insert 뒤로 옮기는 것)에 해당하는 결함 자체가
+// 여기엔 없다.)
+//
+// ⚠️ 다만 §2-A-2(2026-08-03 확정)는 190(User의 새 "인앱은 모든 상황에" 원칙, 그보다 최근)
+// 보다 먼저 정해진 결정이다 — 두 원칙이 서로 다른 자리(sendAlert vs reminder)에 적용되고
+// 있어 지금은 모순이 아니지만, §2-A-2를 190의 새 원칙에 맞춰 재검토할지는 User/Architect
+// 판단이 필요한 사안이라 여기서 임의로 바꾸지 않았다.
 const MAX_NOTIFICATION_LEVEL_FOR_REMINDER = 1;
 
 // RLY-20260806-026 — reminders는 발송 원장(schema.md §10-4, 13컬럼, [확정] 2026-08-03)이다.
@@ -310,7 +330,9 @@ class ReminderDAO {
   // notificationDAO가 다른 곳에서 쓰는 것과 동일 조건(dm.deleted_at IS NULL AND dm.role >= 0
   // AND dm.notification_level <= N)을 재사용한다 — 새 필터를 만들지 않는다. (파일 상단
   // MAX_NOTIFICATION_LEVEL_FOR_REMINDER 주석 참조 — RLY-20260806-190 이후 notificationDAO
-  // 쪽은 이 세 조건을 한 메서드에서 합쳐 걸지 않는다, 이 파일은 그대로 합쳐 건다.)
+  // 쪽은 이 세 조건을 한 메서드에서 합쳐 걸지 않지만, 이 파일이 그대로 합쳐 거는 것은
+  // 결함이 아니라 SC-reminder.md §2-A-2가 명시적으로 확정한 리마인더 고유의 수신자
+  // 정의다 — RLY-20260806-194가 조사해 확인함, 고치지 않았다.)
   async getRecipients(conn, targetType, targetId) {
     if (targetType === 2) {
       const result = await conn.query(
