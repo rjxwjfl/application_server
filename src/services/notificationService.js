@@ -17,6 +17,12 @@ const ALERT_TYPE_MAP = {
   reaction: ActionType.REACT,
   pin: ActionType.PIN,
   message: ActionType.CREATE,
+  // RLY-20260806-203(T-N1~N3) — 신규 3종. member_joined·member_kicked는 ALERT_TYPE_MAP
+  // 도입 이전부터 있던 호출부라 매핑이 없고 기본값(ActionType.CREATE)으로 떨어진다 —
+  // 그 둘은 이번 범위가 아니라 손대지 않는다(기존 notification_type 값 변경 = 동작 변경).
+  post_created: ActionType.CREATE,
+  role_change: ActionType.ROLE_CHANGE,
+  member_left: ActionType.LEAVE,
 };
 
 class NotificationService {
