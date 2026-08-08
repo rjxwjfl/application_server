@@ -1,4 +1,6 @@
 const userService = require('./userService');
+const { BinderService } = require('./binderService');
+const { generateUUID } = require('../utils/uuid');
 const { UserDAO } = require('../daos/userDAO');
 const { UserSettingsDAO } = require('../daos/userSettingsDAO');
 const eventBus = require('../events/eventBus');
@@ -23,7 +25,7 @@ class AuthService {
   async register(userData, data) {
     const { device_info } = data;
 
-    const { user, userSettings } = await withTransaction(async (client) => {
+    const { user, userSettings, binder } = await withTransaction(async (client) => {
       const { user, userSettings } = await userService.createUser(
         {
           uid: userData.uid,
@@ -39,7 +41,28 @@ class AuthService {
         await userService.registerDevice(user.id, device_info, client);
       }
 
-      return { user, userSettings };
+      // RLY-20260806-229 — 가입 시 본인 바인더 자동 생성(user_workflows.md §5-9 확정).
+      //
+      // ⚠️ 이 블록이 없어서 가입 직후 첫 실행이 반드시 에러로 끝났다. 클라
+      // `auth_repository.userInitialize`는 응답에 `binder`가 없으면 예외를 던지는데
+      // (auth_repository.dart:330 — 주석이 "register 트랜잭션에서 서버가 기본 binder까지
+      // 원자적으로 생성"이라고 계약을 그대로 적어 두고 있다) 서버는 `{user, settings}`만
+      // 돌려주고 있었다. 문서·클라·서버 셋이 서로 다른 것을 전제하고 있었다.
+      //
+      // ⚠️ 같은 트랜잭션(client)에서 만든다 — 유저만 생기고 바인더가 없는 계정이 남으면
+      // 클라는 매 실행마다 같은 지점에서 예외를 맞는다. 원자성이 이 결함의 핵심이다.
+      //
+      // 바인더 id는 서버가 정한다. 클라 발급 규약(system.md §10-2)은 "로컬에 먼저 만들어
+      // 화면에 보여주는 항목"이 조건인데, 가입 바인더는 응답을 받은 뒤에야 로컬에 쓰이므로
+      // 해당하지 않는다. 클라는 받은 id를 pending으로 고정해 두었다가 이후 단계가 실패하면
+      // 그 id로 멱등 재시도한다(auth_repository.dart:303-306).
+      const binder = await BinderService.createBinderTx(
+        client,
+        { id: generateUUID(), name: user.display_name ? `${user.display_name}의 바인더` : '내 바인더' },
+        user.id
+      );
+
+      return { user, userSettings, binder };
     });
 
     // 트랜잭션 외부에서 Firebase Custom Claim 발급
@@ -55,7 +78,7 @@ class AuthService {
       });
       try {
         await withTransaction(async (client) => {
-          await UserDAO.cleanupFailedRegistration(client, user.id);
+          await UserDAO.cleanupFailedRegistration(client, user.id, binder.binder.id);
         });
         logger.info('가입 롤백 완료', { userId: user.id });
       } catch (rollbackError) {
@@ -76,7 +99,15 @@ class AuthService {
       provider: userData.firebase?.sign_in_provider || 'custom',
     });
 
-    return { user, settings: userSettings };
+    // RLY-20260806-229 — createBinder 경로가 트랜잭션 후에 emit하는 것과 같은 이벤트다.
+    // 여기서 빠뜨리면 가입으로 만들어진 바인더만 sync·활동 기록의 출발점이 없어진다.
+    eventBus.emit('member:joined', {
+      user_id: user.id,
+      binder_id: binder.binder.id,
+      device_uuid: device_info?.device_uuid,
+    });
+
+    return { user, settings: userSettings, binder };
   }
 
   async updateMe(uid, updateData) {

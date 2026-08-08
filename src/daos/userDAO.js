@@ -288,8 +288,26 @@ class UserDAO {
    * @param {string} userId - 사용자 UUID
    * @returns {Promise<boolean>} 삭제 성공 여부
    */
-  async cleanupFailedRegistration(conn, userId) {
+  /**
+   * 가입 실패 롤백. `binderId`는 RLY-20260806-229 이후 register가 같은 트랜잭션에서
+   * 만드는 기본 바인더다.
+   *
+   * ⚠️ **바인더를 함께 지우지 않으면 롤백이 통째로 실패한다.** FK ON DELETE CASCADE가
+   * 지정돼 있지 않아 `binder_members.user_id`가 남은 채로 `DELETE FROM users`를 하면
+   * FK 위반이 나고, 그러면 "CRITICAL: 클레임 실패 후 가입 롤백도 실패" 경로로 떨어져
+   * 수동 정리 대상이 된다. 즉 이 인자를 빠뜨리면 되돌리기가 아니라 반쯤 만들어진
+   * 계정이 남는다.
+   */
+  async cleanupFailedRegistration(conn, userId, binderId = null) {
     // FK ON DELETE CASCADE 미지정이므로 의존 테이블부터 순차 삭제
+    if (binderId) {
+      // 자식(섹션·달력·설정·멤버) → 부모(바인더) 순.
+      await conn.query('DELETE FROM sections        WHERE binder_id = $1', [binderId]);
+      await conn.query('DELETE FROM calendars       WHERE binder_id = $1', [binderId]);
+      await conn.query('DELETE FROM binder_settings WHERE binder_id = $1', [binderId]);
+      await conn.query('DELETE FROM binder_members  WHERE binder_id = $1', [binderId]);
+      await conn.query('DELETE FROM binders         WHERE id = $1', [binderId]);
+    }
     await conn.query('DELETE FROM user_devices  WHERE user_id = $1', [userId]);
     await conn.query('DELETE FROM user_settings WHERE user_id = $1', [userId]);
     await conn.query('DELETE FROM user_infos    WHERE user_id = $1', [userId]);

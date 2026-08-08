@@ -28,42 +28,52 @@ class BinderService {
       throw new BadRequestError('Binder 이름이 필요합니다');
     }
 
-    const result = await withTransaction(async (client) => {
-      const binder = await BinderDAO.create(client, data);
-      const settings = await BinderDAO.createSettings(client, binder.id);
-      // 소유자(master)는 항상 인증된 요청자다 — 요청 본문의 user_id는 신원으로 신뢰하지 않는다.
-      const member = await BinderDAO.addMember(client, binder.id, userId, 0);
-
-      const calendar = await CalendarDAO.create(client, {
-        id: generateUUID(),
-        binder_id: binder.id,
-        title: '기본 달력',
-        color: Math.floor(Math.random() * 15),
-      });
-
-      // RLY-20260806-087 — 이 호출이 바인더당 유일한 is_default=true INSERT 지점이다
-      // (SC-section-manage.md:100·629). 삭제 차단(sectionService.js:72)·마지막 섹션 보호가
-      // 이 플래그에 의존한다.
-      const section = await SectionDAO.create(client, {
-        id: generateUUID(),
-        binder_id: binder.id,
-        title: '기본',
-        is_default: true,
-      });
-
-      return {
-        binder,
-        settings,
-        calendar,
-        section,
-        members: [member],
-        preferences: member,
-      };
-    });
+    const result = await withTransaction((client) => this.createBinderTx(client, data, userId));
 
     eventBus.emit('member:joined', { user_id: userId, binder_id: result.binder.id, device_uuid });
 
     return result;
+  }
+
+  /**
+   * 바인더 생성의 트랜잭션 본문. **이미 열린 client 위에서 돈다 — 트랜잭션을 스스로 열지 않는다.**
+   *
+   * RLY-20260806-229 — `authService.register`가 가입 트랜잭션 안에서 기본 바인더를 함께
+   * 만들 수 있도록 분리했다. ⚠️ **복사하지 말고 이 메서드를 호출할 것** — 반환 형태가 곧
+   * 클라이언트 `BinderCreateResponse`(binder·settings·calendar·section·members·preferences)의
+   * 계약이라, 생성 경로가 둘로 갈라지면 한쪽만 필드가 빠져도 클라가 파싱에 실패한다.
+   */
+  async createBinderTx(client, data, userId) {
+    const binder = await BinderDAO.create(client, data);
+    const settings = await BinderDAO.createSettings(client, binder.id);
+    // 소유자(master)는 항상 인증된 요청자다 — 요청 본문의 user_id는 신원으로 신뢰하지 않는다.
+    const member = await BinderDAO.addMember(client, binder.id, userId, 0);
+
+    const calendar = await CalendarDAO.create(client, {
+      id: generateUUID(),
+      binder_id: binder.id,
+      title: '기본 달력',
+      color: Math.floor(Math.random() * 15),
+    });
+
+    // RLY-20260806-087 — 이 호출이 바인더당 유일한 is_default=true INSERT 지점이다
+    // (SC-section-manage.md:100·629). 삭제 차단(sectionService.js:72)·마지막 섹션 보호가
+    // 이 플래그에 의존한다.
+    const section = await SectionDAO.create(client, {
+      id: generateUUID(),
+      binder_id: binder.id,
+      title: '기본',
+      is_default: true,
+    });
+
+    return {
+      binder,
+      settings,
+      calendar,
+      section,
+      members: [member],
+      preferences: member,
+    };
   }
 
   async getMyBinders(userId) {

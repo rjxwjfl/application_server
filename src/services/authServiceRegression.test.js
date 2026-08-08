@@ -87,6 +87,10 @@ let insertedUsers = [];
 let insertedInfos = [];
 let insertedSettings = [];
 let insertedDevices = [];
+// RLY-20260806-229 — 가입 트랜잭션이 만드는 기본 바인더
+let insertedBinders = [];
+let insertedMembers = [];
+let insertedSections = [];
 let cleanupCalls = [];
 let deactivateDeviceCalls = [];
 let updateLastActivityCalls = [];
@@ -96,6 +100,7 @@ function reset() {
   claimCalls = []; claimShouldFail = false;
   insertedUsers = []; insertedInfos = []; insertedSettings = []; insertedDevices = [];
   cleanupCalls = []; deactivateDeviceCalls = []; updateLastActivityCalls = []; reactivateCalls = [];
+  insertedBinders = []; insertedMembers = []; insertedSections = [];
 }
 
 async function mockQuery(sql, params = []) {
@@ -150,9 +155,34 @@ async function mockQuery(sql, params = []) {
     insertedDevices.push(params);
     return { rows: [{ id: params[0], user_id: params[1], device_uuid: params[2] }] };
   }
-  // UserDAO.cleanupFailedRegistration — 4개 DELETE
+  // ⚠️ RLY-20260806-229 — register가 같은 트랜잭션에서 기본 바인더를 만든다
+  // (BinderService.createBinderTx). 아래 5개 INSERT가 그 흐름이며, 하나라도 사라지면
+  // 클라 `BinderCreateResponse` 파싱이 깨진다 — 그래서 각각을 기록해 아래에서 단언한다.
+  if (s.startsWith('INSERT INTO binders')) {
+    insertedBinders.push({ id: params[0], name: params[1] });
+    return { rows: [{ id: params[0], name: params[1], description: null, image_url: null, thumbnail_url: null, member_count: 1, last_activity_at: NOW, created_at: NOW, updated_at: NOW, deleted_at: null }] };
+  }
+  if (s.startsWith('INSERT INTO binder_settings')) {
+    return { rows: [{ binder_id: params[0], is_public: false, is_searchable: false, require_approval: false, updated_at: NOW }] };
+  }
+  if (s.startsWith('INSERT INTO binder_members')) {
+    insertedMembers.push({ binder_id: params[0], user_id: params[1], role: params[2] });
+    return { rows: [{ binder_id: params[0], user_id: params[1], role: params[2], joined_at: NOW, created_at: NOW, updated_at: NOW }] };
+  }
+  if (s.startsWith('INSERT INTO calendars')) {
+    return { rows: [{ id: params[0], binder_id: params[1], title: params[2], created_at: NOW, updated_at: NOW }] };
+  }
+  if (s.startsWith('INSERT INTO sections')) {
+    insertedSections.push({ id: params[0], binder_id: params[1], is_default: params[4] });
+    return { rows: [{ id: params[0], binder_id: params[1], title: params[2], access_scope: params[3], is_default: params[4], created_at: NOW, updated_at: NOW }] };
+  }
+  // UserDAO.cleanupFailedRegistration — user 4개 DELETE + ⚠️ 229 이후 binder 5개 DELETE.
+  // 바인더 쪽이 빠지면 FK 위반으로 DELETE FROM users가 실패해 롤백 자체가 깨진다.
   if (s.startsWith('DELETE FROM user_devices') || s.startsWith('DELETE FROM user_settings')
-    || s.startsWith('DELETE FROM user_infos') || s.startsWith('DELETE FROM users')) {
+    || s.startsWith('DELETE FROM user_infos') || s.startsWith('DELETE FROM users')
+    || s.startsWith('DELETE FROM sections') || s.startsWith('DELETE FROM calendars')
+    || s.startsWith('DELETE FROM binder_settings') || s.startsWith('DELETE FROM binder_members')
+    || s.startsWith('DELETE FROM binders')) {
     cleanupCalls.push({ sql: s, userId: params[0] });
     return { rowCount: 1 };
   }
@@ -234,6 +264,10 @@ async function run() {
     let emitted = null;
     const onRegistered = (payload) => { emitted = payload; };
     eventBus.on('user:registered', onRegistered);
+    // RLY-20260806-229 — createBinder 경로와 같은 이벤트를 가입 경로에서도 낸다.
+    let joined = null;
+    const onJoined = (payload) => { joined = payload; };
+    eventBus.on('member:joined', onJoined);
     try {
       const result = await authService.register(
         { uid: 'uid-new', email: 'new@x.com', name: 'New User', firebase: { sign_in_provider: 'google' } },
@@ -247,8 +281,32 @@ async function run() {
       check('④ setCustomUserClaims가 db_user_id로 호출된다', claimCalls.length === 1 && claimCalls[0].uid === 'uid-new' && !!claimCalls[0].claims.db_user_id);
       check("④ eventBus.emit('user:registered')가 발생한다", !!emitted && emitted.provider === 'google');
       check('④ cleanupFailedRegistration은 호출되지 않는다(성공 경로)', cleanupCalls.length === 0);
+
+      // ⚠️ RLY-20260806-229 — 이 블록이 없어서 가입 직후 첫 실행이 반드시 에러로 끝났다.
+      // 클라 `auth_repository.userInitialize`는 응답에 binder가 없으면 예외를 던지는데
+      // (auth_repository.dart:330) 서버는 {user, settings}만 돌려주고 있었다.
+      // ⚠️ "user가 반환된다"만 보면 이 결함을 못 본다 — 가입 자체는 성공했기 때문이다.
+      check('④ ⚠️ register 응답에 binder가 포함된다(없으면 클라 첫 실행이 예외로 끝난다)', !!result.binder);
+      // ⚠️ 형태 전체가 계약이다 — 클라 BinderCreateResponse의 6개 필드는 전부 required라
+      // 하나만 빠져도 파싱 단계에서 터진다. 존재만 보지 않고 필드를 열어서 확인한다.
+      check('④ ⚠️ binder 응답이 BinderCreateResponse 6개 필드를 모두 갖춘다',
+        !!result.binder && ['binder', 'settings', 'calendar', 'section', 'members', 'preferences']
+          .every((k) => result.binder[k] !== undefined && result.binder[k] !== null),
+        `실제 키=${result.binder ? JSON.stringify(Object.keys(result.binder)) : 'null'}`);
+      check('④ 기본 바인더가 같은 트랜잭션에서 1건 생성된다', insertedBinders.length === 1);
+      check('④ 가입자가 그 바인더의 master(role 0)로 들어간다',
+        insertedMembers.length === 1 && insertedMembers[0].user_id === insertedUsers[0].id && insertedMembers[0].role === 0,
+        `실제=${JSON.stringify(insertedMembers)}`);
+      // RLY-20260806-087 — 바인더당 유일한 is_default=true INSERT 지점(삭제 차단·마지막 섹션 보호가 이 플래그에 의존).
+      check('④ 기본 섹션이 is_default=true로 함께 생성된다',
+        insertedSections.length === 1 && insertedSections[0].is_default === true,
+        `실제=${JSON.stringify(insertedSections)}`);
+      check("④ eventBus.emit('member:joined')가 가입 바인더에 대해서도 발생한다",
+        !!joined && joined.binder_id === insertedBinders[0].id && joined.user_id === insertedUsers[0].id,
+        `실제=${JSON.stringify(joined)}`);
     } finally {
       eventBus.off('user:registered', onRegistered);
+      eventBus.off('member:joined', onJoined);
     }
   }
 
@@ -269,11 +327,32 @@ async function run() {
     { statusCode: 503, errorCode: 'CLAIM_ISSUANCE_FAILED' }
   );
   check('⑥ users INSERT는 됐다가(가입 시도 자체는 성공)', insertedUsers.length === 1 && insertedUsers[0].email === 'claimfail@x.com');
-  check('⑥ cleanupFailedRegistration이 4개 테이블 모두에 대해 호출된다(hard delete 롤백)',
-    cleanupCalls.length === 4 && ['user_devices', 'user_settings', 'user_infos', 'users'].every((t) => cleanupCalls.some((c) => c.sql.includes(`DELETE FROM ${t}`))),
+  // ⚠️ RLY-20260806-229 — 4개에서 9개로 늘었다. register가 같은 트랜잭션에서 기본 바인더를
+  // 만들게 되면서 롤백도 그만큼 넓어져야 한다. 바인더 쪽 5개가 빠지면 FK ON DELETE CASCADE가
+  // 없어 `DELETE FROM users`가 FK 위반으로 실패하고, "롤백도 실패" 경로로 떨어져 반쯤
+  // 만들어진 계정이 남는다 — 되돌리기가 아니라 수동 정리 대상이 된다.
+  check('⑥ cleanupFailedRegistration이 9개 테이블 모두에 대해 호출된다(hard delete 롤백)',
+    cleanupCalls.length === 9
+      && ['sections', 'calendars', 'binder_settings', 'binder_members', 'binders',
+        'user_devices', 'user_settings', 'user_infos', 'users']
+        .every((t) => cleanupCalls.some((c) => c.sql.includes(`DELETE FROM ${t} `))),
     `실제=${JSON.stringify(cleanupCalls.map((c) => c.sql))}`);
-  check('⑥ cleanupFailedRegistration이 새로 만든 user.id를 대상으로 한다(다른 사용자 오염 아님)',
-    cleanupCalls.every((c) => c.userId === insertedUsers[0].id));
+  // ⚠️ 순서가 계약이다 — 자식이 부모보다 먼저 지워져야 FK 위반이 안 난다.
+  check('⑥ 자식 → 부모 순으로 지운다(binders는 그 자식들 뒤, users는 맨 뒤)',
+    (() => {
+      const at = (t) => cleanupCalls.findIndex((c) => c.sql.includes(`DELETE FROM ${t} `));
+      return ['sections', 'calendars', 'binder_settings', 'binder_members'].every((t) => at(t) < at('binders'))
+        && ['user_devices', 'user_settings', 'user_infos'].every((t) => at(t) < at('users'))
+        && at('binder_members') < at('users');
+    })(),
+    `실제=${JSON.stringify(cleanupCalls.map((c) => c.sql))}`);
+  check('⑥ 사용자 쪽 DELETE는 새로 만든 user.id를 대상으로 한다(다른 사용자 오염 아님)',
+    cleanupCalls.filter((c) => c.sql.includes('WHERE user_id = $1') || c.sql.includes('FROM users '))
+      .every((c) => c.userId === insertedUsers[0].id));
+  check('⑥ 바인더 쪽 DELETE는 이번에 만든 binder.id를 대상으로 한다',
+    insertedBinders.length === 1
+      && cleanupCalls.filter((c) => c.sql.includes('WHERE binder_id = $1') || c.sql.includes('FROM binders '))
+        .every((c) => c.userId === insertedBinders[0].id));
 
   // ============ ⑦a reactivate — inactive(status=1) 사용자를 active로 복귀(E1 happy path) ============
   reset();
