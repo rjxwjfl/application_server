@@ -669,11 +669,21 @@ class SyncDAO {
   // =========================================================================
   // Personal Data 쿼리
   // =========================================================================
+  // RLY-20260806-216 — `created_at > $2`였다. 이 파일의 다른 모든 델타 쿼리(get*DeltaFull류·
+  // getOwnGroupMembers·getUserSubscriptions 등 20여 곳)는 전부 `updated_at`로 증분을 거른다 —
+  // "생성 이후"가 아니라 "마지막 동기화 이후 바뀐 것"을 델타로 보내야 갱신·소프트 삭제가
+  // 전파된다. notifications만 created_at을 썼다 — schema.sql의 idx_noti_sync(recipient_id,
+  // updated_at) 인덱스는 애초에 updated_at 필터를 위해 만들어져 있었는데(이름 자체가
+  // "idx_noti_sync") 실제 쿼리가 그걸 안 썼다. 그 결과: 마지막 동기화보다 오래전에 만들어진
+  // 알림을 지금 읽음 처리하거나(markAsRead·markAllAsRead) 삭제(softDelete·
+  // softDeleteOlderThan)해도 created_at은 안 바뀌므로 이 델타 쿼리가 그 행을 다시는 보내지
+  // 않았다 — 다른 기기는 영원히 옛 상태(안 읽음·안 지워짐)로 남는다. 오래된 알림 일괄 삭제가
+  // "서버에도 알려 모든 기기에서 지운다"는 목적을 달성하려면 이 줄이 반드시 고쳐져야 한다.
   static async getNotifications(pool, userId, since) {
     const query = `
       SELECT * FROM notifications
-      WHERE recipient_id = $1 AND created_at > $2
-      ORDER BY created_at DESC
+      WHERE recipient_id = $1 AND updated_at > $2
+      ORDER BY updated_at DESC
     `;
     const { rows } = await pool.query(query, [userId, since]);
     return rows;

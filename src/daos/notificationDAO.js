@@ -196,6 +196,25 @@ class NotificationDAO {
     await conn.query(query, [notificationId, recipientId]);
   }
 
+  // RLY-20260806-216 — User 판정: "오래된 알림 삭제"(SC-notifications.md E22, 화면의 "오래된
+  // 알림 삭제(30일 이상)" 메뉴)가 서버에도 알려 모든 기기에서 지워지게 한다. 클라
+  // NotificationsActions.deleteOlderThan30Days()가 쓰는 기준(recipient 소유·created_at
+  // 기준 30일 이전·읽음 여부 무관)을 그대로 따른다 — 서버가 다른 기준을 쓰면 기기마다
+  // 다시 어긋난다. deleted_at IS NULL을 넣어 이미 지워진 행은 다시 건드리지 않는다
+  // (markAllAsRead의 is_read=FALSE 필터와 같은 관례 — 불필요한 쓰기를 피한다).
+  //
+  // 파티션 비용: notifications는 created_at 기준 연도별 RANGE 파티션이고, 이 WHERE의
+  // `created_at < $2`가 파티션 키를 직접 건드려 플래너가 프루닝한다 — cutoff(30일 전)는
+  // 사실상 항상 "올해" 파티션 안이라(연초 며칠을 빼면) 실질적으로 단일 파티션 UPDATE다.
+  async softDeleteOlderThan(conn, recipientId, cutoff) {
+    const query = `
+      UPDATE notifications
+      SET deleted_at = now(), updated_at = now()
+      WHERE recipient_id = $1 AND created_at < $2 AND deleted_at IS NULL
+    `;
+    await conn.query(query, [recipientId, cutoff]);
+  }
+
   async getUnreadCount(conn, recipientId) {
     const query = `
       SELECT COUNT(*) AS count
