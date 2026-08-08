@@ -259,11 +259,22 @@ class UserDAO {
     return rowCount > 0;
   }
 
+  // RLY-20260806-212 — 이 UPDATE에 WHERE 가드가 전혀 없었다(firebase_uid만 대조). reactivate는
+  // SC-auth.md E1·§16-2가 규정하는 "휴면(status=inactive) → active" 흐름 하나만을 위한
+  // 메서드인데, deleted_at까지 무조건 NULL로 지워 버려 소프트 삭제된 계정(자진 탈퇴·운영진
+  // 영구 차단 — §1-4가 명시하듯 **같은 deleted_at 컬럼을 공유**한다)을 유효한 Firebase 토큰
+  // 하나만으로 되살릴 수 있었다(RLY-20260806-208 실측 발견). §16-6은 자진 탈퇴조차 "30일 내
+  // 복원 미지원(V2 이관)" — 30일 보존 뒤 hard delete, 재가입은 **신규 user_id**로만 —
+  // 라고 명시하므로, deleted_at이 설정된 계정은 자진 탈퇴든 영구 차단이든 이 메서드로
+  // 되살아나면 안 된다(둘을 가르는 별도 컬럼이 없다 — §1-4: "구분은 audit_log에서"). 그래서
+  // deleted_at은 이 메서드가 아예 건드리지 않고(SET에서 제거), WHERE에 status=1(휴면)·
+  // deleted_at IS NULL을 둘 다 요구한다 — status가 active/inactive인 동시에 deleted_at도
+  // NULL인, 진짜 "휴면" 상태에서만 성공한다.
   async reactivate(conn, uid) {
     const { rows } = await conn.query(
       `UPDATE users
-       SET deleted_at = NULL, status = 0, updated_at = NOW()
-       WHERE firebase_uid = $1
+       SET status = 0, updated_at = NOW()
+       WHERE firebase_uid = $1 AND status = 1 AND deleted_at IS NULL
        RETURNING id, firebase_uid, email, provider, status, created_at, updated_at`,
       [uid]
     );
