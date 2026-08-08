@@ -384,12 +384,11 @@ class MessageService {
   // 맞고, feed/audit의 target_type은 "무엇이 바뀌었는가"라 반응 자체가 맞다 — 둘의
   // 관심사가 다르다). requiredLevel:1(relatedOnly)로 잡았다 — E9가 "본인 작성 메시지의
   // 반응·답글"을 relatedOnly 등급으로 명시한다(mention의 requiredLevel:2/mentionOnly보다
-  // 낮은, 더 널리 받는 등급). ⚠️ 단 이 값은 target_user_ids를 명시로 넘기는 현재
-  // sendAlert 경로에서 실제로는 참조되지 않는다(getMembersForAlert의 requiredLevel 필터는
-  // target_user_ids가 비어 있을 때만 탄다) — mention 등 다른 explicit-target alert도
-  // 전부 같은 상태다. 이건 sendAlert 자체의 구조적 공백(수신자 개인의 notification_level을
-  // explicit-target 경로가 아예 안 본다)이라 이번 태스크(emit 누락) 범위를 넘어 별도로
-  // 보고만 한다 — 여기서 고치지 않았다.
+  // 낮은, 더 널리 받는 등급). RLY-20260806-184가 explicit-target 경로에도 이 값이 실제로
+  // 적용되도록 sendAlert를 고쳤고(그 전엔 target_user_ids를 명시로 넘기면 이 값이 완전히
+  // 무시됐다), RLY-20260806-190이 "인앱 알림센터 기록은 이 값과 무관하게 항상 남고, 이
+  // 값은 기기 푸시 여부만 가른다"로 한 번 더 정리했다 — 자세한 이유는
+  // notificationService.sendAlert 주석 참조.
   // 반응 "제거"(removeReaction)는 alert를 추가하지 않았다 — E17은 "추가됨"만 명시한다.
   async addReaction(messageId, emoji, context) {
     const { result, binder_id, authorId, sectionTitle } = await withTransaction(async (client) => {

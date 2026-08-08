@@ -29,7 +29,7 @@
  *  ⑨ syncDAO.js:79     getUsersForSync         — dm.role >= 0
  *  ⑩ syncDAO.js:105    getSection              — bm.role >= 0 (JOIN 조건)
  *  ⑪ notificationDAO.js:39  getBinderIdsByUserId — role >= 0
- *  ⑫ notificationDAO.js:70  getMembersForAlert   — dm.role >= 0
+ *  ⑫ notificationDAO.js  getActiveMemberIds(RLY-20260806-190 이전엔 getMembersForAlert) — dm.role >= 0
  *  ⑬ notificationService.js:85  sendAlert(SECTION_MESSAGE 타겟팅) — bm.role >= 0
  *
  * 실행: node src/services/pendingApplicantFilterCoverageRegression.test.js
@@ -349,25 +349,28 @@ async function testNotifGetBinderIdsByUserId() {
   check('⑪ NotificationDAO.getBinderIdsByUserId: 정상 멤버는 토픽 포함', memberIds.includes('b1'));
 }
 
-// ── ⑫ NotificationDAO.getMembersForAlert ───────────────────────────────
-async function testGetMembersForAlert() {
+// ── ⑫ NotificationDAO.getActiveMemberIds ────────────────────────────────
+// RLY-20260806-190 — getMembersForAlert(notification_level까지 SQL에서 함께 거르던
+// 메서드)는 삭제됐다(가시성·선호를 분리하며 정리 — sendAlert가 이제 이 메서드로 가시성만
+// 가져온 뒤, filterUserIdsByNotificationLevel로 선호를 별도로 좁힌다). 이 회귀의 관심사인
+// "pending은 대상 아님·정상 멤버는 대상"은 role>=0 필터로 여전히 유효해 그대로 옮긴다.
+async function testGetActiveMemberIds() {
   const rows = [
-    { binder_id: 'b1', user_id: 'pending1', role: -1, notification_level: 0, deleted_at: null },
-    { binder_id: 'b1', user_id: 'member1', role: 3, notification_level: 0, deleted_at: null },
+    { binder_id: 'b1', user_id: 'pending1', role: -1, deleted_at: null },
+    { binder_id: 'b1', user_id: 'member1', role: 3, deleted_at: null },
   ];
   const conn = {
     async query(sql, params) {
       const s = norm(sql);
-      const [binderId, maxLevel] = params;
-      let result = rows.filter((r) => r.binder_id === binderId && !r.deleted_at && r.notification_level <= maxLevel);
+      const [binderId] = params;
+      let result = rows.filter((r) => r.binder_id === binderId && !r.deleted_at);
       if (s.includes('dm.role >= 0')) result = result.filter((r) => r.role >= 0);
-      return { rows: result.map((r) => ({ user_id: r.user_id, notification_level: r.notification_level, role: r.role })) };
+      return { rows: result.map((r) => ({ user_id: r.user_id })) };
     },
   };
-  const result = await NotificationDAO.getMembersForAlert(conn, 'b1', 0);
-  const ids = result.map((r) => r.user_id);
-  check('⑫ NotificationDAO.getMembersForAlert: pending은 ALERT 푸시 대상 아님', !ids.includes('pending1'));
-  check('⑫ NotificationDAO.getMembersForAlert: 정상 멤버는 ALERT 대상', ids.includes('member1'));
+  const ids = await NotificationDAO.getActiveMemberIds(conn, 'b1');
+  check('⑫ NotificationDAO.getActiveMemberIds: pending은 대상 아님', !ids.includes('pending1'));
+  check('⑫ NotificationDAO.getActiveMemberIds: 정상 멤버는 대상', ids.includes('member1'));
 }
 
 // ── ⑬ NotificationService.sendAlert (SECTION_MESSAGE 타겟팅) ───────────
@@ -473,7 +476,7 @@ async function run() {
   await testGetUsersForSync();
   await testGetSection();
   await testNotifGetBinderIdsByUserId();
-  await testGetMembersForAlert();
+  await testGetActiveMemberIds();
   await testSendAlertSectionMessageTargeting();
 
   console.log(`\n[pendingApplicantFilterCoverageRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);

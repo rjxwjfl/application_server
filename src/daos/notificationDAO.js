@@ -55,30 +55,34 @@ class NotificationDAO {
     await conn.query(query, [tokens]);
   }
 
-  /**
-   * notification_level 기준으로 바인더 멤버 필터링
-   * notification_level: 0=모두, 1=관련만, 2=멘션만, 3=수신거부
-   */
-  // role >= 0 — pending(role=-1) 신청자는 ALERT 대상에서 제외한다(RLY-20260806-018). 대상에
-  // 들면 승인 전에 binder 활동 알림(메시지 미리보기 등 title/body 포함)을 받게 된다.
-  async getMembersForAlert(conn, binderId, maxLevel) {
+  // RLY-20260806-190 — User 판정: 알림은 두 채널이다. 기기 푸시(FCM)는 notification_level
+  // (선호)을 따르지만, 인앱 알림센터(notifications 행)는 "모든 상황에" 항상 남아야 한다.
+  // 예전 getMembersForAlert(notification_level <= maxLevel을 SQL WHERE절에 바로 건 브로드
+  // 캐스트 전용 조회)는 가시성(binder 멤버인가)과 선호(수준을 낮췄는가)를 한 번에 걸러
+  // 인앱 기록까지 함께 사라지게 했다 — 삭제하고 이 메서드로 대체한다. 가시성만(활성 멤버
+  // 전원, role>=0) 가져온다 — 선호는 sendAlert가 이 결과에 별도로
+  // filterUserIdsByNotificationLevel을 적용해 "푸시 대상만" 추가로 좁힌다(인앱 insert
+  // 대상 목록은 이 메서드의 결과 그대로 쓴다).
+  async getActiveMemberIds(conn, binderId) {
     const query = `
-      SELECT dm.user_id, dm.notification_level, dm.role
+      SELECT dm.user_id
       FROM binder_members dm
       WHERE dm.binder_id = $1
         AND dm.deleted_at IS NULL
         AND dm.role >= 0
-        AND dm.notification_level <= $2
     `;
-    const result = await conn.query(query, [binderId, maxLevel]);
-    return result.rows;
+    const result = await conn.query(query, [binderId]);
+    return result.rows.map((row) => row.user_id);
   }
 
+  /**
+   * notification_level 기준으로 후보 목록 필터링(선호 — 푸시 전용)
+   * notification_level: 0=모두, 1=관련만, 2=멘션만, 3=수신거부
+   */
   // RLY-20260806-184 — notificationService.sendAlert가 target_user_ids를 명시로 받는 경로
-  // (멘션·반응·배정·강퇴 등)에서 그동안 notification_level을 전혀 안 봤다. 위
-  // getMembersForAlert(브로드캐스트 — target_user_ids 없이 전체 멤버를 훑는 경로)와 같은
-  // 기준(notification_level <= maxLevel)을 이미 정해진 후보 목록(target_user_ids)에
-  // 적용한다.
+  // (멘션·반응·배정·강퇴 등)에서 그동안 notification_level을 전혀 안 봤다. RLY-20260806-190
+  // 부터는 브로드캐스트 경로도 이 메서드를 함께 쓴다(가시성은 getActiveMemberIds가 이미
+  // 걸렀으니, 여기서는 순수하게 선호만 추가로 좁힌다 — 두 경로가 이제 같은 함수를 공유한다).
   //
   // ⚠️ deleted_at IS NULL을 넣지 않았다 — 브로드캐스트 경로와 다르다. 강퇴(member_kicked)
   // 알림은 대상이 이미 binder_members에서 소프트 삭제된 뒤(kickBinderMember 트랜잭션

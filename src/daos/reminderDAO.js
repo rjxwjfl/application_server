@@ -1,7 +1,16 @@
 const { generateUUID } = require('../utils/uuid');
 
 // 【결정 63】 리마인더는 notification_level <= 1(모두·관련만)까지 수신한다(SC-reminder §2-A-2).
-// notificationDAO.getMembersForAlert가 이미 쓰는 임계값과 같은 상수값 — 신규 필터가 아니다.
+// notificationDAO가 알림 종류 전반에 쓰는 것과 같은 값 체계(0=모두·1=관련만·2=멘션만·
+// 3=수신거부) — 신규 필터가 아니다.
+// ⚠️ RLY-20260806-190 — sendAlert는 "가시성(항상 인앱 기록)"과 "선호(notification_level,
+// 푸시만)"를 분리했다(notificationDAO.getActiveMemberIds·filterUserIdsByNotificationLevel
+// 참조, 예전 getMembersForAlert는 삭제됨). 이 파일의 getRecipients는 그 분리를 적용받지
+// 않은 채 아래에서 여전히 notification_level을 리마인더 발송 대상 조회 SQL에 직접 걸어
+// 대상 자체를 좁힌다 — 리마인더 인앱 기록도 이 파일이 함께 만든다면(reminderJobs.js가
+// insertNotificationsBulk를 재사용) 같은 부류(가시성·선호 미분리)의 결함일 수 있다.
+// 이번 태스크(sendAlert 두 채널 분리) 범위 밖이라 여기는 손대지 않았다 — 구현 보고서에
+// 별도 발견으로 남겼다.
 const MAX_NOTIFICATION_LEVEL_FOR_REMINDER = 1;
 
 // RLY-20260806-026 — reminders는 발송 원장(schema.md §10-4, 13컬럼, [확정] 2026-08-03)이다.
@@ -298,8 +307,10 @@ class ReminderDAO {
   //
   // 멤버십(대기 신청자 자동 배제, binder_join_requests가 별도 테이블이라 binder_members JOIN
   // 자체로 걸러진다 — RLY-20260806-018/024)과 notification_level<=1(§2-A-2, 결정 63)은
-  // notificationDAO.getMembersForAlert와 동일 조건(dm.deleted_at IS NULL AND dm.role >= 0 AND
-  // dm.notification_level <= N)을 재사용한다 — 새 필터를 만들지 않는다.
+  // notificationDAO가 다른 곳에서 쓰는 것과 동일 조건(dm.deleted_at IS NULL AND dm.role >= 0
+  // AND dm.notification_level <= N)을 재사용한다 — 새 필터를 만들지 않는다. (파일 상단
+  // MAX_NOTIFICATION_LEVEL_FOR_REMINDER 주석 참조 — RLY-20260806-190 이후 notificationDAO
+  // 쪽은 이 세 조건을 한 메서드에서 합쳐 걸지 않는다, 이 파일은 그대로 합쳐 건다.)
   async getRecipients(conn, targetType, targetId) {
     if (targetType === 2) {
       const result = await conn.query(
