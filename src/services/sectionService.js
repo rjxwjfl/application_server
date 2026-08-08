@@ -15,13 +15,23 @@ class SectionService {
     return await SectionDAO.findByBinderId(pool, binderId, userId);
   }
 
+  // RLY-20260806-187 — User 판정: 공개 섹션(access_scope=0)은 editor 이상, 비공개(=1)는
+  // manager 이상을 그대로 유지한다(D4 확정 정책 — 비공개는 완화 대상이 아니다). scope에 따라
+  // 문턱이 갈리므로 scope를 먼저 확정(기존 검증 그대로: 미전송 시 기본값 0=공개, 0·1이
+  // 아니면 400 — 이 문턱을 그대로 통과한 값만 아래 역할 검사에 쓴다. "모르는 값이면
+  // 느슨한 쪽으로 실패" 문제 자체가 여기서 원천 차단된다 — 0·1 외 값은 역할 검사 도달 전에
+  // 이미 400으로 끝난다).
   async createSection(data, context) {
     const section = await withTransaction(async (client) => {
       const actor = await BinderDAO.getMember(client, data.binder_id, context.sender_id);
-      if (!actor || actor.deleted_at || actor.role > 1) throw new ForbiddenError('manager 이상 권한이 필요합니다');
+      if (!actor || actor.deleted_at) throw new ForbiddenError('바인더 멤버만 섹션을 만들 수 있습니다');
       if (Object.prototype.hasOwnProperty.call(data, 'group_id')) throw new BadRequestError('group_id는 지원하지 않습니다');
       const scope = data.access_scope ?? 0;
       if (![0, 1].includes(scope)) throw new BadRequestError('access_scope는 0 또는 1이어야 합니다');
+      const minRole = scope === 1 ? 1 : 2; // 비공개=manager(1) 이상, 공개=editor(2) 이상
+      if (actor.role > minRole) {
+        throw new ForbiddenError(scope === 1 ? 'manager 이상 권한이 필요합니다' : '편집자 이상 권한이 필요합니다');
+      }
       const created = await SectionDAO.create(client, {
         id: data.id || generateUUID(),
         binder_id: actor.binder_id,
