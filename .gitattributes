@@ -1,0 +1,52 @@
+# 줄바꿈 정책 — 윈도우·macOS 혼재 환경용 (2026-08-08 신설)
+#
+# ⚠️ 이것이 없으면 윈도우에서 clone 할 때 core.autocrlf 설정에 따라 CRLF 로 받아지고,
+#    `.sh` 스크립트가 `$'\r': command not found` 로 깨진다. 저장소의 모든 추적 파일이
+#    현재 LF 라 이 정책을 넣어도 재정규화 diff 가 생기지 않는다(추가 시점 실측).
+
+# 기본: 저장소에는 LF 로 저장하고, 체크아웃은 플랫폼 관행을 따른다.
+* text=auto
+
+# ⚠️ 실행 스크립트는 플랫폼과 무관하게 반드시 LF — CRLF 면 shebang 이 깨진다.
+*.sh            text eol=lf
+*.bash          text eol=lf
+gradlew         text eol=lf
+
+# ⚠️ 윈도우 배치·PowerShell 은 CRLF 여야 안전하다.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+gradlew.bat     text eol=crlf
+
+# 소스·설정 — LF 고정(도구 체인이 LF 를 전제한다)
+*.dart          text eol=lf
+*.js            text eol=lf
+*.json          text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.sql           text eol=lf
+*.md            text eol=lf
+*.gradle        text eol=lf
+*.kts           text eol=lf
+*.properties    text eol=lf
+*.xml           text eol=lf
+*.arb           text eol=lf
+*.toml          text eol=lf
+
+# 바이너리 — 변환 금지
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.webp          binary
+*.ico           binary
+*.ttf           binary
+*.otf           binary
+*.woff          binary
+*.woff2         binary
+*.jar           binary
+*.keystore      binary
+*.jks           binary
+*.p12           binary
+*.pdf           binary
+*.zip           binary
