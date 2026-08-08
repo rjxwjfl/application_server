@@ -16,13 +16,20 @@
  *     ConflictException" 중 후자 — 현재 코드가 택한 쪽)
  *   - reactivate: inactive(status=1) 사용자를 active로 복귀시킨다(E1 · §16-2 happy path)
  *
- * ⚠️ 발견했지만 고치지 않은 것(구현 보고서 참조) — reactivate가 status·deleted_at 어느
- * 쪽에도 WHERE 가드가 없다(UserDAO.reactivate). 이 파일은 그 결함을 "통과하는 정상
- * 동작"으로 굳히는 테스트를 만들지 않는다 — 그런 단언을 추가하면 결함이 스펙으로
- * 오인된다. 대신 구현 보고서에 별도로 등재했다.
+ * ⚠️ RLY-20260806-212 갱신 — 208에서 발견한 결함("reactivate가 status·deleted_at 어느
+ * 쪽에도 WHERE 가드가 없어, 유효한 Firebase 토큰만 있으면 소프트 삭제(자진 탈퇴·영구
+ * 차단)된 계정도 되살릴 수 있었다")을 여기서 고쳤다. §16-6("자진 탈퇴도 30일 내 복원
+ * 미지원 — V2 이관, 신규 user_id로만 재가입")과 §1-4("자진 탈퇴·영구 차단은 같은
+ * deleted_at 컬럼을 공유, 구분은 audit_log에서")를 근거로 **deleted_at이 설정된 계정은
+ * 자진 탈퇴든 영구 차단이든 이 메서드로 되살아나면 안 된다**고 판정했다 — 둘을 가르는
+ * 컬럼이 없으므로 새 컬럼을 만들지 않고, UserDAO.reactivate가 deleted_at 자체를 더 이상
+ * 건드리지 않게 하고(SET에서 제거) WHERE에 status=1(휴면)·deleted_at IS NULL을 요구한다.
+ * 막힌 경우(활성·소프트 삭제·미가입 전부)는 이유를 가리지 않고 하나의 404로 접는다
+ * (specialDayService.getById의 F-S8a 존재 오라클 방어와 같은 패턴) — 아래 ⑦b·⑦c·⑦d가
+ * 이 셋을 모두 검증한다.
  *
  * mock이 실제로 무엇을 검증하는지 확인(RLY-20260806-135 교훈 — SQL 텍스트와 무관하게
- * 항상 통과하는 mock은 아무것도 증명하지 않는다) — ②·④는 프로덕션 코드를 임시로
+ * 항상 통과하는 mock은 아무것도 증명하지 않는다) — ②·④·⑦은 프로덕션 코드를 임시로
  * 되돌려(cp 백업 + 복원) 이 테스트가 실제로 실패하는지 확인했다(구현 보고서 참조).
  *
  * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`. config/db·utils/firebase를
@@ -158,13 +165,14 @@ async function mockQuery(sql, params = []) {
   if (s.startsWith('SELECT id, device_uuid') && s.includes('FROM user_devices')) {
     return { rows: [] };
   }
-  // UserDAO.reactivate — ⚠️ 이 쿼리 자체엔 WHERE 가드가 없다(발견한 결함, 구현 보고서 참조).
-  if (s.startsWith('UPDATE users') && s.includes('deleted_at = NULL') && s.includes('firebase_uid = $1')) {
-    reactivateCalls.push(params[0]);
+  // UserDAO.reactivate — ⚠️ RLY-20260806-212: WHERE에 status=1·deleted_at IS NULL을 둘 다
+  // 요구한다(SQL 텍스트로 확인 — 이 절이 사라지면 아래 브랜치가 매칭되지 않아 "Unhandled
+  // query"로 실패한다, RLY-20260806-135 교훈). SET에서 deleted_at은 더 이상 건드리지 않는다.
+  if (s.startsWith('UPDATE users') && s.includes('SET status = 0') && s.includes('WHERE firebase_uid = $1 AND status = 1 AND deleted_at IS NULL')) {
     const row = usersByUid[params[0]];
-    if (!row) return { rows: [] };
+    if (!row || row.status !== 1 || row.deleted_at) return { rows: [] }; // 가드에 안 걸리면 0 rows(실제 UPDATE ... WHERE와 동일)
+    reactivateCalls.push(params[0]);
     row.status = 0;
-    row.deleted_at = null;
     return { rows: [{ id: row.id, firebase_uid: row.firebase_uid, email: row.email, provider: row.provider, status: row.status, created_at: NOW, updated_at: NOW }] };
   }
 
@@ -267,14 +275,33 @@ async function run() {
   check('⑥ cleanupFailedRegistration이 새로 만든 user.id를 대상으로 한다(다른 사용자 오염 아님)',
     cleanupCalls.every((c) => c.userId === insertedUsers[0].id));
 
-  // ============ ⑦ reactivate — inactive(status=1) 사용자를 active로 복귀(E1 happy path) ============
+  // ============ ⑦a reactivate — inactive(status=1) 사용자를 active로 복귀(E1 happy path) ============
   reset();
   {
     const result = await authService.reactivate('uid-inactive', {});
-    check('⑦ reactivate 후 status=0(active)', result && result.status === 0, `실제=${JSON.stringify(result)}`);
-    check('⑦ reactivate가 실제 DAO를 호출했다', reactivateCalls.includes('uid-inactive'));
+    check('⑦a reactivate 후 status=0(active)', result && result.status === 0, `실제=${JSON.stringify(result)}`);
+    check('⑦a reactivate가 실제 DAO를 호출했다', reactivateCalls.includes('uid-inactive'));
     usersByUid['uid-inactive'].status = 1; // 다음 시나리오를 위해 원복(픽스처는 mutable)
   }
+
+  // ============ ⑦b reactivate — 소프트 삭제(자진 탈퇴·영구 차단)된 계정은 거부(핵심 보안 수정) ============
+  // §16-6: 자진 탈퇴도 30일 내 복원 미지원(V2). §1-4: 영구 차단도 같은 deleted_at을 쓴다 —
+  // 유효한 Firebase 토큰 하나로 스스로 차단을 풀 수 있던 구멍(RLY-20260806-208 발견)이 막혔는지 확인.
+  reset();
+  await expectRejected('⑦b 소프트 삭제된 계정의 reactivate는 거부된다(404 — 이유를 밝히지 않는다)',
+    () => authService.reactivate('uid-deleted', {}), { statusCode: 404 });
+  check('⑦b 소프트 삭제된 계정은 실제로 되살아나지 않는다(deleted_at 유지)', !!usersByUid['uid-deleted'].deleted_at);
+  check('⑦b DAO가 실제로 이 계정을 갱신하지 않았다', !reactivateCalls.includes('uid-deleted'));
+
+  // ============ ⑦c reactivate — 이미 active인 계정도 거부(휴면이 아니므로 해당 없음) ============
+  reset();
+  await expectRejected('⑦c 이미 active인 계정의 reactivate는 거부된다(404)',
+    () => authService.reactivate('uid-active', {}), { statusCode: 404 });
+
+  // ============ ⑦d reactivate — 존재하지 않는 uid도 같은 404(존재 여부를 흘리지 않는다) ============
+  reset();
+  await expectRejected('⑦d 존재하지 않는 uid도 ⑦b·⑦c와 같은 404',
+    () => authService.reactivate('uid-does-not-exist', {}), { statusCode: 404 });
 
   // ============ ⑧ logout — deviceUuid 있으면 deactivateDevice, 미가입 사용자는 조용히 종료(예외 없음) ============
   reset();
