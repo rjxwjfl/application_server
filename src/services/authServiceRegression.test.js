@@ -1,0 +1,311 @@
+/**
+ * src/services/authServiceRegression.test.js
+ * =========================================
+ * RLY-20260806-208 — authService.js는 이 저장소에서 어떤 회귀 테스트에도 걸리지 않던
+ * 파일이었다(RLY-20260806-199 실측). "인증이 가장 위험하다 — 여기가 틀리면 다른 모든
+ * 인가가 무의미해진다"는 전제로 최우선 착수한다.
+ *
+ * docs/user/SC-auth.md와 대조해 문서가 명시적으로 규정하는 것만 단언한다(코드가 하는
+ * 것을 그대로 굳히지 않는다):
+ *   - getMe: 소프트 삭제(영구 차단)된 사용자는 null을 반환한다(§1-4 "영구 차단" ·
+ *     E2 — UserDAO.findByUid가 deleted_at IS NULL로 걸러 신규 가입처럼 보이게 위장한다)
+ *   - register: setCustomUserClaims 실패 시 가입을 롤백하고 503/CLAIM_ISSUANCE_FAILED를
+ *     던진다(§1-3 표 · 1-4 다이어그램의 Resp503 경로 — silent failure 차단이 이 스펙의
+ *     핵심 설계 의도다)
+ *   - register: 이미 가입된 이메일은 거부한다(E8 "서버는 원본 정보 반환 또는
+ *     ConflictException" 중 후자 — 현재 코드가 택한 쪽)
+ *   - reactivate: inactive(status=1) 사용자를 active로 복귀시킨다(E1 · §16-2 happy path)
+ *
+ * ⚠️ 발견했지만 고치지 않은 것(구현 보고서 참조) — reactivate가 status·deleted_at 어느
+ * 쪽에도 WHERE 가드가 없다(UserDAO.reactivate). 이 파일은 그 결함을 "통과하는 정상
+ * 동작"으로 굳히는 테스트를 만들지 않는다 — 그런 단언을 추가하면 결함이 스펙으로
+ * 오인된다. 대신 구현 보고서에 별도로 등재했다.
+ *
+ * mock이 실제로 무엇을 검증하는지 확인(RLY-20260806-135 교훈 — SQL 텍스트와 무관하게
+ * 항상 통과하는 mock은 아무것도 증명하지 않는다) — ②·④는 프로덕션 코드를 임시로
+ * 되돌려(cp 백업 + 복원) 이 테스트가 실제로 실패하는지 확인했다(구현 보고서 참조).
+ *
+ * 관행: 테스트 프레임워크 없음. plain assert + `node <file>.js`. config/db·utils/firebase를
+ * 가짜로 교체(sendAlertTwoChannelRegression.test.js와 동일 패턴).
+ *
+ * 실행: node src/services/authServiceRegression.test.js
+ */
+
+process.env.PGHOST = process.env.PGHOST || 'localhost';
+process.env.PGUSER = process.env.PGUSER || 'test';
+process.env.PGPASSWORD = process.env.PGPASSWORD || 'test';
+process.env.PGDATABASE = process.env.PGDATABASE || 'test';
+process.env.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'test';
+
+const dbPath = require.resolve('../../config/db');
+const firebasePath = require.resolve('../utils/firebase');
+const NOW = new Date().toISOString();
+
+// ── 가짜 Firebase Admin — admin.auth().setCustomUserClaims만 이 파일의 관심사다 ──────
+let claimCalls = [];
+let claimShouldFail = false;
+const fakeAdmin = {
+  auth: () => ({
+    setCustomUserClaims: async (uid, claims) => {
+      claimCalls.push({ uid, claims });
+      if (claimShouldFail) throw new Error('[fake] setCustomUserClaims 실패(시뮬레이션)');
+    },
+    verifyIdToken: async () => { throw new Error('[fake] 이 파일은 verifyIdToken을 쓰지 않는다'); },
+  }),
+};
+require.cache[firebasePath] = {
+  id: firebasePath, filename: firebasePath, loaded: true,
+  exports: { admin: fakeAdmin, verifyIdToken: async () => { throw new Error('unused'); } },
+};
+
+// ── 픽스처 ──────────────────────────────────────────────────────────────
+// uid-active: 정상 활성 사용자. uid-inactive: 휴면(status=1). uid-deleted: 소프트
+// 삭제(영구 차단 — deleted_at 설정, §1-4). uid-new: users에 아예 없는 신규 가입자.
+const usersByUid = {
+  'uid-active':   { id: 'u-active',   firebase_uid: 'uid-active',   email: 'active@x.com',   provider: 'google', status: 0, deleted_at: null },
+  'uid-inactive': { id: 'u-inactive', firebase_uid: 'uid-inactive', email: 'inactive@x.com', provider: 'google', status: 1, deleted_at: null },
+  'uid-deleted':  { id: 'u-deleted',  firebase_uid: 'uid-deleted',  email: 'deleted@x.com',  provider: 'google', status: 0, deleted_at: NOW },
+};
+const infosByUserId = {
+  'u-active':   { user_code: 'U0001', display_name: 'Active', bio: null, image_url: null, thumbnail_url: null },
+  'u-inactive': { user_code: 'U0002', display_name: 'Inactive', bio: null, image_url: null, thumbnail_url: null },
+  'u-deleted':  { user_code: 'U0003', display_name: 'Deleted', bio: null, image_url: null, thumbnail_url: null },
+};
+const settingsByUserId = {
+  'u-active':   { language_code: 'ko', timezone: 'UTC' },
+  'u-inactive': { language_code: 'ko', timezone: 'UTC' },
+};
+
+let insertedUsers = [];
+let insertedInfos = [];
+let insertedSettings = [];
+let insertedDevices = [];
+let cleanupCalls = [];
+let deactivateDeviceCalls = [];
+let updateLastActivityCalls = [];
+let reactivateCalls = [];
+
+function reset() {
+  claimCalls = []; claimShouldFail = false;
+  insertedUsers = []; insertedInfos = []; insertedSettings = []; insertedDevices = [];
+  cleanupCalls = []; deactivateDeviceCalls = []; updateLastActivityCalls = []; reactivateCalls = [];
+}
+
+async function mockQuery(sql, params = []) {
+  const s = sql.replace(/\s+/g, ' ').trim();
+
+  if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] };
+
+  // UserDAO.findByUid — ⚠️ deleted_at IS NULL 필터가 §1-4의 "영구 차단 위장" 핵심.
+  if (s.startsWith('SELECT') && s.includes('FROM users u') && s.includes('firebase_uid = $1') && s.includes('deleted_at IS NULL')) {
+    const row = usersByUid[params[0]];
+    if (!row || row.deleted_at) return { rows: [] }; // 소프트 삭제된 행은 여기서 걸러진다
+    const info = infosByUserId[row.id] || {};
+    return { rows: [{ id: row.id, status: row.status, ...info, created_at: NOW, updated_at: NOW, deleted_at: row.deleted_at }] };
+  }
+  // UserDAO.updateLastActivity
+  if (s.startsWith('UPDATE users') && s.includes('latest_activity_at = NOW()') && s.includes('firebase_uid = $1')) {
+    updateLastActivityCalls.push(params[0]);
+    return { rows: [] };
+  }
+  // UserSettingsDAO.get
+  if (s.startsWith('SELECT language_code') && s.includes('FROM user_settings')) {
+    const row = settingsByUserId[params[0]];
+    return { rows: row ? [row] : [] };
+  }
+  // UserDAO.findByEmail
+  if (s.startsWith('SELECT') && s.includes('FROM users u') && s.includes('u.email = $1')) {
+    const [email] = params;
+    const row = Object.values(usersByUid).find((u) => u.email === email && !u.deleted_at);
+    return { rows: row ? [{ ...row }] : [] };
+  }
+  // UserDAO.create — users INSERT
+  if (s.startsWith('INSERT INTO users') && s.includes('RETURNING id, firebase_uid, email, provider, status')) {
+    const [id, uid, email, provider, status] = params;
+    const row = { id, firebase_uid: uid, email, provider, status: status || 0, created_at: NOW, updated_at: NOW, latest_activity_at: NOW };
+    insertedUsers.push(row);
+    return { rows: [row] };
+  }
+  // UserDAO.create — user_infos INSERT
+  if (s.startsWith('INSERT INTO user_infos') && s.includes('RETURNING user_code, display_name')) {
+    const [user_id, user_code, display_name, bio, image_url, thumbnail_url] = params;
+    const row = { user_code, display_name, bio, image_url, thumbnail_url };
+    insertedInfos.push({ user_id, ...row });
+    return { rows: [row] };
+  }
+  // UserSettingsDAO.createDefault
+  if (s.startsWith('INSERT INTO user_settings')) {
+    insertedSettings.push(params[0]);
+    return { rows: [{ user_id: params[0], language_code: 'ko' }] };
+  }
+  // UserDAO.createDevice
+  if (s.startsWith('INSERT INTO user_devices')) {
+    insertedDevices.push(params);
+    return { rows: [{ id: params[0], user_id: params[1], device_uuid: params[2] }] };
+  }
+  // UserDAO.cleanupFailedRegistration — 4개 DELETE
+  if (s.startsWith('DELETE FROM user_devices') || s.startsWith('DELETE FROM user_settings')
+    || s.startsWith('DELETE FROM user_infos') || s.startsWith('DELETE FROM users')) {
+    cleanupCalls.push({ sql: s, userId: params[0] });
+    return { rowCount: 1 };
+  }
+  // UserDAO.deactivateDevice
+  if (s.startsWith('UPDATE user_devices') && s.includes('is_active = FALSE')) {
+    deactivateDeviceCalls.push({ userId: params[0], deviceUuid: params[1] });
+    return { rowCount: 1 };
+  }
+  // UserDAO.listDevices
+  if (s.startsWith('SELECT id, device_uuid') && s.includes('FROM user_devices')) {
+    return { rows: [] };
+  }
+  // UserDAO.reactivate — ⚠️ 이 쿼리 자체엔 WHERE 가드가 없다(발견한 결함, 구현 보고서 참조).
+  if (s.startsWith('UPDATE users') && s.includes('deleted_at = NULL') && s.includes('firebase_uid = $1')) {
+    reactivateCalls.push(params[0]);
+    const row = usersByUid[params[0]];
+    if (!row) return { rows: [] };
+    row.status = 0;
+    row.deleted_at = null;
+    return { rows: [{ id: row.id, firebase_uid: row.firebase_uid, email: row.email, provider: row.provider, status: row.status, created_at: NOW, updated_at: NOW }] };
+  }
+
+  throw new Error(`[mock] Unhandled query: ${s.slice(0, 160)} params=${JSON.stringify(params)}`);
+}
+
+const mockDb = { query: mockQuery, connect: async () => ({ query: mockQuery, release() {} }) };
+require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: mockDb };
+
+const authService = require('./authService');
+const eventBus = require('../events/eventBus');
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+function check(desc, cond, detail) { if (cond) pass++; else { fail++; failures.push(detail ? `${desc}: ${detail}` : desc); } }
+
+async function expectRejected(desc, fn, { statusCode, errorCode } = {}) {
+  try {
+    await fn();
+    fail++;
+    failures.push(`${desc}: 거부를 기대했지만 통과해버림`);
+  } catch (err) {
+    const statusOk = statusCode === undefined || err.statusCode === statusCode;
+    const codeOk = errorCode === undefined || err.errorCode === errorCode;
+    if (statusOk && codeOk) pass++;
+    else { fail++; failures.push(`${desc}: 예상 status=${statusCode} code=${errorCode}, 실제 status=${err.statusCode} code=${err.errorCode} msg=${err.message}`); }
+  }
+}
+
+async function run() {
+  // ============ ① getMe — 활성 사용자, {user, settings, status} 반환 + updateLastActivity 호출 ============
+  reset();
+  {
+    const result = await authService.getMe('uid-active');
+    check('① getMe가 활성 사용자를 반환한다', !!result && result.status === 0, `실제=${JSON.stringify(result)}`);
+    check('① status가 user 객체 밖으로 분리돼 있다(user에 status 없음)', result && result.user && result.user.status === undefined);
+    check('① settings가 함께 반환된다', result && result.settings && result.settings.language_code === 'ko');
+    check('① updateLastActivity가 호출된다', updateLastActivityCalls.includes('uid-active'));
+  }
+
+  // ============ ② getMe — 소프트 삭제(영구 차단)된 사용자는 null(§1-4·E2, 핵심) ============
+  reset();
+  {
+    const result = await authService.getMe('uid-deleted');
+    check('② 소프트 삭제된 사용자는 getMe가 null을 반환한다(존재를 위장)', result === null, `실제=${JSON.stringify(result)}`);
+  }
+
+  // ============ ③ getMe — 미가입 사용자도 null(신규 가입 유도, H1·E9) ============
+  reset();
+  {
+    const result = await authService.getMe('uid-new');
+    check('③ 미가입 사용자도 null(신규 가입과 동일하게 보인다)', result === null);
+  }
+
+  // ============ ④ register — 정상 가입: INSERT 3종 + claim 발급 + user:registered emit ============
+  reset();
+  {
+    let emitted = null;
+    const onRegistered = (payload) => { emitted = payload; };
+    eventBus.on('user:registered', onRegistered);
+    try {
+      const result = await authService.register(
+        { uid: 'uid-new', email: 'new@x.com', name: 'New User', firebase: { sign_in_provider: 'google' } },
+        { device_info: { device_uuid: 'dev-1', device_type: 'ios' } }
+      );
+      check('④ user 반환', !!result.user);
+      check('④ users INSERT 1건', insertedUsers.length === 1 && insertedUsers[0].email === 'new@x.com');
+      check('④ user_infos INSERT 1건', insertedInfos.length === 1);
+      check('④ user_settings INSERT 1건(기본 설정)', insertedSettings.length === 1);
+      check('④ device_info이 있으면 user_devices도 INSERT된다', insertedDevices.length === 1);
+      check('④ setCustomUserClaims가 db_user_id로 호출된다', claimCalls.length === 1 && claimCalls[0].uid === 'uid-new' && !!claimCalls[0].claims.db_user_id);
+      check("④ eventBus.emit('user:registered')가 발생한다", !!emitted && emitted.provider === 'google');
+      check('④ cleanupFailedRegistration은 호출되지 않는다(성공 경로)', cleanupCalls.length === 0);
+    } finally {
+      eventBus.off('user:registered', onRegistered);
+    }
+  }
+
+  // ============ ⑤ register — 이미 가입된 이메일은 거부(E8 "또는 ConflictException") ============
+  reset();
+  await expectRejected(
+    '⑤ 이미 가입된 이메일은 ConflictError',
+    () => authService.register({ uid: 'uid-dup', email: 'active@x.com', name: 'Dup' }, {}),
+    { statusCode: 409 }
+  );
+
+  // ============ ⑥ register — setCustomUserClaims 실패 시 가입 롤백 + 503(§1-3·1-4 다이어그램의 핵심 설계) ============
+  reset();
+  claimShouldFail = true;
+  await expectRejected(
+    '⑥ claim 발급 실패 시 503/CLAIM_ISSUANCE_FAILED',
+    () => authService.register({ uid: 'uid-claimfail', email: 'claimfail@x.com', name: 'ClaimFail' }, {}),
+    { statusCode: 503, errorCode: 'CLAIM_ISSUANCE_FAILED' }
+  );
+  check('⑥ users INSERT는 됐다가(가입 시도 자체는 성공)', insertedUsers.length === 1 && insertedUsers[0].email === 'claimfail@x.com');
+  check('⑥ cleanupFailedRegistration이 4개 테이블 모두에 대해 호출된다(hard delete 롤백)',
+    cleanupCalls.length === 4 && ['user_devices', 'user_settings', 'user_infos', 'users'].every((t) => cleanupCalls.some((c) => c.sql.includes(`DELETE FROM ${t}`))),
+    `실제=${JSON.stringify(cleanupCalls.map((c) => c.sql))}`);
+  check('⑥ cleanupFailedRegistration이 새로 만든 user.id를 대상으로 한다(다른 사용자 오염 아님)',
+    cleanupCalls.every((c) => c.userId === insertedUsers[0].id));
+
+  // ============ ⑦ reactivate — inactive(status=1) 사용자를 active로 복귀(E1 happy path) ============
+  reset();
+  {
+    const result = await authService.reactivate('uid-inactive', {});
+    check('⑦ reactivate 후 status=0(active)', result && result.status === 0, `실제=${JSON.stringify(result)}`);
+    check('⑦ reactivate가 실제 DAO를 호출했다', reactivateCalls.includes('uid-inactive'));
+    usersByUid['uid-inactive'].status = 1; // 다음 시나리오를 위해 원복(픽스처는 mutable)
+  }
+
+  // ============ ⑧ logout — deviceUuid 있으면 deactivateDevice, 미가입 사용자는 조용히 종료(예외 없음) ============
+  reset();
+  {
+    await authService.logout('uid-active', 'dev-1');
+    check('⑧ logout이 deactivateDevice를 호출한다', deactivateDeviceCalls.length === 1 && deactivateDeviceCalls[0].deviceUuid === 'dev-1');
+  }
+  reset();
+  {
+    let threw = false;
+    try { await authService.logout('uid-not-registered', 'dev-1'); } catch { threw = true; }
+    check('⑧ 미가입 사용자의 logout은 예외를 던지지 않는다(조용히 종료)', !threw);
+    check('⑧ 미가입 사용자면 deactivateDevice를 호출하지 않는다', deactivateDeviceCalls.length === 0);
+  }
+
+  // ============ ⑨ removeDevice — 미가입 사용자는 false(크래시·사용자 열거 없음) ============
+  reset();
+  {
+    const result = await authService.removeDevice('uid-not-registered', 'dev-1');
+    check('⑨ 미가입 사용자의 removeDevice는 false(예외 아님)', result === false);
+  }
+
+  console.log(`\n[authServiceRegression] PASS=${pass} FAIL=${fail} (총 ${pass + fail}건)`);
+  if (failures.length) {
+    console.log('--- 실패 목록 ---');
+    failures.forEach((f) => console.log(' - ' + f));
+    process.exitCode = 1;
+  }
+}
+
+run().catch((error) => {
+  console.error('[authServiceRegression] 실행 실패:', error);
+  process.exitCode = 1;
+});
