@@ -7,8 +7,10 @@ const getMe = asyncHandler(async (req, res) => {
 });
 
 const register = asyncHandler(async (req, res) => {
-  const { user, settings } = await authService.register(req.user, req.body);
-  res.status(201).json({ success: true, data: { user, settings }, message: "사용자가 등록되었습니다" });
+  // 가입 트랜잭션이 만든 기본 바인더도 그대로 전달한다. 여기서 binder를 버리면
+  // 클라이언트는 사용자는 저장했지만 초기 바인더를 복원할 수 없어 첫 실행이 실패한다.
+  const { user, settings, binder } = await authService.register(req.user, req.body);
+  res.status(201).json({ success: true, data: { user, settings, binder }, message: "사용자가 등록되었습니다" });
 });
 
 const updateMe = asyncHandler(async (req, res) => {

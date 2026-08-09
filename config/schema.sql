@@ -1,21 +1,37 @@
 -- ============================================================
 -- Rally Database Schema
--- 2026-06-08 | spec: docs/database/schema.md
 --
--- DROP TABLE ... CASCADE 포함 — 개발/시뮬레이터 DB 전용
--- DBeaver: Ctrl+A → Alt+X
+-- ⚠️ 이 헤더에 "최종 수정일"을 손으로 적지 않는다. 2026-08-09까지 최초 작성일(2026-06-08)이
+--    박혀 있었고, 그 사이 16개 커밋이 이 파일을 고쳤다. 두 달 묵은 파일로 오인돼 "이걸 넣는 게
+--    맞냐"를 되묻는 데 시간이 들었다. 실제 갱신 시점은 `git log -1 -- config/schema.sql`이
+--    말해 준다 — 사람이 옮겨 적는 순간 틀린다.
+--
+-- 이 파일이 맞춰져 있는 대상: **현재 서버 코드**(src/**). 다음 셋으로 확인한다.
+--   · 테이블  — 소스 SQL이 참조하는 테이블이 전부 여기 있는지
+--   · 컬럼    — `npm run test:drift` (소스 SQL의 컬럼 참조 ↔ 이 파일)
+--   · 이력    — migrations/ 의 모든 마이그레이션이 여기 흡수됐는지
+--
+-- 이 파일이 맞춰져 있지 **않은** 대상: `docs/database/schema.md`(설계 확정본).
+--   fork anchor·typed schedule·occurrence_key 등은 설계만 확정되고 서버 착수 전이라
+--   여기에 없는 것이 정상이다. 그 목록과 규칙은 schema.md 상단 "서버 미착수" 표에 있다.
+--
+-- 순수 CREATE — DROP 문을 두지 않는다. **빈 DB에만** 적용한다.
+--
+-- 테이블이 이미 있으면 `relation "..." already exists`로 즉시 멈추는 것이 정상 동작이다.
+-- 구 버전은 각 SECTION 앞에 DROP TABLE IF EXISTS를 두었으나, 그러면 "빈 DB에 새로 만들었다"와
+-- "망가진 채 남아 있던 테이블을 조용히 갈아치웠다"가 출력상 구분되지 않는다. 게다가 그 DROP
+-- 목록은 이 파일이 아는 테이블만 지우므로, 폐기된 설계의 테이블(section_groups·
+-- event_series_versions·cast_instances 등)은 몇 번을 재실행해도 DB에 영원히 남았다.
+-- 초기화는 DB 쪽에서 한다 — 클라이언트(Postico 등)에서 전체 선택 후 삭제하거나
+-- `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`.
+--
+-- psql: psql -U <user> -d <db> -v ON_ERROR_STOP=1 -f config/schema.sql
 -- ============================================================
 
 
 -- ============================================================
 -- SECTION 1: USERS
 -- ============================================================
-
-DROP TABLE IF EXISTS user_terms_consents  CASCADE;
-DROP TABLE IF EXISTS user_settings        CASCADE;
-DROP TABLE IF EXISTS user_devices         CASCADE;
-DROP TABLE IF EXISTS user_infos           CASCADE;
-DROP TABLE IF EXISTS users                CASCADE;
 
 CREATE TABLE users (
   id                  UUID         NOT NULL,
@@ -111,14 +127,6 @@ CREATE INDEX idx_consent_user ON user_terms_consents (user_id, consented_at DESC
 -- ============================================================
 -- SECTION 2: BINDERS
 -- ============================================================
-
-DROP TABLE IF EXISTS binder_storage_usage  CASCADE;
-DROP TABLE IF EXISTS binder_boosts         CASCADE;
-DROP TABLE IF EXISTS binder_join_requests  CASCADE;
-DROP TABLE IF EXISTS binder_invitations    CASCADE;
-DROP TABLE IF EXISTS binder_members        CASCADE;
-DROP TABLE IF EXISTS binder_settings       CASCADE;
-DROP TABLE IF EXISTS binders               CASCADE;
 
 CREATE TABLE binders (
   id               UUID        NOT NULL,
@@ -246,9 +254,6 @@ CREATE TABLE binder_storage_usage (
 -- SECTION 3: CALENDARS
 -- ============================================================
 
-DROP TABLE IF EXISTS calendar_subscriptions CASCADE;
-DROP TABLE IF EXISTS calendars               CASCADE;
-
 CREATE TABLE calendars (
   id          UUID        NOT NULL,
   binder_id   UUID        NOT NULL,
@@ -282,11 +287,6 @@ CREATE INDEX idx_cal_subs_sync ON calendar_subscriptions (user_id, updated_at);
 -- ============================================================
 -- SECTION 4: EVENTS
 -- ============================================================
-
-DROP TABLE IF EXISTS event_sections        CASCADE;
-DROP TABLE IF EXISTS event_participants  CASCADE;
-DROP TABLE IF EXISTS event_instances     CASCADE;
-DROP TABLE IF EXISTS events              CASCADE;
 
 CREATE TABLE events (
   id          UUID        NOT NULL,
@@ -361,11 +361,6 @@ CREATE INDEX idx_event_part_sync ON event_participants (instance_id, updated_at)
 -- ============================================================
 -- SECTION 5: TASKS
 -- ============================================================
-
-DROP TABLE IF EXISTS task_sections        CASCADE;
-DROP TABLE IF EXISTS task_participants  CASCADE;
-DROP TABLE IF EXISTS task_instances     CASCADE;
-DROP TABLE IF EXISTS tasks              CASCADE;
 
 CREATE TABLE tasks (
   id          UUID        NOT NULL,
@@ -443,18 +438,6 @@ CREATE INDEX idx_task_part_sync ON task_participants (instance_id, updated_at);
 -- SECTION 5.5: SECTIONS (before event_sections / task_sections)
 -- ============================================================
 
-DROP TABLE IF EXISTS section_message_cursors CASCADE;
-DROP TABLE IF EXISTS message_poll_votes      CASCADE;
-DROP TABLE IF EXISTS message_poll_options    CASCADE;
-DROP TABLE IF EXISTS message_polls           CASCADE;
-DROP TABLE IF EXISTS message_mentions        CASCADE;
-DROP TABLE IF EXISTS message_reactions       CASCADE;
-DROP TABLE IF EXISTS message_embeds          CASCADE;
-DROP TABLE IF EXISTS attachments              CASCADE;
-DROP TABLE IF EXISTS section_messages         CASCADE;
-DROP TABLE IF EXISTS section_members          CASCADE;
-DROP TABLE IF EXISTS sections                CASCADE;
-
 CREATE TABLE sections (
   id             UUID        NOT NULL,
   binder_id      UUID        NOT NULL,
@@ -516,9 +499,6 @@ CREATE TABLE task_sections (
 -- SECTION 5.6: GROUPS (멤버 추가 프리셋)
 -- ============================================================
 
-DROP TABLE IF EXISTS group_members  CASCADE;
-DROP TABLE IF EXISTS groups         CASCADE;
-
 CREATE TABLE groups (
   id          UUID        NOT NULL,
   binder_id   UUID        NOT NULL,
@@ -554,9 +534,6 @@ CREATE INDEX idx_gm_group ON group_members (group_id) WHERE deleted_at IS NULL;
 -- ============================================================
 -- SECTION 6: SPECIAL DAYS
 -- ============================================================
-
-DROP TABLE IF EXISTS holidays     CASCADE;
-DROP TABLE IF EXISTS special_days CASCADE;
 
 CREATE TABLE special_days (
   id                   UUID        NOT NULL,
@@ -814,9 +791,6 @@ CREATE INDEX idx_scmc_sync ON section_message_cursors (user_id, updated_at);
 -- SECTION 8: CASTS (F2)
 -- ============================================================
 
-DROP TABLE IF EXISTS cast_comments CASCADE;
-DROP TABLE IF EXISTS casts         CASCADE;
-
 CREATE TABLE casts (
   id              UUID         NOT NULL,
   calendar_id     UUID         NOT NULL,
@@ -864,10 +838,6 @@ CREATE INDEX idx_cast_comment_cast ON cast_comments (cast_id, created_at DESC)
 -- ============================================================
 -- SECTION 9: POSTS (F3)
 -- ============================================================
-
-DROP TABLE IF EXISTS post_likes     CASCADE;
-DROP TABLE IF EXISTS post_comments  CASCADE;
-DROP TABLE IF EXISTS posts          CASCADE;
 
 CREATE TABLE posts (
   id              UUID         NOT NULL,
@@ -927,12 +897,6 @@ CREATE TABLE post_likes (
 -- ============================================================
 -- SECTION 10: AUDITS & NOTIFICATIONS
 -- ============================================================
-
-DROP TABLE IF EXISTS activity_feed_cursors CASCADE;
-DROP TABLE IF EXISTS reminders              CASCADE;
-DROP TABLE IF EXISTS notifications          CASCADE;
-DROP TABLE IF EXISTS activity_feeds         CASCADE;
-DROP TABLE IF EXISTS audit_logs             CASCADE;
 
 CREATE TABLE audit_logs (
   id          BIGINT      NOT NULL GENERATED ALWAYS AS IDENTITY,
@@ -1059,11 +1023,6 @@ CREATE INDEX idx_noti_recipient_cursor ON notifications (recipient_id, is_read, 
 -- ============================================================
 -- SECTION 11: BILLING
 -- ============================================================
-
-DROP TABLE IF EXISTS user_assets           CASCADE;
-DROP TABLE IF EXISTS subscription_events   CASCADE;
-DROP TABLE IF EXISTS payment_receipt_logs  CASCADE;
-DROP TABLE IF EXISTS user_subscriptions    CASCADE;
 
 CREATE TABLE user_subscriptions (
   id                      UUID         NOT NULL,
